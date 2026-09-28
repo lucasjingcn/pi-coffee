@@ -172,7 +172,8 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worktrees are created. |
 | `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker model (first attempt). |
 | `PI_MCP_STRONG_MODEL` | `deepseek-v4-pro` | Model a worker is escalated to on a retry. |
-| `PI_MCP_MAX_SESSIONS` | `8` | Concurrency cap. |
+| `PI_MCP_MAX_SESSIONS` | `8` | Hard concurrency cap. |
+| `PI_MCP_PARALLEL_WARN` | `4` | Soft parallelism guideline; `pi_spawn` warns at/above this many active workers. |
 | `PI_MCP_BASE_REF` | `HEAD` | Branch base for new worktrees. |
 | `PI_MCP_AUTO_CLEAN` | `1` | Auto-remove finished workers' worktrees (branches kept). |
 | `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished+idle worker is kept before the sweeper cleans it. |

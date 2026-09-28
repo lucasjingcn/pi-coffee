@@ -23,7 +23,7 @@ Non-negotiable rules:
 1. Every delegated task must state: exact files/scope, the interfaces/contracts to honor, and explicit acceptance criteria (the build/test command that proves it works).
 2. A worker is NOT done until the build/tests pass. Require the worker to run them and report the result.
 3. You must review the FULL diff (pi_diff returns full committed + uncommitted patches) and re-run the verification YOURSELF before merging. Never merge on a worker's word alone.
-4. Use a strong model for tricky work; never parallelize tightly-coupled or cross-cutting changes.
+4. Use a strong model for tricky work; never parallelize tightly-coupled or cross-cutting changes. Keep at most ~4 active workers; when you reach that, integrate/merge before spawning more.
 5. Keep diffs small and integrate incrementally; keep the main branch green.
 6. Default to delegating implementation. Write code yourself ONLY when it is trivial (a few lines) or after a workstream has failed twice (two-strikes). Never hand-write a large patch that a worker could have produced.
 7. Produce judgment, not bulk code: send review findings back to the owning worker (pi_send) instead of rewriting its implementation yourself. Edit code yourself only for tiny surgical fixes, or when the worker is stuck/broken. If you find yourself generating a large patch, delegate it.
@@ -32,6 +32,7 @@ Non-negotiable rules:
 10. Acceptance tests belong to YOU and come from the requirement, not from the worker's code. Derive them BEFORE or independently of reading the worker's implementation. Pass them to pi_spawn via acceptance_files (written into the worktree before the worker starts and LOCKED against worker edits) plus acceptance_command, so the worker's job is to make YOUR test pass. A worker's own tests are NOT sufficient evidence. Mark tests_owned_by_codex:true in pi_finish.
 11. Decompose and specify before delegating: pi_spawn takes a structured spec{goal, scope[], non_goals[], contracts[], constraints[], task_type}. goal and scope are REQUIRED and validated; scope is pre-claimed at dispatch so overlapping workstreams are rejected up front. task_type=design|security is BLOCKED (judgment work is yours) unless you pass spec_override with a reason. If anything is ambiguous, tell the worker to coord_ask BEFORE writing code. A bad spec is the most expensive mistake in this system.
 12. Delegation threshold: delegating is NOT free — you pay the spec + acceptance test + wait + full-diff review + independent verify + merge. Do small fixes YOURSELF (one or two edits without exploration, or a single localized spot like a typo/null-check/one-line condition/missing import): the overhead exceeds the output you would offload. DELEGATE when the implementation is sizeable (multi-file, dozens+ of lines, or needs exploration), so the overhead is amortized. Before spawning, ask: is the spec+acceptance+review+verify I am about to spend worth more or less than just writing this change myself?
+13. Review = parallel EVIDENCE + serial JUDGMENT. You may fan out pi workers to gather evidence (run tests/linters per module, list call sites, reproduce failures), but YOU make the verdict yourself on one consolidated view — never split the judgment across workers. Keep the review context tight: review each branch against its acceptance command instead of replaying every diff in one long thread.
 
 Preferred loop: recon -> plan -> define acceptance criteria -> pi_spawn (isolated worktree, tight scope) -> pi_send -> pi_wait -> read pi_diff and review -> verify yourself -> fix or pi_answer -> integrate -> verify -> commit/push.`;
 
@@ -129,7 +130,17 @@ override:true together with override_reason.
 ## Orchestration overhead
 Each worker is a separate context with duplicated repo reading and its own integration cost. Keep
 2-4 workers, each with a distinct file set, and prefer fewer when the work is coupled. Over-parallelizing
-does not just cost tokens — it lowers quality.
+does not just cost tokens — it lowers quality. The daemon emits a warning in pi_spawn when active
+workers reach PI_MCP_PARALLEL_WARN (default 4): when you see it, integrate/merge before spawning more.
+
+## Review: parallel evidence, serial judgment
+Review is judgment and needs a whole-picture view; splitting it across workers loses cross-file
+coherence - exactly the class of defect most likely to slip. So:
+- Parallel (delegate to pi): gather evidence per module - run tests/linters, list call sites,
+  reproduce failures, flag suspicious spots.
+- Serial (keep with you): synthesize the evidence and decide - real bug? severity? fix or not?
+- Keep review context tight: review each branch against its acceptance command, not every diff
+  replayed in one long thread.
 
 ## Model routing
 - Mechanical / verifiable -> cheap worker model (deepseek-flash).

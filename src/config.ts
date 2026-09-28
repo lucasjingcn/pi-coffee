@@ -20,6 +20,8 @@ export interface Config {
   strongModel: string;
   /** Hard cap on concurrent pi sessions. */
   maxSessions: number;
+  /** Soft parallelism guideline: warn when this many workers are active. */
+  parallelWarnThreshold: number;
   /** Path to the worker-side pi extension. */
   extensionPath: string;
   /** Optional shared secret checked on the internal API and /mcp. */
@@ -54,6 +56,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     model: env("PI_MCP_MODEL") ?? "deepseek-flash",
     strongModel: env("PI_MCP_STRONG_MODEL") ?? "deepseek-v4-pro",
     maxSessions: Number(env("PI_MCP_MAX_SESSIONS") ?? 8),
+    parallelWarnThreshold: Number(env("PI_MCP_PARALLEL_WARN") ?? 4),
     extensionPath:
       env("PI_MCP_EXTENSION") ?? resolve(here, "..", "extensions", "pi-coordinator.ts"),
     token: env("PI_MCP_TOKEN") ?? "",

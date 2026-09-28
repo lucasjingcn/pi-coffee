@@ -163,6 +163,12 @@ export function buildServer(coord: Coordinator): McpServer {
       if (!args.acceptance_files?.length) {
         warnings.push("no acceptance_files provided: test-first delegation is strongly recommended");
       }
+      const activeWorkers = coord.activeWorkers();
+      if (activeWorkers >= coord.config.parallelWarnThreshold) {
+        warnings.push(
+          `high parallelism: ${activeWorkers} workers already active (guideline <= ${coord.config.parallelWarnThreshold}). Integrate/merge before spawning more; over-parallelizing raises integration cost and lowers review quality.`,
+        );
+      }
       const meta = await coord.spawn({
         task: args.task,
         repo: args.repo,

@@ -530,6 +530,11 @@ export class Coordinator {
     return n;
   }
 
+  /** Public: number of active workers (for the parallelism advisory). */
+  activeWorkers(): number {
+    return this.activeCount();
+  }
+
   /** Claim a concurrency slot synchronously; throws when the cap (including in-flight spawns) is hit. */
   private reserveSlot(): void {
     if (this.activeCount() + this.reserved >= this.config.maxSessions) {

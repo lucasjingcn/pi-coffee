@@ -97,6 +97,17 @@ gate, not advice: `pi_send` refuses the third instruction unless you pass `overr
 ## Orchestration overhead
 Each worker is a separate context with duplicated repo reading and its own integration cost. Keep
 2-4 workers, each with a distinct file set. Over-parallelizing costs tokens AND lowers quality.
+`pi_spawn` warns when active workers reach `PI_MCP_PARALLEL_WARN` (default 4) - when you see it,
+integrate/merge before spawning more.
+
+## Review: parallel evidence, serial judgment
+Review is judgment and needs a whole-picture view; splitting it across workers loses cross-file
+coherence - exactly the class of defect most likely to slip. So:
+- Parallel (delegate to pi): gather evidence per module - run tests/linters, list call sites,
+  reproduce failures, flag suspicious spots.
+- Serial (keep with you): synthesize the evidence and decide - real bug? severity? fix or not?
+- Keep review context tight: review each branch against its acceptance command, not every diff
+  replayed in one long thread.
 
 ## Model routing
 - Mechanical / verifiable -> cheap worker model (`deepseek-flash`).
