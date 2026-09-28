@@ -4,12 +4,12 @@
  *
  * Boots the daemon against a throwaway git repo and exercises the full control surface:
  * spec linter, task-type gate, scope overlap, acceptance test-first + lock, committed-diff,
- * two-strikes gate, adaptive model escalation, finish/report, and scoreboard persistence.
+ * two-strikes gate, model routing, finish/report, and scoreboard persistence.
  *
  * In the default live mode the daemon drives real `pi` workers (a couple of tiny prompts).
  * With SMOKE_LIVE=0 the smoke is fully deterministic and credential-free: it installs a
  * disposable fake `pi` that speaks just enough JSONL RPC (state/stats/prompt/model) and never
- * touches installed pi or any model provider. Adaptive model escalation and the two-strikes
+ * touches installed pi or any model provider. Model routing and the two-strikes
  * gate are exercised in both modes (against the fake offline, real models live).
  *
  * The daemon is always started with an isolated environment (own host/port/data dir/worktree
@@ -310,10 +310,14 @@ async function main() {
   r = await mcpCall("pi_report", {});
   check("H  report counts the closed workstream", (r.data?.counts?.success_first || 0) >= 1, r.data?.counts);
 
-  // --- adaptive escalation + two-strikes (fake pi offline, real models live) -------------
+  // --- model routing + two-strikes (fake pi offline, real models live) --------------------
   await mcpCall("pi_wait", { session_ids: [s3.id], until: "settled", timeout_ms: 60000 });
   r = await mcpCall("pi_send", { session_id: s3.id, message: "Reply with exactly OK and stop." });
-  check("L1  retry (attempt 2) auto-escalates the model", !!r.data?.escalated_to && r.data?.instructions_sent === 2, r.data);
+  check(
+    "L1  retry (attempt 2) does NOT auto-escalate the model",
+    !r.data?.escalated_to && r.data?.instructions_sent === 2,
+    r.data,
+  );
   r = await mcpCall("pi_send", { session_id: s3.id, message: "third instruction" });
   check("L2  third instruction blocked (two-strikes)", r.isError && r.data?.rule === "two-strikes", r.data);
 
