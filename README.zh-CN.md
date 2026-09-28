@@ -74,6 +74,25 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
 
 ## 为什么能省钱
 
+同一个任务，两种做法：
+
+```mermaid
+flowchart LR
+    subgraph before["以前：让一个贵模型从头写到尾"]
+        direction TB
+        R1([需求]) --> E1["贵模型<br/>写下每一行"] --> M1([合并])
+    end
+    subgraph after["用 pi-coffee：贵模型统筹，便宜模型写代码"]
+        direction TB
+        R2([需求]) --> E2["贵模型<br/>规划 / spec / 验收测试"]
+        E2 --> W1["Worker 1<br/>便宜模型"]
+        E2 --> W2["Worker 2<br/>便宜模型"]
+        W1 --> E3["贵模型<br/>审查 / 验证"]
+        W2 --> E3
+        E3 --> M2([合并])
+    end
+```
+
 假设你要加一个功能。把 MCP 客户端（比如 Codex）接到 pi-coffee，让它继续当统筹方。Codex 规划改动、
 写好 spec 和验收测试，再把实现交给跑在便宜模型上的 worker —— 默认就是 DeepSeek
 （`PI_COFFEE_PROVIDER=deepseek`、`PI_COFFEE_MODEL=deepseek-flash`）。worker 在隔离的 worktree 里写代码、
@@ -489,20 +508,10 @@ docker compose build --pull && docker compose up -d
 
 ```bash
 # 先停掉 daemon（服务、`docker compose down`，或对 ./run.sh 按 Ctrl-C）
-rm -rf ~/.pi-coffee ~/.pi-mcp                    # daemon 状态与凭据
+rm -rf ~/.pi-coffee                              # daemon 状态与凭据
 rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
 codex mcp remove pi
 ```
-
-### 从 pi-mcp 迁移
-
-项目以前叫 `pi-mcp`，用的是 `PI_MCP_*` 变量和 `~/.pi-mcp` 目录。如果你装过旧版本，迁移状态即可：
-
-```bash
-mv ~/.pi-mcp ~/.pi-coffee                         # 或者：export PI_COFFEE_DATA_DIR=~/.pi-mcp
-```
-
-env 文件里把所有 `PI_MCP_*` 变量改名成 `PI_COFFEE_*`（例如 `PI_MCP_TOKEN` → `PI_COFFEE_TOKEN`）。
 
 ## 已知限制
 

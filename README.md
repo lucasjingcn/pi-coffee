@@ -80,6 +80,25 @@ of this document is the mechanics.
 
 ## Why it saves money
 
+The same work, two ways:
+
+```mermaid
+flowchart LR
+    subgraph before["Before: one expensive model does everything"]
+        direction TB
+        R1([Requirement]) --> E1["Expensive model<br/>writes every line"] --> M1([Merge])
+    end
+    subgraph after["With pi-coffee: expensive model manages, cheap models write"]
+        direction TB
+        R2([Requirement]) --> E2["Expensive model<br/>plan / spec / tests"]
+        E2 --> W1["Worker 1<br/>cheap model"]
+        E2 --> W2["Worker 2<br/>cheap model"]
+        W1 --> E3["Expensive model<br/>review / verify"]
+        W2 --> E3
+        E3 --> M2([Merge])
+    end
+```
+
 Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-coffee and let it
 stay the manager. Codex plans the change, writes the spec and the acceptance test, and hands the
 implementation to workers running on a cheap model — DeepSeek by default
@@ -520,22 +539,10 @@ To remove everything:
 
 ```bash
 # stop the daemon first (the service, `docker compose down`, or Ctrl-C on ./run.sh)
-rm -rf ~/.pi-coffee ~/.pi-mcp                    # daemon state and credentials
+rm -rf ~/.pi-coffee                              # daemon state and credentials
 rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
 codex mcp remove pi
 ```
-
-### Upgrading from pi-mcp
-
-The project was previously called `pi-mcp`, using `PI_MCP_*` variables and `~/.pi-mcp` for state. If
-you have an older install, either move the state or point at it:
-
-```bash
-mv ~/.pi-mcp ~/.pi-coffee                         # or: export PI_COFFEE_DATA_DIR=~/.pi-mcp
-```
-
-In your env file, rename every `PI_MCP_*` variable to `PI_COFFEE_*` (for example `PI_MCP_TOKEN` to
-`PI_COFFEE_TOKEN`).
 
 ## Known limitations
 
