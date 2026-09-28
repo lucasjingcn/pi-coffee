@@ -9,8 +9,8 @@ async function bridge(handler, wire) {
   const child = spawn(process.execPath, ['dist/stdio-proxy.js'], {
     env: {
       ...process.env,
-      PI_MCP_URL: 'http://127.0.0.1:' + server.address().port + '/mcp',
-      PI_MCP_TOKEN: '',
+      PI_COFFEE_URL: 'http://127.0.0.1:' + server.address().port + '/mcp',
+      PI_COFFEE_TOKEN: '',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });

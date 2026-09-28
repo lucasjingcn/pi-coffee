@@ -2,10 +2,9 @@
 
 # pi-coffee
 
-pi-coffee 是 **pi-mcp** 这个项目的仓库。pi-mcp 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理。
-任何支持 MCP 的客户端都能驱动它——Codex 是参考客户端，Claude、Cursor 等同样可用。（npm 包名、
-`bin` 名和 MCP server 名都叫 `pi-mcp`，只有这个仓库叫 `pi-coffee`。）客户端充当统筹方：把任务拆成
-边界清楚的几块，交给不同的代理，审查它们交回来的东西，最后合并。真正敲代码的是那些代理。
+pi-coffee 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理。任何支持 MCP 的客户端都能驱动它
+——Codex 是参考客户端，Claude、Cursor 等同样可用。客户端充当统筹方：把任务拆成边界清楚的几块，
+交给不同的代理，审查它们交回来的东西，最后合并。真正敲代码的是那些代理。
 
 同一个仓库上挂两个代理，默认结果就是互相覆盖。这里换了个做法：每个代理在自己的 git worktree、
 自己的分支上干活；动手写某个文件之前先声明；需要沟通时给别的代理发消息，或者直接向统筹方提问。
@@ -25,6 +24,7 @@ pi-coffee 是 **pi-mcp** 这个项目的仓库。pi-mcp 是一个 MCP 服务，�
 - [环境要求](#环境要求)
 - [安装与启动](#安装与启动)
 - [让 Codex 连上 daemon](#让-codex-连上-daemon)
+- [Docker](#docker)
 - [一个任务的全过程](#一个任务的全过程)
 - [部署](#部署)
 - [工具参考](#工具参考)
@@ -45,7 +45,7 @@ pi-coffee 是 **pi-mcp** 这个项目的仓库。pi-mcp 是一个 MCP 服务，�
 又长又难合的分支。通常的应对要么是复制整个仓库，要么把活儿全部串起来，前者把并行度浪费掉，后者
 把你的时间浪费掉。
 
-pi-mcp 反过来做：给每个代理一个独立 worktree，把“谁在写哪个文件”这件事讲明白，并且始终只留
+pi-coffee 反过来做：给每个代理一个独立 worktree，把“谁在写哪个文件”这件事讲明白，并且始终只留
 Codex 一个负责人对结果负责。思路就这么点，下面都是具体机制。
 
 ## 它能给你什么
@@ -63,9 +63,9 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
 
 ## 典型用法：贵的模型做判断，便宜的模型写代码
 
-假设你要加一个功能。把 MCP 客户端（比如 Codex）接到 pi-mcp，让它继续当统筹方。Codex 规划改动、
+假设你要加一个功能。把 MCP 客户端（比如 Codex）接到 pi-coffee，让它继续当统筹方。Codex 规划改动、
 写好 spec 和验收测试，再把实现交给跑在便宜模型上的 worker —— 默认就是 DeepSeek
-（`PI_MCP_PROVIDER=deepseek`、`PI_MCP_MODEL=deepseek-flash`）。worker 在隔离的 worktree 里写代码、
+（`PI_COFFEE_PROVIDER=deepseek`、`PI_COFFEE_MODEL=deepseek-flash`）。worker 在隔离的 worktree 里写代码、
 跑测试；Codex 审查 diff 并验证结果。绝大部分生成的代码不会经过贵模型的输出，省下来的 token 就是
 从这儿来的。
 
@@ -87,7 +87,7 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
 
 ```mermaid
 flowchart LR
-    Codex[MCP 客户端<br/>如 Codex] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>注册表 · 锁 · 信箱 · 黑板]
+    Codex[MCP 客户端<br/>如 Codex] -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>注册表 · 锁 · 信箱 · 黑板]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -109,11 +109,12 @@ worker 通过 stdin/stdout 上的 JSONL 和 daemon 通信，daemon 再通过 MCP
 |---|---|
 | **Node.js ≥ 22.19** | 运行时和测试都需要。CI 覆盖 22.19 和 24。 |
 | **git** | worktree、diff、merge、分支清理都靠它。 |
-| **pi** | 已安装，且以 daemon 用户身份登录。 |
+| **pi** | `install.sh` 可以帮你装。它支持从环境变量读 API key，所以交互式 `/login` 是可选的。 |
 | **MCP 客户端** | Codex 是参考实现，任何支持 MCP 的客户端都可用。 |
 
-**请让 daemon、Codex 和 worker 用同一个 Unix 用户跑。** 它们要共享文件属主和同一个
-`~/.pi/agent/auth.json`。不需要 root，只要这个用户能正常用 `pi`、并且对仓库有写权限就行。
+**请让 daemon、Codex 和 worker 用同一个 Unix 用户跑。** 它们要共享文件属主。provider 凭据可以来自
+下面生成的 env 文件，也可以来自 pi 自己的 `~/.pi/agent/auth.json`。不需要 root，只要这个用户能正常
+用 `pi`、并且对仓库有写权限就行。
 
 ## 安装与启动
 
@@ -127,12 +128,28 @@ cd pi-coffee
 然后：
 
 ```bash
-./install.sh     # npm install + 构建 + 安装 Codex skill + 注册 MCP server
+./install.sh     # 依赖 + 构建 + Codex skill + 注册 MCP + pi/provider 配置
 ./run.sh         # 前台启动 daemon（http://127.0.0.1:8787）
 ```
 
-`install.sh` 会把 **stdio 代理**注册成 Codex 的 MCP server。代理负责转发到 HTTP daemon 并自动重连，
-所以重启 daemon 不会把 Codex 会话弄断。
+`install.sh` 会做这几件事：
+
+- 跑 `npm install` 和 `npm run build`；
+- 给 Codex 安装 `pi-orchestrator` skill；
+- 把 **stdio 代理**注册成 Codex 的 MCP server（代理转发到 HTTP daemon 并自动重连，所以重启 daemon
+  不会弄断 Codex 会话）；
+- 如果没装 `pi`，询问是否安装；
+- 问你要 provider、API key 和 model，写进 `~/.pi-coffee/env`（权限 600）。
+
+因为 pi 直接从环境变量读 provider 密钥，最后这一步意味着**不需要**再进 pi 跑 `/login`。之后想改：
+
+```bash
+npm run setup     # 交互式设置 provider、API key、model、thinking 级别（写入 ~/.pi-coffee/env）
+npm run doctor    # 预检：node、git、pi、凭据、数据目录
+```
+
+`run.sh` 启动前会 source `~/.pi-coffee/env`，所以 worker 能继承到密钥。可用 `PI_COFFEE_ENV_FILE`
+换文件位置。
 
 起来之后确认一下：
 
@@ -151,10 +168,10 @@ curl http://127.0.0.1:8787/internal/health   # {"ok":true,...}
 ```toml
 [mcp_servers.pi]
 command = "node"            # 建议写成 node 的绝对路径
-args = ["/absolute/path/to/pi-mcp/dist/stdio-proxy.js"]
+args = ["/absolute/path/to/pi-coffee/dist/stdio-proxy.js"]
 
 [mcp_servers.pi.env]
-PI_MCP_URL = "http://127.0.0.1:8787/mcp"
+PI_COFFEE_URL = "http://127.0.0.1:8787/mcp"
 ```
 
 daemon 在别的机器上，就直接连，并带上 token：
@@ -164,7 +181,45 @@ daemon 在别的机器上，就直接连，并带上 token：
 url = "http://daemon-host:8787/mcp"
 
 [mcp_servers.pi.env]
-PI_MCP_TOKEN = "your-secret"
+PI_COFFEE_TOKEN = "your-secret"
+```
+
+## Docker
+
+仓库里的 `Dockerfile` 已经把 Node、git 和 pi 都打进去了，宿主机只需要有 Docker。
+
+```bash
+cp .env.example .env       # 填好 provider 的 API key 和 model
+mkdir -p workspace         # 把要让 worker 改的仓库放进来或克隆到这里
+docker compose up -d --build
+curl http://127.0.0.1:8787/internal/health
+```
+
+`./workspace` 挂载到 `/workspace`，是默认仓库；`/data` 用命名卷保存 daemon 状态。容器从 `.env`
+读取同样的 `PI_COFFEE_*` 变量和 provider 密钥。
+
+让 Codex 连容器，写进 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.pi]
+url = "http://127.0.0.1:8787/mcp"
+
+[mcp_servers.pi.env]
+PI_COFFEE_TOKEN = "optional-shared-secret"
+```
+
+要鉴权的话，`.env` 里也设上 `PI_COFFEE_TOKEN`。端口默认只发布到回环；要暴露到 `0.0.0.0` 请务必
+同时设置 token。
+
+不用 Compose 也可以：
+
+```bash
+docker build -t pi-coffee .
+docker run --rm -p 127.0.0.1:8787:8787 \
+  -e PI_COFFEE_PROVIDER=deepseek -e PI_COFFEE_MODEL=deepseek-flash \
+  -e DEEPSEEK_API_KEY=sk-... \
+  -v "$PWD/workspace:/workspace" -v pi-coffee-data:/data \
+  pi-coffee
 ```
 
 ## 一个任务的全过程
@@ -201,16 +256,16 @@ npm install && npm run build
 ./deploy/macos/install-daemon.sh          # 写入 ~/Library/LaunchAgents/com.pimcp.daemon.plist
 ```
 
-日志在 `~/.pi-mcp/logs/daemon.{out,err}.log`。停止命令：
+日志在 `~/.pi-coffee/logs/daemon.{out,err}.log`。停止命令：
 `launchctl bootout gui/$(id -u)/com.pimcp.daemon`。这个 launch agent 会把 Homebrew 和
 `~/.pi/agent/bin` 加进 `PATH`，保证 `pi` 和 `git` 能被找到。
 
 如果仓库就在 Mac 上，整套都放本机最省事：
 
 ```bash
-rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-mcp/
+rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-coffee/
 # 然后在 Mac 上：
-cd ~/pi-mcp && ./install.sh && ./run.sh
+cd ~/pi-coffee && ./install.sh && ./run.sh
 ```
 
 ### daemon 放在另一台机器
@@ -219,14 +274,14 @@ cd ~/pi-mcp && ./install.sh && ./run.sh
 并设置一个共享 token：
 
 ```bash
-PI_MCP_HOST=0.0.0.0 PI_MCP_TOKEN=<secret> ./run.sh
+PI_COFFEE_HOST=0.0.0.0 PI_COFFEE_TOKEN=<secret> ./run.sh
 ```
 
 在 Codex 那台机器上：
 
 ```bash
-PI_MCP_TOKEN=<secret> codex mcp add pi \
-  --url http://<daemon-host>:8787/mcp --bearer-token-env-var PI_MCP_TOKEN
+PI_COFFEE_TOKEN=<secret> codex mcp add pi \
+  --url http://<daemon-host>:8787/mcp --bearer-token-env-var PI_COFFEE_TOKEN
 ```
 
 `pi_diff`、`pi_commit`、`pi_merge`、`pi_push` 让 Codex 在拿不到文件系统的情况下也能审查和集成代码。
@@ -287,7 +342,7 @@ worker，应该用只读验收目录加进程隔离，而不是指望文件声�
 重启过）同样会被处理。分支按仓库加分支名去重。
 
 只要分支还是当前或默认分支、被任何 worktree 检出、挂在活跃会话上，或者挂在一个已存在的脏 worktree
-上，就不会删。被放弃和未完成的工作流一律保留。这些规则跟 `PI_MCP_DELETE_BRANCHES` 怎么设无关。
+上，就不会删。被放弃和未完成的工作流一律保留。这些规则跟 `PI_COFFEE_DELETE_BRANCHES` 怎么设无关。
 
 结果里会给出 `branches_deleted`，以及每个被保留分支的 `branches_retained` 和原因。git 操作失败的
 分支会被保留并如实上报，绝不会被算进删除数里。
@@ -298,22 +353,22 @@ worker，应该用只读验收目录加进程隔离，而不是指望文件声�
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
-| `PI_MCP_HOST` | `127.0.0.1` | 绑定地址，默认只监听回环。 |
-| `PI_MCP_PORT` | `8787` | `/mcp` 和 `/internal/*` 的端口。 |
-| `PI_MCP_PI_BIN` | `pi` | pi 可执行文件。 |
-| `PI_MCP_DEFAULT_REPO` | *(空)* | `pi_spawn` 的默认仓库。不设的话每次 spawn 都要传 `repo`。 |
-| `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | worktree 的创建位置。 |
-| `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | worker 的 provider 和 model。 |
-| `PI_MCP_STRONG_MODEL` | *(空)* | 用于显式手动升级的模型。留空就没有升级可用。 |
-| `PI_MCP_THINKING` | `xhigh` | worker 的 pi thinking 级别：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。可在单次 spawn 覆盖。 |
-| `PI_MCP_MAX_SESSIONS` | `8` | 并发 worker 硬上限。 |
-| `PI_MCP_PARALLEL_WARN` | `4` | 活跃 worker 达到这个数时，`pi_spawn` 会给出提醒。 |
-| `PI_MCP_BASE_REF` | `HEAD` | 新 worktree 的基点。 |
-| `PI_MCP_AUTO_CLEAN` | `1` | 自动移除已完成 worker 的 worktree（保留分支）。 |
-| `PI_MCP_WORKTREE_TTL_MIN` | `60` | 已完成且空闲的 worker 在被清理前保留多少分钟。 |
-| `PI_MCP_DELETE_BRANCHES` | `0` | 显式 `pi_stop` 的 `delete_branch` 默认值。`pi_gc` 不看这个。 |
-| `PI_MCP_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
-| `PI_MCP_DATA_DIR` | `~/.pi-mcp` | daemon 状态：锁、信箱、黑板、会话元数据。 |
+| `PI_COFFEE_HOST` | `127.0.0.1` | 绑定地址，默认只监听回环。 |
+| `PI_COFFEE_PORT` | `8787` | `/mcp` 和 `/internal/*` 的端口。 |
+| `PI_COFFEE_PI_BIN` | `pi` | pi 可执行文件。 |
+| `PI_COFFEE_DEFAULT_REPO` | *(空)* | `pi_spawn` 的默认仓库。不设的话每次 spawn 都要传 `repo`。 |
+| `PI_COFFEE_WORKSPACE_ROOT` | `~/.pi-coffee/worktrees` | worktree 的创建位置。 |
+| `PI_COFFEE_PROVIDER` / `PI_COFFEE_MODEL` | `deepseek` / `deepseek-flash` | worker 的 provider 和 model。 |
+| `PI_COFFEE_STRONG_MODEL` | *(空)* | 用于显式手动升级的模型。留空就没有升级可用。 |
+| `PI_COFFEE_THINKING` | `xhigh` | worker 的 pi thinking 级别：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。可在单次 spawn 覆盖。 |
+| `PI_COFFEE_MAX_SESSIONS` | `8` | 并发 worker 硬上限。 |
+| `PI_COFFEE_PARALLEL_WARN` | `4` | 活跃 worker 达到这个数时，`pi_spawn` 会给出提醒。 |
+| `PI_COFFEE_BASE_REF` | `HEAD` | 新 worktree 的基点。 |
+| `PI_COFFEE_AUTO_CLEAN` | `1` | 自动移除已完成 worker 的 worktree（保留分支）。 |
+| `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | 已完成且空闲的 worker 在被清理前保留多少分钟。 |
+| `PI_COFFEE_DELETE_BRANCHES` | `0` | 显式 `pi_stop` 的 `delete_branch` 默认值。`pi_gc` 不看这个。 |
+| `PI_COFFEE_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
+| `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
 
 配置不合法时启动会直接失败，而不是带着问题跑。端口必须是 1 到 65535 的整数，会话上限和提醒阈值必须
 是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。
@@ -321,7 +376,7 @@ worker，应该用只读验收目录加进程隔离，而不是指望文件声�
 
 ## 状态与恢复
 
-daemon 状态存在 `PI_MCP_DATA_DIR` 下的 `state.json`。写入是串行且原子的：先写唯一临时文件再 rename，
+daemon 状态存在 `PI_COFFEE_DATA_DIR` 下的 `state.json`。写入是串行且原子的：先写唯一临时文件再 rename，
 上一份通过校验的快照留在 `state.json.bak`。
 
 启动时会先完整校验快照，通过之后才应用。主文件缺失或损坏就用有效备份，并在 stderr 打一条警告；
@@ -333,7 +388,7 @@ daemon。
 
 ## 安全
 
-- daemon 默认只绑回环，也没有鉴权。设置 `PI_MCP_TOKEN` 就会开启：`/mcp` 和 `/internal/*` 都要带
+- daemon 默认只绑回环，也没有鉴权。设置 `PI_COFFEE_TOKEN` 就会开启：`/mcp` 和 `/internal/*` 都要带
   同一个密钥，放在 `x-pi-coord-token` 或 `Authorization: Bearer <token>` 里。
 - 要把 daemon 暴露到回环之外，就同时用 token 和可信网络/VPN。共享网络里光有 token 不能替代网络
   层的控制。
@@ -343,12 +398,12 @@ daemon。
 
 | 现象 | 多半是 | 怎么办 |
 |---|---|---|
-| 返回 `{"error":"unauthorized"}` | daemon 和客户端 token 对不上 | 让 daemon 和 Codex/代理环境用同一个 `PI_MCP_TOKEN`。 |
-| `pi_spawn` 报 "repo is required" | 没配默认仓库 | 设 `PI_MCP_DEFAULT_REPO`，或者每次 spawn 都传 `repo`。 |
+| 返回 `{"error":"unauthorized"}` | daemon 和客户端 token 对不上 | 让 daemon 和 Codex/代理环境用同一个 `PI_COFFEE_TOKEN`。 |
+| `pi_spawn` 报 "repo is required" | 没配默认仓库 | 设 `PI_COFFEE_DEFAULT_REPO`，或者每次 spawn 都传 `repo`。 |
 | worker 一起来就报错退出 | `pi` 没以 daemon 用户登录 | 用那个用户跑一次 `pi` 完成登录。 |
 | git 抱怨 "dubious ownership" | daemon 用户和仓库属主不一致 | daemon 给自己的 git 调用已经加了 `safe.directory=*`；如果在别处看到，检查 git 版本。 |
 | 重启后会话变成 `stopped` | worker 不会跨 daemon 重启存活 | 这是预期行为，重新 spawn；会话记录文件还在。 |
-| daemon 启动时报 `EADDRINUSE` | 端口被占用 | 把 `PI_MCP_PORT` 换成一个空闲端口。 |
+| daemon 启动时报 `EADDRINUSE` | 端口被占用 | 把 `PI_COFFEE_PORT` 换成一个空闲端口。 |
 | 找不到 `codex mcp add` | `codex` 不在 daemon 用户的 `PATH` 里 | 手动写 `~/.codex/config.toml`。 |
 | worker 被文件声明挡住 | 另一个 worker 占着冲突的声明 | 用 `coord_send` 协调，声明确实过期就用 `pi_release`。 |
 
@@ -357,6 +412,8 @@ daemon。
 ```bash
 npm ci                 # 安装依赖（Node >= 22.19）
 npm run build          # 把 TypeScript 编译到 dist/
+npm run setup          # 写 provider 凭据到 ~/.pi-coffee/env
+npm run doctor         # 检查 node/git/pi/凭据/数据目录
 npm run dev            # 用 tsx 直接从源码跑 daemon
 npm run typecheck      # 主代码类型检查
 npm run typecheck:extensions   # 用真实 pi API 类型检查扩展
@@ -376,12 +433,15 @@ pi 依赖固定版本只是为了开发期类型检查，CI 不登录、也不�
 ### 仓库结构
 
 ```
-src/          daemon、MCP server、git 操作、锁、状态存储
-extensions/   worker 端 pi 扩展（文件声明、信箱、coord_* 工具）
-tests/        离线测试套件（node --test）
-scripts/      冒烟和状态辅助脚本
-deploy/       systemd 和 launchd 安装脚本
-codex/        install.sh 安装的 Codex skill
+src/               daemon、MCP server、git 操作、锁、状态存储
+extensions/        worker 端 pi 扩展（文件声明、信箱、coord_* 工具）
+tests/             离线测试套件（node --test）
+scripts/           setup、doctor、冒烟和状态辅助脚本
+deploy/            systemd 和 launchd 安装脚本
+codex/             install.sh 安装的 Codex skill
+Dockerfile         内置 Node、git、pi 的镜像
+docker-compose.yml 面向用户的 compose 文件
+.env.example       Docker 用的 provider 密钥 / model 模板
 ```
 
 ## 已知限制

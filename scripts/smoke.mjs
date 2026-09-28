@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test for pi-mcp.
+ * End-to-end smoke test for pi-coffee.
  *
  * Boots the daemon against a throwaway git repo and exercises the full control surface:
  * spec linter, task-type gate, scope overlap, acceptance test-first + lock, committed-diff,
@@ -13,7 +13,7 @@
  * gate are exercised in both modes (against the fake offline, real models live).
  *
  * The daemon is always started with an isolated environment (own host/port/data dir/worktree
- * root/no token) so inherited PI_MCP_* settings cannot leak into the test.
+ * root/no token) so inherited PI_COFFEE_* settings cannot leak into the test.
  *
  * Usage: node scripts/smoke.mjs           (or: npm run smoke / ./smoke.sh)
  */
@@ -27,7 +27,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PORT = process.env.SMOKE_PORT || String(8890 + Math.floor(Math.random() * 100));
 const BASE = `http://127.0.0.1:${PORT}`;
 const LIVE = process.env.SMOKE_LIVE !== "0";
-const WORK = mkdtempSync(join(tmpdir(), "pi-mcp-smoke-"));
+const WORK = mkdtempSync(join(tmpdir(), "pi-coffee-smoke-"));
 const REPO = join(WORK, "repo");
 const DATA = join(WORK, "data");
 const WORKTREES = join(DATA, "worktrees");
@@ -75,7 +75,7 @@ async function mcpCall(name, args) {
  * smoke needs no installed `pi` and no model credentials.
  */
 const FAKE_PI_SOURCE = String.raw`#!/usr/bin/env node
-// Disposable fake pi for the offline pi-mcp smoke test. Speaks minimal JSONL RPC.
+// Disposable fake pi for the offline pi-coffee smoke test. Speaks minimal JSONL RPC.
 import { createInterface } from "node:readline";
 
 const argv = process.argv.slice(2);
@@ -173,27 +173,27 @@ function createFakePi() {
 }
 
 function startDaemon(piBin) {
-  // Isolate every inherited PI_MCP_* setting so nothing can redirect the daemon, break the health
-  // check, or sabotage the smoke (e.g. PI_MCP_MAX_SESSIONS=0, PI_MCP_BASE_REF=bad, a token, a
+  // Isolate every inherited PI_COFFEE_* setting so nothing can redirect the daemon, break the health
+  // check, or sabotage the smoke (e.g. PI_COFFEE_MAX_SESSIONS=0, PI_COFFEE_BASE_REF=bad, a token, a
   // remote host, or a shared worktree root). Start from a clean slate, then pin our own config.
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("PI_MCP_")) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith("PI_COFFEE_")) delete env[key];
   Object.assign(env, {
-    PI_MCP_HOST: "127.0.0.1",
-    PI_MCP_PORT: PORT,
-    PI_MCP_DEFAULT_REPO: REPO,
-    PI_MCP_DATA_DIR: DATA,
-    PI_MCP_WORKSPACE_ROOT: WORKTREES,
-    PI_MCP_AUTO_CLEAN: "1",
-    PI_MCP_PI_BIN: piBin,
+    PI_COFFEE_HOST: "127.0.0.1",
+    PI_COFFEE_PORT: PORT,
+    PI_COFFEE_DEFAULT_REPO: REPO,
+    PI_COFFEE_DATA_DIR: DATA,
+    PI_COFFEE_WORKSPACE_ROOT: WORKTREES,
+    PI_COFFEE_AUTO_CLEAN: "1",
+    PI_COFFEE_PI_BIN: piBin,
   });
   if (LIVE) {
     // Live smoke may keep the operator's chosen worker model/provider/bin from the original env.
-    for (const key of ["PI_MCP_PI_BIN", "PI_MCP_PROVIDER", "PI_MCP_MODEL", "PI_MCP_STRONG_MODEL"]) {
+    for (const key of ["PI_COFFEE_PI_BIN", "PI_COFFEE_PROVIDER", "PI_COFFEE_MODEL", "PI_COFFEE_STRONG_MODEL"]) {
       const v = process.env[key];
       if (v && v.length > 0) env[key] = v;
     }
-    if (!env.PI_MCP_PI_BIN) env.PI_MCP_PI_BIN = "pi";
+    if (!env.PI_COFFEE_PI_BIN) env.PI_COFFEE_PI_BIN = "pi";
   }
   daemonExitErr = null;
   daemonStderr = "";
@@ -250,8 +250,8 @@ async function stopDaemon() {
 }
 
 async function main() {
-  console.log(`pi-mcp smoke test (port ${PORT}, live=${LIVE})`);
-  const piBin = LIVE ? process.env.PI_MCP_PI_BIN || "pi" : createFakePi();
+  console.log(`pi-coffee smoke test (port ${PORT}, live=${LIVE})`);
+  const piBin = LIVE ? process.env.PI_COFFEE_PI_BIN || "pi" : createFakePi();
   mkdirSync(REPO, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: REPO, stdio: "ignore" });
   git(["config", "user.email", "smoke@test"]);

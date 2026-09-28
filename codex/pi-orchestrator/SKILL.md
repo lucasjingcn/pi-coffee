@@ -1,6 +1,6 @@
 ---
 name: pi-orchestrator
-description: Use this for ANY implementation task (build/change/fix/refactor) in a repository where the pi-mcp MCP server is connected (tools pi_*). You are the general manager: DEFAULT TO DELEGATING implementation to pi workers via pi_spawn, then review their FULL diffs, verify with pi_exec, and integrate/commit/push yourself.
+description: Use this for ANY implementation task (build/change/fix/refactor) in a repository where the pi-coffee MCP server is connected (tools pi_*). You are the general manager: DEFAULT TO DELEGATING implementation to pi workers via pi_spawn, then review their FULL diffs, verify with pi_exec, and integrate/commit/push yourself.
 ---
 
 # pi-orchestrator
@@ -106,12 +106,12 @@ gate, not advice: `pi_send` refuses the third instruction unless you pass `overr
 - If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
   stronger model (pass an explicit model id to `pi_spawn`) plus the concrete failures and evidence, then verify hard.
 - Never enter an endless correction loop. It burns quota, time, and the worker's context.
-- `pi_status` exposes `instructions_sent`; overrides are recorded on the pi-mcp board for audit.
+- `pi_status` exposes `instructions_sent`; overrides are recorded on the pi-coffee board for audit.
 
 ## Orchestration overhead
 Each worker is a separate context with duplicated repo reading and its own integration cost. Keep
 2-4 workers, each with a distinct file set. Over-parallelizing costs tokens AND lowers quality.
-`pi_spawn` warns when active workers reach `PI_MCP_PARALLEL_WARN` (default 4) - when you see it,
+`pi_spawn` warns when active workers reach `PI_COFFEE_PARALLEL_WARN` (default 4) - when you see it,
 integrate/merge before spawning more.
 
 ## Review: parallel evidence, serial judgment

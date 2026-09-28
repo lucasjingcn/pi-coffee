@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 async function bridge(handler,wire){
  const server=createServer(handler);await new Promise(r=>server.listen(0,'127.0.0.1',r));
- const child=spawn(process.execPath,['dist/stdio-proxy.js'],{env:{...process.env,PI_MCP_URL:'http://127.0.0.1:'+server.address().port+'/mcp',PI_MCP_TOKEN:''},stdio:['pipe','pipe','pipe']});
+ const child=spawn(process.execPath,['dist/stdio-proxy.js'],{env:{...process.env,PI_COFFEE_URL:'http://127.0.0.1:'+server.address().port+'/mcp',PI_COFFEE_TOKEN:''},stdio:['pipe','pipe','pipe']});
  let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);
  const done=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code)=>code===0?resolve():reject(new Error(err)));});
  child.stdin.end(wire);

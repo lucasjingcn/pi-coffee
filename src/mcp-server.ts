@@ -54,14 +54,14 @@ function compactMeta(m: SessionMeta) {
 
 export function buildServer(coord: Coordinator): McpServer {
   const server = new McpServer(
-    { name: "pi-mcp", version: "0.1.0" },
+    { name: "pi-coffee", version: "0.1.0" },
     { instructions: MCP_INSTRUCTIONS },
   );
 
   server.registerPrompt(
     "orchestrate",
     {
-      title: "pi-mcp orchestrator playbook",
+      title: "pi-coffee orchestrator playbook",
       description:
         "Load the full playbook for acting as the general manager over pi worker sessions (delegation, review, integration).",
     },
@@ -91,7 +91,7 @@ export function buildServer(coord: Coordinator): McpServer {
         thinking: z
           .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
           .optional()
-          .describe("pi thinking level for this worker (default: PI_MCP_THINKING, xhigh). Lower it for purely mechanical work."),
+          .describe("pi thinking level for this worker (default: PI_COFFEE_THINKING, xhigh). Lower it for purely mechanical work."),
         prompt: z.string().optional().describe("Optional first instruction to send immediately"),
         spec: z
           .object({
@@ -166,7 +166,7 @@ export function buildServer(coord: Coordinator): McpServer {
       }
       if (taskType && JUDGMENT_TYPES.has(taskType) && args.spec_override) {
         coord.boardPost(
-          "pi-mcp",
+          "pi-coffee",
           "judgment-override",
           `${args.task ?? spec?.goal}: ${args.spec_override_reason ?? "(no reason given)"}`,
           "codex",
@@ -255,7 +255,7 @@ export function buildServer(coord: Coordinator): McpServer {
 
       if (sent >= MAX_DELEGATED_ATTEMPTS && override) {
         coord.boardPost(
-          "pi-mcp",
+          "pi-coffee",
           "delegation-override",
           `${session_id}: ${override_reason ?? "(no reason given)"}`,
           "codex",

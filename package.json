@@ -1,5 +1,5 @@
 {
-  "name": "pi-mcp",
+  "name": "pi-coffee",
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
@@ -14,13 +14,15 @@
     "url": "https://github.com/lucasjingcn/pi-coffee/issues"
   },
   "bin": {
-    "pi-mcp": "dist/index.js"
+    "pi-coffee": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "smoke": "node scripts/smoke.mjs",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",

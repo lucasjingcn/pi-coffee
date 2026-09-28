@@ -122,27 +122,27 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   const dataDir =
     overrides.dataDir !== undefined
       ? overrides.dataDir
-      : env("PI_MCP_DATA_DIR") ?? join(homedir(), ".pi-mcp");
+      : env("PI_COFFEE_DATA_DIR") ?? join(homedir(), ".pi-coffee");
 
   // dist/ or src/ at runtime; the worker extension ships next to the compiled output.
   const here = dirname(fileURLToPath(import.meta.url));
 
   const base: Config = {
-    host: env("PI_MCP_HOST") ?? "127.0.0.1",
-    port: resolveNumber(overrides, "port", "PI_MCP_PORT", 8787, {
+    host: env("PI_COFFEE_HOST") ?? "127.0.0.1",
+    port: resolveNumber(overrides, "port", "PI_COFFEE_PORT", 8787, {
       integer: true,
       min: 1,
       max: 65535,
       description: "an integer between 1 and 65535",
     }),
-    piBin: env("PI_MCP_PI_BIN") ?? "pi",
-    workspaceRoot: env("PI_MCP_WORKSPACE_ROOT") ?? join(dataDir, "worktrees"),
-    defaultRepo: env("PI_MCP_DEFAULT_REPO") ?? "",
-    provider: env("PI_MCP_PROVIDER") ?? "deepseek",
-    model: env("PI_MCP_MODEL") ?? "deepseek-flash",
-    strongModel: env("PI_MCP_STRONG_MODEL") ?? "",
-    thinking: env("PI_MCP_THINKING") ?? "xhigh",
-    maxSessions: resolveNumber(overrides, "maxSessions", "PI_MCP_MAX_SESSIONS", 8, {
+    piBin: env("PI_COFFEE_PI_BIN") ?? "pi",
+    workspaceRoot: env("PI_COFFEE_WORKSPACE_ROOT") ?? join(dataDir, "worktrees"),
+    defaultRepo: env("PI_COFFEE_DEFAULT_REPO") ?? "",
+    provider: env("PI_COFFEE_PROVIDER") ?? "deepseek",
+    model: env("PI_COFFEE_MODEL") ?? "deepseek-flash",
+    strongModel: env("PI_COFFEE_STRONG_MODEL") ?? "",
+    thinking: env("PI_COFFEE_THINKING") ?? "xhigh",
+    maxSessions: resolveNumber(overrides, "maxSessions", "PI_COFFEE_MAX_SESSIONS", 8, {
       integer: true,
       min: 1,
       max: Number.MAX_SAFE_INTEGER,
@@ -151,7 +151,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     parallelWarnThreshold: resolveNumber(
       overrides,
       "parallelWarnThreshold",
-      "PI_MCP_PARALLEL_WARN",
+      "PI_COFFEE_PARALLEL_WARN",
       4,
       {
         integer: true,
@@ -161,18 +161,18 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       },
     ),
     extensionPath:
-      env("PI_MCP_EXTENSION") ?? resolve(here, "..", "extensions", "pi-coordinator.ts"),
-    token: env("PI_MCP_TOKEN") ?? "",
+      env("PI_COFFEE_EXTENSION") ?? resolve(here, "..", "extensions", "pi-coordinator.ts"),
+    token: env("PI_COFFEE_TOKEN") ?? "",
     dataDir,
-    defaultBaseRef: env("PI_MCP_BASE_REF") ?? "HEAD",
-    autoClean: resolveBoolean(overrides, "autoClean", "PI_MCP_AUTO_CLEAN", true),
-    worktreeTtlMin: resolveNumber(overrides, "worktreeTtlMin", "PI_MCP_WORKTREE_TTL_MIN", 60, {
+    defaultBaseRef: env("PI_COFFEE_BASE_REF") ?? "HEAD",
+    autoClean: resolveBoolean(overrides, "autoClean", "PI_COFFEE_AUTO_CLEAN", true),
+    worktreeTtlMin: resolveNumber(overrides, "worktreeTtlMin", "PI_COFFEE_WORKTREE_TTL_MIN", 60, {
       integer: false,
       min: 1,
       max: Number.MAX_SAFE_INTEGER / 60000,
       description: "a finite number between 1 and MAX_SAFE_INTEGER/60000",
     }),
-    deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_MCP_DELETE_BRANCHES", false),
+    deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
   };
 
   // Apply caller overrides last; undefined means "keep the default".

@@ -2,12 +2,10 @@
 
 # pi-coffee
 
-pi-coffee is the repository for **pi-mcp**, an MCP server that orchestrates several **pi** coding
-agents at once. Any MCP client can drive it — Codex is the reference client, but Claude, Cursor, or
-anything else that speaks MCP works too. (The npm package, the `bin` entry, and the MCP server are
-all named `pi-mcp`; only this repository is called `pi-coffee`.) The client stays the manager: it
-splits a job into well-defined pieces, hands each piece to an agent, reviews what comes back, and
-merges. The agents do the typing.
+pi-coffee is an MCP server that orchestrates several **pi** coding agents at once. Any MCP client
+can drive it — Codex is the reference client, but Claude, Cursor, or anything else that speaks MCP
+works too. The client stays the manager: it splits a job into well-defined pieces, hands each piece
+to an agent, reviews what comes back, and merges. The agents do the typing.
 
 Two agents editing the same repository normally overwrite each other. Here each agent works in its
 own git worktree on its own branch, claims the files it is about to touch, and can message the other
@@ -28,6 +26,7 @@ agents or ask the orchestrator a question when something is unclear.
 - [Requirements](#requirements)
 - [Install and run](#install-and-run)
 - [Pointing Codex at the daemon](#pointing-codex-at-the-daemon)
+- [Docker](#docker)
 - [A task, start to finish](#a-task-start-to-finish)
 - [Deployment](#deployment)
 - [Tool reference](#tool-reference)
@@ -48,7 +47,7 @@ A single coding agent is easy to supervise. Several of them on one checkout is n
 each other's files, or produce long-lived branches that are painful to merge. The usual fixes
 (copying the repo, serializing everything) either waste the parallelism or waste your time.
 
-pi-mcp takes the opposite approach. Give every agent its own worktree, make file ownership explicit,
+pi-coffee takes the opposite approach. Give every agent its own worktree, make file ownership explicit,
 and keep one supervisor — Codex — responsible for the final result. That is the whole idea; the rest
 of this document is the mechanics.
 
@@ -69,10 +68,10 @@ of this document is the mechanics.
 
 ## A typical use case: cheap code, expensive judgment
 
-Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-mcp and let it
+Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-coffee and let it
 stay the manager. Codex plans the change, writes the spec and the acceptance test, and hands the
 implementation to workers running on a cheap model — DeepSeek by default
-(`PI_MCP_PROVIDER=deepseek`, `PI_MCP_MODEL=deepseek-flash`). The workers write the code in isolated
+(`PI_COFFEE_PROVIDER=deepseek`, `PI_COFFEE_MODEL=deepseek-flash`). The workers write the code in isolated
 worktrees and run the tests; Codex reviews the diffs and verifies the result. The bulk of the
 generated code never passes through the expensive model's output, and that is where the token
 savings come from.
@@ -96,7 +95,7 @@ delegating costs more than doing it yourself, which is why `pi_spawn` warns abou
 
 ```mermaid
 flowchart LR
-    Codex[MCP client<br/>e.g. Codex] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>registry · locks · mailbox · board]
+    Codex[MCP client<br/>e.g. Codex] -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>registry · locks · mailbox · board]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -120,12 +119,13 @@ daemon deliberately runs the `pi` executable rather than importing pi's internal
 |---|---|
 | **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19 and 24. |
 | **git** | Worktrees, diffs, merges, branch cleanup. |
-| **pi** | Installed and logged in as the daemon user. |
+| **pi** | `install.sh` can install it. It can authenticate from an API key in the environment, so the interactive `/login` step is optional. |
 | **An MCP client** | Codex is the reference client; any MCP-capable client works. |
 
-Run the daemon, Codex, and the workers as the **same Unix user**. They need to share file ownership
-and the same `~/.pi/agent/auth.json`. Root is not required — any user with a working `pi` and write
-access to the repository is fine.
+Run the daemon, Codex, and the workers as the **same Unix user**. They need to share file ownership.
+Provider credentials can come from the generated env file (see below) or from pi's own
+`~/.pi/agent/auth.json`. Root is not required — any user with a working `pi` and write access to the
+repository is fine.
 
 ## Install and run
 
@@ -139,12 +139,29 @@ cd pi-coffee
 Then:
 
 ```bash
-./install.sh     # npm install + build + install the Codex skill + register the MCP server
+./install.sh     # deps + build + Codex skill + MCP registration + pi/provider setup
 ./run.sh         # start the daemon in the foreground (http://127.0.0.1:8787)
 ```
 
-`install.sh` registers the **stdio proxy** as the Codex MCP server. The proxy forwards to the HTTP
-daemon and reconnects on its own, so restarting the daemon does not break the Codex session.
+`install.sh` does a few things:
+
+- runs `npm install` and `npm run build`;
+- installs the `pi-orchestrator` skill for Codex;
+- registers the **stdio proxy** as the Codex MCP server (the proxy forwards to the HTTP daemon and
+  reconnects on its own, so restarting the daemon does not break the Codex session);
+- if `pi` is missing, offers to install it;
+- asks for your provider, API key, and model, and stores them in `~/.pi-coffee/env` (mode 600).
+
+Because pi reads provider API keys from the environment, that last step means you do **not** have to
+run `/login` inside pi. Adjust it later with:
+
+```bash
+npm run setup     # provider, API key, model, thinking level (writes ~/.pi-coffee/env)
+npm run doctor    # preflight: node, git, pi, credentials, data directory
+```
+
+`run.sh` sources `~/.pi-coffee/env` before starting the daemon, so spawned workers inherit the key.
+Point it elsewhere with `PI_COFFEE_ENV_FILE`.
 
 Check that it came up:
 
@@ -164,10 +181,10 @@ service — see [Deployment](#deployment).
 ```toml
 [mcp_servers.pi]
 command = "node"            # an absolute path to node is recommended
-args = ["/absolute/path/to/pi-mcp/dist/stdio-proxy.js"]
+args = ["/absolute/path/to/pi-coffee/dist/stdio-proxy.js"]
 
 [mcp_servers.pi.env]
-PI_MCP_URL = "http://127.0.0.1:8787/mcp"
+PI_COFFEE_URL = "http://127.0.0.1:8787/mcp"
 ```
 
 If the daemon runs on another machine, connect to it directly and pass a token:
@@ -177,7 +194,45 @@ If the daemon runs on another machine, connect to it directly and pass a token:
 url = "http://daemon-host:8787/mcp"
 
 [mcp_servers.pi.env]
-PI_MCP_TOKEN = "your-secret"
+PI_COFFEE_TOKEN = "your-secret"
+```
+
+## Docker
+
+The included `Dockerfile` bundles Node, git, and pi, so the only host requirement is Docker.
+
+```bash
+cp .env.example .env       # set your provider API key and model
+mkdir -p workspace         # put or clone the repository workers should edit here
+docker compose up -d --build
+curl http://127.0.0.1:8787/internal/health
+```
+
+`./workspace` is mounted at `/workspace` and is the default repo; a named volume holds `/data`
+(daemon state). The container reads the same `PI_COFFEE_*` variables and provider key from `.env`.
+
+To connect Codex, point it at the container in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.pi]
+url = "http://127.0.0.1:8787/mcp"
+
+[mcp_servers.pi.env]
+PI_COFFEE_TOKEN = "optional-shared-secret"
+```
+
+Set `PI_COFFEE_TOKEN` in `.env` too if you want authentication. The port is published on loopback by
+default; expose it on `0.0.0.0` only together with a token.
+
+Without Compose:
+
+```bash
+docker build -t pi-coffee .
+docker run --rm -p 127.0.0.1:8787:8787 \
+  -e PI_COFFEE_PROVIDER=deepseek -e PI_COFFEE_MODEL=deepseek-flash \
+  -e DEEPSEEK_API_KEY=sk-... \
+  -v "$PWD/workspace:/workspace" -v pi-coffee-data:/data \
+  pi-coffee
 ```
 
 ## A task, start to finish
@@ -216,16 +271,16 @@ npm install && npm run build
 ./deploy/macos/install-daemon.sh          # writes ~/Library/LaunchAgents/com.pimcp.daemon.plist
 ```
 
-Logs go to `~/.pi-mcp/logs/daemon.{out,err}.log`. Stop the agent with
+Logs go to `~/.pi-coffee/logs/daemon.{out,err}.log`. Stop the agent with
 `launchctl bootout gui/$(id -u)/com.pimcp.daemon`. The launch agent sets a `PATH` that includes
 Homebrew and `~/.pi/agent/bin` so `pi` and `git` resolve.
 
 To keep everything on one Mac (useful when the repository lives there):
 
 ```bash
-rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-mcp/
+rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-coffee/
 # then, on the Mac:
-cd ~/pi-mcp && ./install.sh && ./run.sh
+cd ~/pi-coffee && ./install.sh && ./run.sh
 ```
 
 ### Daemon on another machine
@@ -234,14 +289,14 @@ If the repository and the `pi` credentials live on one host and you only run Cod
 the daemon to the LAN or VPN and set a shared token:
 
 ```bash
-PI_MCP_HOST=0.0.0.0 PI_MCP_TOKEN=<secret> ./run.sh
+PI_COFFEE_HOST=0.0.0.0 PI_COFFEE_TOKEN=<secret> ./run.sh
 ```
 
 On the Codex machine:
 
 ```bash
-PI_MCP_TOKEN=<secret> codex mcp add pi \
-  --url http://<daemon-host>:8787/mcp --bearer-token-env-var PI_MCP_TOKEN
+PI_COFFEE_TOKEN=<secret> codex mcp add pi \
+  --url http://<daemon-host>:8787/mcp --bearer-token-env-var PI_COFFEE_TOKEN
 ```
 
 `pi_diff`, `pi_commit`, `pi_merge`, and `pi_push` let Codex review and integrate code it cannot
@@ -309,7 +364,7 @@ branch name.
 
 Nothing is deleted while it is a current or default branch, checked out in any worktree, attached to
 an active session, or attached to an existing dirty worktree. Abandoned and unfinished workstreams
-are kept. These rules apply no matter how `PI_MCP_DELETE_BRANCHES` is set.
+are kept. These rules apply no matter how `PI_COFFEE_DELETE_BRANCHES` is set.
 
 The result reports `branches_deleted` and a `branches_retained` entry with a reason for every branch
 it kept. If git fails on a branch, it is retained and reported, never counted as deleted for you.
@@ -320,22 +375,22 @@ Everything is configured through environment variables.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PI_MCP_HOST` | `127.0.0.1` | Bind address. Loopback by default. |
-| `PI_MCP_PORT` | `8787` | Port for `/mcp` and `/internal/*`. |
-| `PI_MCP_PI_BIN` | `pi` | The pi executable. |
-| `PI_MCP_DEFAULT_REPO` | *(none)* | Default repository for `pi_spawn`. If unset, every spawn must pass `repo`. |
-| `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worktrees are created. |
-| `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker provider and model. |
-| `PI_MCP_STRONG_MODEL` | *(empty)* | Model for an explicit manual upgrade. Empty means no upgrade is available. |
-| `PI_MCP_THINKING` | `xhigh` | pi thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Overridable per spawn. |
-| `PI_MCP_MAX_SESSIONS` | `8` | Hard cap on concurrent workers. |
-| `PI_MCP_PARALLEL_WARN` | `4` | Warn in `pi_spawn` once this many workers are active. |
-| `PI_MCP_BASE_REF` | `HEAD` | Base ref for new worktrees. |
-| `PI_MCP_AUTO_CLEAN` | `1` | Remove finished workers' worktrees automatically (branches are kept). |
-| `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished, idle worker is kept before the sweeper cleans it. |
-| `PI_MCP_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
-| `PI_MCP_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
-| `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state: locks, mailbox, board, session metadata. |
+| `PI_COFFEE_HOST` | `127.0.0.1` | Bind address. Loopback by default. |
+| `PI_COFFEE_PORT` | `8787` | Port for `/mcp` and `/internal/*`. |
+| `PI_COFFEE_PI_BIN` | `pi` | The pi executable. |
+| `PI_COFFEE_DEFAULT_REPO` | *(none)* | Default repository for `pi_spawn`. If unset, every spawn must pass `repo`. |
+| `PI_COFFEE_WORKSPACE_ROOT` | `~/.pi-coffee/worktrees` | Where worktrees are created. |
+| `PI_COFFEE_PROVIDER` / `PI_COFFEE_MODEL` | `deepseek` / `deepseek-flash` | Worker provider and model. |
+| `PI_COFFEE_STRONG_MODEL` | *(empty)* | Model for an explicit manual upgrade. Empty means no upgrade is available. |
+| `PI_COFFEE_THINKING` | `xhigh` | pi thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Overridable per spawn. |
+| `PI_COFFEE_MAX_SESSIONS` | `8` | Hard cap on concurrent workers. |
+| `PI_COFFEE_PARALLEL_WARN` | `4` | Warn in `pi_spawn` once this many workers are active. |
+| `PI_COFFEE_BASE_REF` | `HEAD` | Base ref for new worktrees. |
+| `PI_COFFEE_AUTO_CLEAN` | `1` | Remove finished workers' worktrees automatically (branches are kept). |
+| `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | Minutes a finished, idle worker is kept before the sweeper cleans it. |
+| `PI_COFFEE_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
+| `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
+| `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
 
 Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
 caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least
@@ -344,7 +399,7 @@ or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and
 
 ## State and recovery
 
-Daemon state lives in `state.json` inside `PI_MCP_DATA_DIR`. Writes are serialized and atomic: a
+Daemon state lives in `state.json` inside `PI_COFFEE_DATA_DIR`. Writes are serialized and atomic: a
 unique temp file is renamed into place, and the previous validated snapshot is kept as
 `state.json.bak`.
 
@@ -358,7 +413,7 @@ write locking. Run one daemon per state directory.
 
 ## Security
 
-- The daemon binds to loopback and has no authentication by default. Setting `PI_MCP_TOKEN` enables
+- The daemon binds to loopback and has no authentication by default. Setting `PI_COFFEE_TOKEN` enables
   it: the same secret must be presented on `/mcp` and `/internal/*`, either as
   `x-pi-coord-token` or `Authorization: Bearer <token>`.
 - If you expose the daemon beyond loopback, use the token and a trusted network or VPN. A token on
@@ -370,12 +425,12 @@ write locking. Run one daemon per state directory.
 
 | Symptom | Likely cause | What to try |
 |---|---|---|
-| `{"error":"unauthorized"}` | Token mismatch between daemon and client | Set the same `PI_MCP_TOKEN` on the daemon and in the Codex/proxy environment. |
-| `pi_spawn` fails with "repo is required" | No default repository configured | Set `PI_MCP_DEFAULT_REPO`, or pass `repo` on every spawn. |
+| `{"error":"unauthorized"}` | Token mismatch between daemon and client | Set the same `PI_COFFEE_TOKEN` on the daemon and in the Codex/proxy environment. |
+| `pi_spawn` fails with "repo is required" | No default repository configured | Set `PI_COFFEE_DEFAULT_REPO`, or pass `repo` on every spawn. |
 | A worker starts and immediately errors out | `pi` is not logged in as the daemon user | Run `pi` once as that user to authenticate. |
 | `git` complains about "dubious ownership" | The daemon user differs from the repo owner | The daemon already passes `safe.directory=*` to its own git calls; if you see this elsewhere, check your git version. |
 | Sessions show `stopped` after a restart | Workers do not survive a daemon restart | This is expected. Spawn new sessions; the transcript files are still on disk. |
-| The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_MCP_PORT` to a free port. |
+| The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port. |
 | `codex mcp add` is not found | `codex` is not on the daemon user's `PATH` | Register the server manually in `~/.codex/config.toml`. |
 | A worker is blocked by a file claim | Another worker holds a conflicting claim | Use `coord_send` to coordinate, or `pi_release` if the claim is stale. |
 
@@ -384,6 +439,8 @@ write locking. Run one daemon per state directory.
 ```bash
 npm ci                 # install (Node >= 22.19)
 npm run build          # compile TypeScript to dist/
+npm run setup          # write provider credentials to ~/.pi-coffee/env
+npm run doctor         # check node/git/pi/credentials/data directory
 npm run dev            # run the daemon from source with tsx
 npm run typecheck      # main sources
 npm run typecheck:extensions   # extension against the real pi API types
@@ -406,12 +463,15 @@ model provider.
 ### Repository layout
 
 ```
-src/          daemon, MCP server, git plumbing, locks, state store
-extensions/   worker-side pi extension (claims, inbox, coord_* tools)
-tests/        offline test suite (node --test)
-scripts/      smoke and status helpers
-deploy/       systemd and launchd installers
-codex/        Codex skill installed by install.sh
+src/               daemon, MCP server, git plumbing, locks, state store
+extensions/        worker-side pi extension (claims, inbox, coord_* tools)
+tests/             offline test suite (node --test)
+scripts/           setup, doctor, smoke, and status helpers
+deploy/            systemd and launchd installers
+codex/             Codex skill installed by install.sh
+Dockerfile         image with Node, git, and pi bundled
+docker-compose.yml host-facing compose file
+.env.example       provider key / model template for Docker
 ```
 
 ## Known limitations

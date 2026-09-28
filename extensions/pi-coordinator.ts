@@ -1,5 +1,5 @@
 /**
- * Worker-side thin client for the pi-mcp coordinator daemon.
+ * Worker-side thin client for the pi-coffee coordinator daemon.
  *
  * Loaded only into daemon-spawned pi sessions (via `--extension`). It is inert
  * unless PI_COORD_URL / PI_COORD_SESSION_ID are present in the environment.

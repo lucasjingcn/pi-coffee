@@ -1,0 +1,32 @@
+name: pi-coffee
+
+services:
+  pi-coffee:
+    build: .
+    image: pi-coffee:latest
+    restart: unless-stopped
+    ports:
+      # Loopback only by default. Change to 0.0.0.0:8787 (with a token) to expose it.
+      - "127.0.0.1:8787:8787"
+    env_file:
+      - .env
+    environment:
+      PI_COFFEE_HOST: 0.0.0.0
+      PI_COFFEE_DEFAULT_REPO: /workspace
+    volumes:
+      # Daemon state (locks, mailbox, board, session metadata).
+      - pi-coffee-data:/data
+      # Repositories the workers operate on. Put or clone a repo here.
+      - ./workspace:/workspace
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/internal/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pi-coffee-data:

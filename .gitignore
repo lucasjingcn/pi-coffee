@@ -9,6 +9,7 @@ dist/
 # Local secrets and credentials — never commit these
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12
@@ -16,7 +17,10 @@ auth.json
 credentials*.json
 .pi/
 
-# Local daemon state (normally lives outside the repo under ~/.pi-mcp)
+# Docker compose mount for repositories
+/workspace/
+
+# Local daemon state (normally lives outside the repo under ~/.pi-coffee)
 state.json
 state.json.bak
 *.tmp

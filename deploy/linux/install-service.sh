@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Install pi-mcp as a systemd service.
+# Install pi-coffee as a systemd service.
 #
-#   Run as root            -> system service   (/etc/systemd/system/pi-mcp.service)
-#   Run as a normal user   -> user service     (~/.config/systemd/user/pi-mcp.service)
+#   Run as root            -> system service   (/etc/systemd/system/pi-coffee.service)
+#   Run as a normal user   -> user service     (~/.config/systemd/user/pi-coffee.service)
 #
 # The daemon must run as a user whose `pi` is installed and authenticated.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PORT="${PI_MCP_PORT:-8787}"
-UNIT_NAME="pi-mcp"
+PORT="${PI_COFFEE_PORT:-8787}"
+UNIT_NAME="pi-coffee"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
@@ -25,18 +25,18 @@ PI_BIN="$(command -v pi || true)"
 DAEMON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/.pi/agent/bin"
 
 ENV_BLOCK="Environment=PATH=$DAEMON_PATH
-Environment=PI_MCP_PORT=$PORT
-Environment=PI_MCP_DATA_DIR=$HOME/.pi-mcp"
+Environment=PI_COFFEE_PORT=$PORT
+Environment=PI_COFFEE_DATA_DIR=$HOME/.pi-coffee"
 [ -n "$PI_BIN" ] && ENV_BLOCK="$ENV_BLOCK
-Environment=PI_MCP_PI_BIN=$PI_BIN"
-[ -n "${PI_MCP_DEFAULT_REPO:-}" ] && ENV_BLOCK="$ENV_BLOCK
-Environment=PI_MCP_DEFAULT_REPO=$PI_MCP_DEFAULT_REPO"
+Environment=PI_COFFEE_PI_BIN=$PI_BIN"
+[ -n "${PI_COFFEE_DEFAULT_REPO:-}" ] && ENV_BLOCK="$ENV_BLOCK
+Environment=PI_COFFEE_DEFAULT_REPO=$PI_COFFEE_DEFAULT_REPO"
 
 if [ "$(id -u)" = "0" ]; then
   UNIT="/etc/systemd/system/$UNIT_NAME.service"
   cat > "$UNIT" <<EOF
 [Unit]
-Description=pi-mcp - Codex-as-manager MCP for parallel pi workers
+Description=pi-coffee - Codex-as-manager MCP for parallel pi workers
 After=network.target
 
 [Service]
@@ -64,7 +64,7 @@ else
   mkdir -p "$UDIR"
   cat > "$UNIT" <<EOF
 [Unit]
-Description=pi-mcp - Codex-as-manager MCP for parallel pi workers
+Description=pi-coffee - Codex-as-manager MCP for parallel pi workers
 
 [Service]
 Type=simple

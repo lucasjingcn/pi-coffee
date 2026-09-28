@@ -471,7 +471,7 @@ export class Coordinator {
   private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
-      throw new Error("repo is required: pass repo to pi_spawn, or set PI_MCP_DEFAULT_REPO for the daemon");
+      throw new Error("repo is required: pass repo to pi_spawn, or set PI_COFFEE_DEFAULT_REPO for the daemon");
     }
     if (!existsSync(repo)) {
       throw new Error(`repo path does not exist: ${repo}`);
@@ -991,7 +991,7 @@ export class Coordinator {
     const target = repo ?? this.config.defaultRepo;
     if (!target) {
       throw new Error(
-        `cannot resolve repository for manual claimant "${sessionId}": pass repo or configure PI_MCP_DEFAULT_REPO`,
+        `cannot resolve repository for manual claimant "${sessionId}": pass repo or configure PI_COFFEE_DEFAULT_REPO`,
       );
     }
     try {

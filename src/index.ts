@@ -9,7 +9,7 @@ const config = loadConfig();
 const coord = new Coordinator(config);
 
 function log(...args: unknown[]): void {
-  console.error("[pi-mcp]", ...args);
+  console.error("[pi-coffee]", ...args);
 }
 
 // ---------------------------------------------------------------------------

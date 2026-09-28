@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Live view of pi-mcp workers. Polls the daemon and prints a table.
+ * Live view of pi-coffee workers. Polls the daemon and prints a table.
  *
  *   node scripts/status.mjs             # one snapshot
  *   watch -n2 'node scripts/status.mjs' # live
  */
-const BASE = process.env.PI_MCP_URL || `http://127.0.0.1:${process.env.PI_MCP_PORT || 8787}`;
+const BASE = process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}`;
 
 async function get(path) {
   try {
@@ -21,7 +21,7 @@ const list = sessions.sessions || [];
 const active = list.filter((s) => ["starting", "idle", "working"].includes(s.status)).length;
 const working = list.filter((s) => s.status === "working").length;
 
-console.log(`pi-mcp @ ${BASE}   ${new Date().toLocaleTimeString()}`);
+console.log(`pi-coffee @ ${BASE}   ${new Date().toLocaleTimeString()}`);
 console.log(`sessions: ${list.length}  |  active: ${active}  |  working(pi busy): ${working}`);
 if (list.length) {
   console.log("");

@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 /**
- * stdio -> HTTP bridge for pi-mcp.
+ * stdio -> HTTP bridge for pi-coffee.
  *
  * Codex starts this as a stdio MCP server. It forwards every JSON-RPC message to
- * the pi-mcp HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint
+ * the pi-coffee HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint
  * is stateless, a daemon restart never breaks the Codex session: the next request
  * simply reconnects.
  *
  * Env:
- *   PI_MCP_URL    full MCP URL (default http://127.0.0.1:8787/mcp)
- *   PI_MCP_PORT   used if PI_MCP_URL is unset
- *   PI_MCP_TOKEN  optional bearer/x-pi-coord-token
+ *   PI_COFFEE_URL    full MCP URL (default http://127.0.0.1:8787/mcp)
+ *   PI_COFFEE_PORT   used if PI_COFFEE_URL is unset
+ *   PI_COFFEE_TOKEN  optional bearer/x-pi-coord-token
  */
-const URL = process.env.PI_MCP_URL || `http://127.0.0.1:${process.env.PI_MCP_PORT || 8787}/mcp`;
-const TOKEN = process.env.PI_MCP_TOKEN || "";
+const URL = process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}/mcp`;
+const TOKEN = process.env.PI_COFFEE_TOKEN || "";
 
 function log(...args: unknown[]): void {
-  console.error("[pi-mcp-proxy]", ...args);
+  console.error("[pi-coffee-proxy]", ...args);
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,7 +128,7 @@ async function post(body: unknown): Promise<unknown> {
     }
   }
   // Unreachable: the loop either returns or throws.
-  throw new Error("pi-mcp proxy: retry loop exhausted");
+  throw new Error("pi-coffee proxy: retry loop exhausted");
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ async function handleLine(line: string): Promise<void> {
         JSON.stringify({
           jsonrpc: "2.0",
           id,
-          error: { code: -32000, message: "pi-mcp daemon returned an empty, invalid, or unmatched response" },
+          error: { code: -32000, message: "pi-coffee daemon returned an empty, invalid, or unmatched response" },
         }) + "\n",
       );
       return;
@@ -207,7 +207,7 @@ async function handleLine(line: string): Promise<void> {
         JSON.stringify({
           jsonrpc: "2.0",
           id,
-          error: { code: -32000, message: `pi-mcp daemon unreachable: ${String(e)}` },
+          error: { code: -32000, message: `pi-coffee daemon unreachable: ${String(e)}` },
         }) + "\n",
       );
     }

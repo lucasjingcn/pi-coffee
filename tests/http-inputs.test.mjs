@@ -13,8 +13,8 @@ async function daemon(fn, token = '') {
   const port = probe.address().port;
   await new Promise(r => probe.close(r));
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith('PI_MCP_')) delete env[key];
-  Object.assign(env, { PI_MCP_HOST: '127.0.0.1', PI_MCP_PORT: String(port), PI_MCP_DATA_DIR: dir, PI_MCP_WORKSPACE_ROOT: join(dir, 'worktrees'), PI_MCP_TOKEN: token, PI_MCP_AUTO_CLEAN: '0' });
+  for (const key of Object.keys(env)) if (key.startsWith('PI_COFFEE_')) delete env[key];
+  Object.assign(env, { PI_COFFEE_HOST: '127.0.0.1', PI_COFFEE_PORT: String(port), PI_COFFEE_DATA_DIR: dir, PI_COFFEE_WORKSPACE_ROOT: join(dir, 'worktrees'), PI_COFFEE_TOKEN: token, PI_COFFEE_AUTO_CLEAN: '0' });
   const proc = spawn(process.execPath, ['dist/index.js'], { env, stdio: 'ignore' });
   const closed = new Promise(r => proc.once('close', r));
   const base = `http://127.0.0.1:${port}`;

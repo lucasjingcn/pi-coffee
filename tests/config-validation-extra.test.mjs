@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { loadConfig } from "../dist/config.js";
 
 test("parallelWarnThreshold validates env and overrides, override wins over invalid env", () => {
-  const key = "PI_MCP_PARALLEL_WARN";
+  const key = "PI_COFFEE_PARALLEL_WARN";
   const saved = process.env[key];
   delete process.env[key];
   try {
@@ -33,7 +33,7 @@ test("parallelWarnThreshold validates env and overrides, override wins over inva
 });
 
 test("overriding dataDir derives default workspaceRoot under effective dataDir", () => {
-  const keys = ["PI_MCP_DATA_DIR", "PI_MCP_WORKSPACE_ROOT"];
+  const keys = ["PI_COFFEE_DATA_DIR", "PI_COFFEE_WORKSPACE_ROOT"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   keys.forEach((k) => delete process.env[k]);
   try {
@@ -41,16 +41,16 @@ test("overriding dataDir derives default workspaceRoot under effective dataDir",
       loadConfig({ dataDir: "/tmp/override-data" }).workspaceRoot,
       join("/tmp/override-data", "worktrees"),
     );
-    process.env.PI_MCP_DATA_DIR = "/tmp/env-data";
+    process.env.PI_COFFEE_DATA_DIR = "/tmp/env-data";
     assert.equal(
       loadConfig({ dataDir: "/tmp/override-data" }).workspaceRoot,
       join("/tmp/override-data", "worktrees"),
     );
-    process.env.PI_MCP_WORKSPACE_ROOT = "/tmp/explicit";
+    process.env.PI_COFFEE_WORKSPACE_ROOT = "/tmp/explicit";
     assert.equal(loadConfig({ dataDir: "/tmp/override-data" }).workspaceRoot, "/tmp/explicit");
-    delete process.env.PI_MCP_WORKSPACE_ROOT;
+    delete process.env.PI_COFFEE_WORKSPACE_ROOT;
     assert.equal(loadConfig().workspaceRoot, join("/tmp/env-data", "worktrees"));
-    delete process.env.PI_MCP_DATA_DIR;
+    delete process.env.PI_COFFEE_DATA_DIR;
   } finally {
     for (const k of keys) {
       if (saved[k] === undefined) delete process.env[k];

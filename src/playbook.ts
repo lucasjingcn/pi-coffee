@@ -36,7 +36,7 @@ Non-negotiable rules:
 
 Preferred loop: recon -> plan -> define acceptance criteria -> pi_spawn (isolated worktree, tight scope) -> pi_send -> pi_wait -> read pi_diff and review -> verify yourself -> fix or pi_answer -> integrate -> verify -> commit/push.`;
 
-export const PLAYBOOK = `# pi-mcp Quality-First Orchestration Doctrine (Codex = 大总管)
+export const PLAYBOOK = `# pi-coffee Quality-First Orchestration Doctrine (Codex = 大总管)
 
 ## Prime directive
 **Default action = delegate implementation to pi workers.** Writing application code yourself is the
@@ -124,13 +124,13 @@ override:true together with override_reason.
 - If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
   stronger model (pass an explicit model id to pi_spawn), with the concrete failures and evidence attached, then verify hard.
 - Never enter an endless correction loop. It burns quota, time, and the worker's context.
-- pi_status exposes instructions_sent; overrides are recorded on the pi-mcp board for audit.
+- pi_status exposes instructions_sent; overrides are recorded on the pi-coffee board for audit.
 
 ## Orchestration overhead
 Each worker is a separate context with duplicated repo reading and its own integration cost. Keep
 2-4 workers, each with a distinct file set, and prefer fewer when the work is coupled. Over-parallelizing
 does not just cost tokens — it lowers quality. The daemon emits a warning in pi_spawn when active
-workers reach PI_MCP_PARALLEL_WARN (default 4): when you see it, integrate/merge before spawning more.
+workers reach PI_COFFEE_PARALLEL_WARN (default 4): when you see it, integrate/merge before spawning more.
 
 ## Review: parallel evidence, serial judgment
 Review is judgment and needs a whole-picture view; splitting it across workers loses cross-file
@@ -185,7 +185,7 @@ Do not skip this. The scoreboard is how the user sees whether delegation is actu
 
 export const SKILL_MD = `---
 name: pi-orchestrator
-description: Act as the quality-first general manager that delegates only well-specified, verifiable implementation to parallel pi workers via the pi-mcp MCP server. Use when implementing a multi-part change in a repository that has pi-mcp connected - spawn isolated pi workers, give them explicit acceptance criteria, review their FULL diffs for bugs, verify their work yourself, answer their questions, and integrate/commit/push.
+description: Act as the quality-first general manager that delegates only well-specified, verifiable implementation to parallel pi workers via the pi-coffee MCP server. Use when implementing a multi-part change in a repository that has pi-coffee connected - spawn isolated pi workers, give them explicit acceptance criteria, review their FULL diffs for bugs, verify their work yourself, answer their questions, and integrate/commit/push.
 ---
 
 # pi-orchestrator

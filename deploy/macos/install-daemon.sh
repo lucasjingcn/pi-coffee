@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Install pi-mcp as a per-user macOS LaunchAgent so the daemon stays up and
+# Install pi-coffee as a per-user macOS LaunchAgent so the daemon stays up and
 # restarts on login/crash. Run from the project root:  ./deploy/macos/install-daemon.sh
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PORT="${PI_MCP_PORT:-8787}"
+PORT="${PI_COFFEE_PORT:-8787}"
 LABEL="com.pimcp.daemon"
 LA_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LA_DIR/$LABEL.plist"
-LOG_DIR="$HOME/.pi-mcp/logs"
+LOG_DIR="$HOME/.pi-coffee/logs"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
@@ -26,7 +26,7 @@ chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true
 # launchd has a minimal PATH; make sure the daemon can find git + node + pi.
 DAEMON_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.pi/agent/bin:$HOME/.bun/bin"
 REPO_KEYS=""
-[ -n "${PI_MCP_DEFAULT_REPO:-}" ] && REPO_KEYS="    <key>PI_MCP_DEFAULT_REPO</key><string>$PI_MCP_DEFAULT_REPO</string>"
+[ -n "${PI_COFFEE_DEFAULT_REPO:-}" ] && REPO_KEYS="    <key>PI_COFFEE_DEFAULT_REPO</key><string>$PI_COFFEE_DEFAULT_REPO</string>"
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,7 +44,7 @@ cat > "$PLIST" <<EOF
   <dict>
     <key>PATH</key><string>$DAEMON_PATH</string>
     <key>HOME</key><string>$HOME</string>
-    <key>PI_MCP_PORT</key><string>$PORT</string>
+    <key>PI_COFFEE_PORT</key><string>$PORT</string>
 $REPO_KEYS
   </dict>
   <key>RunAtLoad</key><true/>
