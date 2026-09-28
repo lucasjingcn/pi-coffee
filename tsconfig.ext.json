@@ -7,14 +7,7 @@
     "types": ["node"],
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@earendil-works/pi-coding-agent": ["/root/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-      "@earendil-works/pi-agent-core": ["/root/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
-      "@earendil-works/pi-ai": ["/root/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
-      "@earendil-works/pi-tui": ["/root/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
-    }
+    "noEmit": true
   },
   "include": ["extensions/**/*.ts"]
 }
