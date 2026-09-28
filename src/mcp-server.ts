@@ -467,7 +467,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Clean up finished workers",
       description:
-        "Stop and evict every finished (outcome-recorded) worker and remove its worktree if clean (branches are kept). Use to reclaim disk after a task.",
+        "Stop and evict finished workers, remove their clean worktrees, and delete branches of finished workstreams (including historical sessions whose worktree is already gone) only when the branch tip is an ancestor of that repo's current HEAD. Safe by construction: never deletes the current/default branch or any branch checked out in a worktree, never force-deletes, and retains abandoned/unfinished sessions, active sessions, dirty worktrees, and squash/rebase work that is not ancestry-proven. Returns actual `branches_deleted` plus per-branch retention reasons; run after pi_finish to reclaim disk.",
       inputSchema: {},
     },
     async () => json(await coord.gc()),
