@@ -38,6 +38,7 @@ agents or ask the orchestrator a question when something is unclear.
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
+- [Upgrade and uninstall](#upgrade-and-uninstall)
 - [Known limitations](#known-limitations)
 - [License](#license)
 
@@ -235,6 +236,15 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   pi-coffee
 ```
 
+Day-to-day operations:
+
+```bash
+docker compose logs -f                            # follow daemon logs
+docker compose build --pull && docker compose up -d   # upgrade
+docker compose down                               # stop (state volume is kept)
+docker compose down -v                            # stop and drop daemon state
+```
+
 ## A task, start to finish
 
 This is roughly what a single delegated change looks like.
@@ -391,6 +401,10 @@ Everything is configured through environment variables.
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
 | `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
+| `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `run.sh`, `npm run setup`, and `npm run doctor` read/write for provider credentials. |
+
+`install.sh` also honors `PI_COFFEE_SKIP_PI_INSTALL=1`, `PI_COFFEE_SKIP_SETUP=1`, and
+`PI_COFFEE_YES=1` (answer yes to every prompt).
 
 Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
 caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least
@@ -474,6 +488,44 @@ docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker
 ```
 
+## Upgrade and uninstall
+
+Native install:
+
+```bash
+git pull
+npm install
+npm run build
+# restart the daemon: systemctl --user restart pi-coffee, or stop and re-run ./run.sh
+```
+
+Docker:
+
+```bash
+docker compose build --pull && docker compose up -d
+```
+
+To remove everything:
+
+```bash
+# stop the daemon first (the service, `docker compose down`, or Ctrl-C on ./run.sh)
+rm -rf ~/.pi-coffee ~/.pi-mcp                    # daemon state and credentials
+rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
+codex mcp remove pi
+```
+
+### Upgrading from pi-mcp
+
+The project was previously called `pi-mcp`, using `PI_MCP_*` variables and `~/.pi-mcp` for state. If
+you have an older install, either move the state or point at it:
+
+```bash
+mv ~/.pi-mcp ~/.pi-coffee                         # or: export PI_COFFEE_DATA_DIR=~/.pi-mcp
+```
+
+In your env file, rename every `PI_MCP_*` variable to `PI_COFFEE_*` (for example `PI_MCP_TOKEN` to
+`PI_COFFEE_TOKEN`).
+
 ## Known limitations
 
 - Workers do not survive a daemon restart. Shutting the daemon down stops them, and they are not
@@ -487,3 +539,7 @@ docker-compose.yml host-facing compose file
 Apache License 2.0. See [LICENSE](LICENSE).
 
 Copyright 2026 lucasjing.
+
+pi (`@earendil-works/pi-coding-agent`) is a separate MIT-licensed program by Mario Zechner. This
+repository invokes it as an external tool rather than redistributing its code; the Docker image
+installs it from npm at build time. pi is not affiliated with, and does not endorse, this project.

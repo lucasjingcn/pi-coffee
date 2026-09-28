@@ -36,6 +36,7 @@ pi-coffee 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理
 - [安全](#安全)
 - [常见问题](#常见问题)
 - [开发](#开发)
+- [升级与卸载](#升级与卸载)
 - [已知限制](#已知限制)
 - [许可证](#许可证)
 
@@ -222,6 +223,15 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   pi-coffee
 ```
 
+日常运维：
+
+```bash
+docker compose logs -f                                # 跟日志
+docker compose build --pull && docker compose up -d   # 升级
+docker compose down                                   # 停止（保留状态卷）
+docker compose down -v                                # 停止并清掉 daemon 状态
+```
+
 ## 一个任务的全过程
 
 一次典型的委派大概是这样：
@@ -369,6 +379,10 @@ worker，应该用只读验收目录加进程隔离，而不是指望文件声�
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | 显式 `pi_stop` 的 `delete_branch` 默认值。`pi_gc` 不看这个。 |
 | `PI_COFFEE_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
+| `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `run.sh`、`npm run setup`、`npm run doctor` 读写 provider 凭据的文件。 |
+
+`install.sh` 还识别 `PI_COFFEE_SKIP_PI_INSTALL=1`、`PI_COFFEE_SKIP_SETUP=1` 和 `PI_COFFEE_YES=1`
+（对所有询问都回答 yes）。
 
 配置不合法时启动会直接失败，而不是带着问题跑。端口必须是 1 到 65535 的整数，会话上限和提醒阈值必须
 是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。
@@ -444,6 +458,42 @@ docker-compose.yml 面向用户的 compose 文件
 .env.example       Docker 用的 provider 密钥 / model 模板
 ```
 
+## 升级与卸载
+
+本地安装：
+
+```bash
+git pull
+npm install
+npm run build
+# 重启 daemon：systemctl --user restart pi-coffee，或停掉后重新 ./run.sh
+```
+
+Docker：
+
+```bash
+docker compose build --pull && docker compose up -d
+```
+
+彻底卸载：
+
+```bash
+# 先停掉 daemon（服务、`docker compose down`，或对 ./run.sh 按 Ctrl-C）
+rm -rf ~/.pi-coffee ~/.pi-mcp                    # daemon 状态与凭据
+rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
+codex mcp remove pi
+```
+
+### 从 pi-mcp 迁移
+
+项目以前叫 `pi-mcp`，用的是 `PI_MCP_*` 变量和 `~/.pi-mcp` 目录。如果你装过旧版本，迁移状态即可：
+
+```bash
+mv ~/.pi-mcp ~/.pi-coffee                         # 或者：export PI_COFFEE_DATA_DIR=~/.pi-mcp
+```
+
+env 文件里把所有 `PI_MCP_*` 变量改名成 `PI_COFFEE_*`（例如 `PI_MCP_TOKEN` → `PI_COFFEE_TOKEN`）。
+
 ## 已知限制
 
 - worker 不会跨 daemon 重启存活。关闭 daemon 就会把它们停掉，重启后不会自动拉起。会话文件会留着，
@@ -456,3 +506,7 @@ docker-compose.yml 面向用户的 compose 文件
 Apache License 2.0，见 [LICENSE](LICENSE)。
 
 版权所有 2026 lucasjing。
+
+pi（`@earendil-works/pi-coding-agent`）是 Mario Zechner 的独立 MIT 项目。本仓库只是把它当作外部
+程序调用，不再分发其代码；Docker 镜像在构建时从 npm 安装它。pi 与本项目没有隶属关系，也不为本项目
+背书。
