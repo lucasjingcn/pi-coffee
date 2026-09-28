@@ -22,6 +22,14 @@ export default function (pi: ExtensionAPI) {
 
   const held = new Set<string>();
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let pollInFlight = false;
+
+  // Bound every coordinator HTTP call so a hung/silent daemon can't wedge
+  // polling or tool calls forever and recovery resumes promptly.
+  const coordTimeoutMs = (() => {
+    const raw = Number(process.env.PI_COORD_HTTP_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10_000;
+  })();
 
   async function call(path: string, body?: unknown, method: "GET" | "POST" = "POST"): Promise<any> {
     const url = new URL(path, base);
@@ -31,6 +39,7 @@ export default function (pi: ExtensionAPI) {
       method,
       headers,
       body: method === "POST" && body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(coordTimeoutMs),
     });
     const text = await res.text();
     let parsed: any = undefined;
@@ -244,6 +253,8 @@ export default function (pi: ExtensionAPI) {
   // --- mailbox polling ------------------------------------------------------
 
   async function pollInbox(): Promise<void> {
+    if (pollInFlight) return; // serialize polling: never overlap deliveries
+    pollInFlight = true;
     try {
       const res = await call(`/internal/inbox?sessionId=${encodeURIComponent(sessionId)}&unread=1`, undefined, "GET");
       const msgs: any[] = res?.messages ?? [];
@@ -251,13 +262,18 @@ export default function (pi: ExtensionAPI) {
       const text = msgs
         .map((m) => `[coordinator] from ${m.from} (${m.kind}):\n${m.text}`)
         .join("\n\n");
-      // Inject first, then mark read: at-least-once delivery beats silently dropping a message.
-      pi.sendUserMessage(`${text}\n\n(Use coord_send to reply, coord_board_read to check shared state.)`, {
+      // Inject first, then mark read: at-least-once delivery beats silently
+      // dropping a message. Only ack after injection succeeds so a failed
+      // delivery is retried instead of being lost.
+      await pi.sendUserMessage(`${text}\n\n(Use coord_send to reply, coord_board_read to check shared state.)`, {
         deliverAs: "followUp",
       });
-      await call("/internal/read", { ids: msgs.map((m) => m.id) });
+      // Per-recipient ack: broadcasts stay unread for other workers.
+      await call("/internal/read", { ids: msgs.map((m) => m.id), sessionId });
     } catch {
-      /* daemon down: keep polling quietly */
+      /* daemon down or injection failed: keep polling quietly, no ack */
+    } finally {
+      pollInFlight = false;
     }
   }
 

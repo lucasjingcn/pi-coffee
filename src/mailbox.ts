@@ -9,7 +9,14 @@ export interface MailMessage {
   kind: MessageKind;
   text: string;
   ts: number;
+  /**
+   * Legacy/global read flag. For direct messages it records that the recipient
+   * acknowledged the message. For broadcasts it is set by legacy no-session
+   * acks so older callers keep working. Prefer {@link readBy} for broadcasts.
+   */
   read: boolean;
+  /** Session ids that have acknowledged this message (used for broadcasts). */
+  readBy?: string[];
 }
 
 export class Mailbox {
@@ -22,22 +29,59 @@ export class Mailbox {
     return m;
   }
 
-  inbox(sessionId: string, opts: { unreadOnly?: boolean; since?: number } = {}): MailMessage[] {
-    return this.messages.filter(
-      (m) =>
-        (m.to === sessionId || m.to === "*") &&
-        (!opts.unreadOnly || !m.read) &&
-        (opts.since === undefined || m.ts > opts.since),
-    );
+  /** Whether `sessionId` has acknowledged this message. */
+  private isReadBy(m: MailMessage, sessionId: string): boolean {
+    if (m.read) return true; // legacy global ack / direct recipient ack
+    return Boolean(m.readBy && m.readBy.includes(sessionId));
   }
 
-  markRead(ids: string[]): void {
+  inbox(sessionId: string, opts: { unreadOnly?: boolean; since?: number } = {}): MailMessage[] {
+    const out: MailMessage[] = [];
+    for (const m of this.messages) {
+      if (m.to !== sessionId && m.to !== "*") continue;
+      if (opts.since !== undefined && m.ts <= opts.since) continue;
+      const read = this.isReadBy(m, sessionId);
+      if (opts.unreadOnly && read) continue;
+      // Return a per-recipient view so callers never observe another
+      // recipient's read state on a shared broadcast object.
+      out.push({ ...m, read, readBy: m.readBy ? [...m.readBy] : undefined });
+    }
+    return out;
+  }
+
+  /**
+   * Acknowledge messages. When `sessionId` is supplied only that recipient's
+   * state changes: direct messages are only acked by their recipient and
+   * broadcasts record the session in `readBy` so other recipients still see
+   * them. Without `sessionId` the legacy global ack is preserved.
+   */
+  markRead(ids: string[], sessionId?: string): void {
     const set = new Set(ids);
-    for (const m of this.messages) if (set.has(m.id)) m.read = true;
+    for (const m of this.messages) {
+      if (!set.has(m.id)) continue;
+      if (sessionId === undefined) {
+        m.read = true; // legacy global ack
+        continue;
+      }
+      if (m.to === "*") {
+        const readBy = (m.readBy ??= []);
+        if (!readBy.includes(sessionId)) readBy.push(sessionId);
+      } else if (m.to === sessionId) {
+        m.read = true;
+      }
+      // Direct message for another recipient: ignore this ack.
+    }
   }
 
   markAllRead(sessionId: string): void {
-    for (const m of this.messages) if (m.to === sessionId || m.to === "*") m.read = true;
+    for (const m of this.messages) {
+      if (m.to === sessionId) {
+        m.read = true;
+      } else if (m.to === "*") {
+        const readBy = (m.readBy ??= []);
+        if (!readBy.includes(sessionId)) readBy.push(sessionId);
+      }
+    }
   }
 
   export(): MailMessage[] {
