@@ -5,10 +5,25 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
+/**
+ * The daemon may run as a different Unix user than the repository owner (e.g. daemon as root,
+ * repo owned by the Codex user), which makes git refuse with "dubious ownership". Disable that
+ * check for the daemon's own git subprocesses only, via environment config (scoped, not global).
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*",
+  };
+}
+
 async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const { stdout } = await run("git", ["-C", cwd, ...args], {
     timeout,
     maxBuffer: 32 * 1024 * 1024,
+    env: gitEnv(),
   });
   return stdout.trim();
 }
