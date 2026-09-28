@@ -53,9 +53,38 @@ function parseBody(text: string): unknown {
   return undefined;
 }
 
+/**
+ * Codes that can only be observed before a request reaches the daemon.
+ * Retrying these is safe because no handler could have run. Anything else
+ * (HTTP error responses, resets, body/read failures, invalid JSON, ambiguous
+ * transport errors) might have executed a mutation and must never be replayed.
+ */
+const RETRYABLE_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EAI_AGAIN",
+]);
+
+/** Walk a fetch error's nested `cause`/`errors` chain looking for a pre-connection code. */
+function isPreConnectionFailure(e: unknown): boolean {
+  const seen = new Set<unknown>();
+  const stack: unknown[] = [e];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (cur === null || typeof cur !== "object" || seen.has(cur)) continue;
+    seen.add(cur);
+    const obj = cur as { code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof obj.code === "string" && RETRYABLE_CODES.has(obj.code)) return true;
+    if (Array.isArray(obj.errors)) stack.push(...obj.errors);
+    if (obj.cause !== undefined) stack.push(obj.cause);
+  }
+  return false;
+}
+
 async function post(body: unknown): Promise<unknown> {
   const attempts = 8;
-  let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       const res = await fetch(URL, { method: "POST", headers: headers(), body: JSON.stringify(body) });
@@ -63,11 +92,14 @@ async function post(body: unknown): Promise<unknown> {
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
       return parseBody(text);
     } catch (e) {
-      lastErr = e;
+      // Only transient failures that occur before the connection is established
+      // are safe to retry; everything else propagates and is reported once.
+      if (i === attempts - 1 || !isPreConnectionFailure(e)) throw e;
       await sleep(Math.min(200 * (i + 1), 1500));
     }
   }
-  throw lastErr;
+  // Unreachable: the loop either returns or throws.
+  throw new Error("pi-mcp proxy: retry loop exhausted");
 }
 
 let buf = "";
@@ -76,6 +108,15 @@ let ended = false;
 function maybeExit(): void {
   if (ended && pending === 0) process.exit(0);
 }
+function enqueueLine(line: string): void {
+  if (!line.trim()) return;
+  pending++;
+  void handleLine(line).finally(() => {
+    pending--;
+    maybeExit();
+  });
+}
+
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {
   buf += chunk;
@@ -83,17 +124,15 @@ process.stdin.on("data", (chunk: string) => {
   while ((nl = buf.indexOf("\n")) !== -1) {
     const line = buf.slice(0, nl).replace(/\r$/, "");
     buf = buf.slice(nl + 1);
-    if (line.trim()) {
-      pending++;
-      void handleLine(line).finally(() => {
-        pending--;
-        maybeExit();
-      });
-    }
+    enqueueLine(line);
   }
 });
 process.stdin.on("end", () => {
   ended = true;
+  // Flush a final request that arrived without a trailing newline.
+  const tail = buf.replace(/\r$/, "");
+  buf = "";
+  enqueueLine(tail);
   maybeExit();
 });
 
@@ -108,9 +147,19 @@ async function handleLine(line: string): Promise<void> {
   const isRequest = id !== undefined && id !== null;
   try {
     const resp = await post(msg);
-    if (isRequest && resp !== undefined) {
-      process.stdout.write(JSON.stringify(resp) + "\n");
+    if (!isRequest) return; // notifications are allowed to have no response
+    if (resp === undefined) {
+      // Empty/invalid body: still give the caller exactly one correlated reply.
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32000, message: "pi-mcp daemon returned an empty or invalid response" },
+        }) + "\n",
+      );
+      return;
     }
+    process.stdout.write(JSON.stringify(resp) + "\n");
   } catch (e) {
     log("forward failed:", String(e));
     if (isRequest) {
