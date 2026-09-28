@@ -67,6 +67,28 @@ const RETRYABLE_CODES = new Set([
   "EAI_AGAIN",
 ]);
 
+/**
+ * Validate that a parsed daemon body is a well-formed JSON-RPC 2.0 response that
+ * is correlated to `id` before forwarding it to the caller. Anything else means the
+ * caller would be left waiting on an unresolved request, so it is rejected.
+ */
+function isValidJsonRpcResponse(resp: unknown, id: unknown): boolean {
+  if (resp === null || typeof resp !== "object" || Array.isArray(resp)) return false;
+  const o = resp as Record<string, unknown>;
+  if (o.jsonrpc !== "2.0" || o.id !== id) return false;
+  const hasResult = Object.prototype.hasOwnProperty.call(o, "result");
+  const hasError = Object.prototype.hasOwnProperty.call(o, "error");
+  if (hasResult === hasError) return false; // must have exactly one of result/error
+  if (hasError) {
+    const err = o.error;
+    if (err === null || typeof err !== "object" || Array.isArray(err)) return false;
+    const e = err as Record<string, unknown>;
+    if (typeof e.code !== "number" || !Number.isInteger(e.code)) return false;
+    if (typeof e.message !== "string") return false;
+  }
+  return true;
+}
+
 /** Walk a fetch error's nested `cause`/`errors` chain looking for a pre-connection code. */
 function isPreConnectionFailure(e: unknown): boolean {
   const seen = new Set<unknown>();
@@ -148,13 +170,14 @@ async function handleLine(line: string): Promise<void> {
   try {
     const resp = await post(msg);
     if (!isRequest) return; // notifications are allowed to have no response
-    if (resp === undefined) {
-      // Empty/invalid body: still give the caller exactly one correlated reply.
+    if (!isValidJsonRpcResponse(resp, id)) {
+      // Empty/invalid body or an unparseable/unmatched/ill-formed response:
+      // still give the caller exactly one correlated reply instead of dropping it.
       process.stdout.write(
         JSON.stringify({
           jsonrpc: "2.0",
           id,
-          error: { code: -32000, message: "pi-mcp daemon returned an empty or invalid response" },
+          error: { code: -32000, message: "pi-mcp daemon returned an empty, invalid, or unmatched response" },
         }) + "\n",
       );
       return;
