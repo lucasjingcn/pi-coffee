@@ -1,5 +1,22 @@
+# Dependencies and build output
 node_modules/
 dist/
+
+# Logs and OS junk
 *.log
 .DS_Store
+
+# Local secrets and credentials — never commit these
 .env
+.env.*
+*.pem
+*.key
+*.p12
+auth.json
+credentials*.json
+.pi/
+
+# Local daemon state (normally lives outside the repo under ~/.pi-mcp)
+state.json
+state.json.bak
+*.tmp
