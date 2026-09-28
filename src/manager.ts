@@ -11,7 +11,7 @@ import { StateStore } from "./state-store.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
-import { commitAll, createWorktree, currentBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
+import { commitAll, createWorktree, currentBranch, deleteMergedBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
 
 /**
  * Temporary lock owner used to precheck acceptance reservations. LockManager skips locks whose
@@ -19,6 +19,9 @@ import { commitAll, createWorktree, currentBranch, isWorktreeClean, mergeBranch,
  * silently ignore another Codex-owned acceptance reservation; a distinct sentinel surfaces it.
  */
 const ACCEPTANCE_PRECHECK_OWNER = "__acceptance_precheck__";
+
+/** Workstream outcomes whose branches are eligible for safe cleanup once proven merged. */
+const FINISHED_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["success_first", "success_second", "taken_over"]);
 
 export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
 
@@ -167,19 +170,25 @@ export class Coordinator {
   }
 
   /**
-   * Remove a finished worker's worktree if it is clean. Never deletes branches unless configured,
-   * never touches dirty worktrees, and never touches non-success outcomes (leave for inspection).
+   * Remove a finished worker's worktree if it exists and is clean. Never deletes branches (gc's
+   * merged-only branch cleanup is explicit), never touches dirty worktrees, and leaves
+   * unfinished/abandoned outcomes for inspection.
    */
   private async cleanMeta(meta: SessionMeta): Promise<boolean> {
-    const ok =
-      meta.outcome === "success_first" || meta.outcome === "success_second" || meta.outcome === "taken_over";
+    const ok = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
     if (!ok || !meta.worktree || !existsSync(meta.worktree)) return false;
     if (!(await isWorktreeClean(meta.worktree))) return false;
-    await removeWorktree(meta.repo, meta.worktree, this.config.deleteBranches ? meta.branch : undefined).catch(() => {});
+    await removeWorktree(meta.repo, meta.worktree).catch(() => {});
     return true;
   }
 
-  /** Manual cleanup: stop+clean every finished, non-running worker and evict it from memory. */
+  /**
+   * Manual cleanup: stop+clean every finished, non-running worker and evict it from memory, then
+   * safely delete branches for finished workstreams (including historical ones whose worktree is
+   * already gone) whose tip is an ancestor of the repo's current HEAD. Branches are deduplicated
+   * per repo+branch and retained when any session for them is unfinished, active, or has a dirty
+   * worktree. Nothing here depends on the legacy `deleteBranches` force setting.
+   */
   async gc(): Promise<Record<string, unknown>> {
     let cleaned = 0;
     let evicted = 0;
@@ -191,9 +200,80 @@ export class Coordinator {
       this.runtimes.delete(id);
       evicted++;
     }
+    let branches: {
+      deleted: string[];
+      retained: { repo: string; branch: string; reason: string }[];
+      failure?: string;
+    };
+    try {
+      branches = await this.gcBranches();
+    } catch (error) {
+      branches = { deleted: [], retained: [], failure: error instanceof Error ? error.message : String(error) };
+    }
     this.notifyWaiters();
     this.scheduleSave();
-    return { worktrees_cleaned: cleaned, sessions_evicted: evicted, remaining_live: this.runtimes.size };
+    return {
+      worktrees_cleaned: cleaned,
+      branches_deleted: branches.deleted.length,
+      branches_retained: branches.retained,
+      ...(branches.failure ? { branches_error: branches.failure } : {}),
+      sessions_evicted: evicted,
+      remaining_live: this.runtimes.size,
+    };
+  }
+
+  private async gcBranches(): Promise<{
+    deleted: string[];
+    retained: { repo: string; branch: string; reason: string }[];
+  }> {
+    interface Candidate {
+      repo: string;
+      branch: string;
+      blocked?: string;
+    }
+    const byRepoBranch = new Map<string, Candidate>();
+    const metas: { meta: SessionMeta; live: boolean }[] = [
+      ...this.history.map((meta) => ({ meta, live: false })),
+      ...[...this.runtimes.values()].map((rt) => ({ meta: rt.meta, live: true })),
+    ];
+    for (const { meta, live } of metas) {
+      if (!meta.repo || !meta.branch) continue;
+      const key = `${meta.repo}\u0000${meta.branch}`;
+      let candidate = byRepoBranch.get(key);
+      if (!candidate) {
+        candidate = { repo: meta.repo, branch: meta.branch };
+        byRepoBranch.set(key, candidate);
+      }
+      if (candidate.blocked) continue;
+      if (!meta.outcome || !FINISHED_OUTCOMES.has(meta.outcome)) {
+        candidate.blocked = `outcome ${meta.outcome ?? "unrecorded"}`;
+        continue;
+      }
+      if (live && (meta.status === "starting" || meta.status === "idle" || meta.status === "working")) {
+        candidate.blocked = "active session";
+        continue;
+      }
+      // Missing worktrees must not block the branch check; only an existing dirty one does.
+      if (meta.worktree && existsSync(meta.worktree) && !(await isWorktreeClean(meta.worktree))) {
+        candidate.blocked = "dirty worktree";
+      }
+    }
+    const deleted: string[] = [];
+    const retained: { repo: string; branch: string; reason: string }[] = [];
+    for (const candidate of byRepoBranch.values()) {
+      if (candidate.blocked) {
+        retained.push({ repo: candidate.repo, branch: candidate.branch, reason: candidate.blocked });
+        continue;
+      }
+      const result = await deleteMergedBranch(candidate.repo, candidate.branch).catch((error) => ({
+        branch: candidate.branch,
+        deleted: false,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      if (result.deleted) deleted.push(result.branch);
+      else retained.push({ repo: candidate.repo, branch: candidate.branch, reason: result.reason });
+    }
+    return { deleted, retained };
   }
 
   // --- persistence ----------------------------------------------------------

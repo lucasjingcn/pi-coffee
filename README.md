@@ -134,6 +134,7 @@ the default.
 | `pi_message` / `pi_inbox` | Durable mailbox; optional injection into the recipient. |
 | `pi_board_post` / `pi_board_read` | Shared blackboard (contracts, ownership, decisions). |
 | `pi_stop` | Stop a worker; optionally remove its worktree/branch. |
+| `pi_gc` | Reclaim finished work: stop+evict workers, remove clean finished worktrees, and delete only branches proven merged (tip is an ancestor of the repo's current HEAD). Retains abandoned/unfinished, active, dirty, checked-out, current/default, and squash/rebase branches; reports `branches_deleted` + per-branch `branches_retained` reasons. |
 
 Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_inbox`,
 `coord_claim`, `coord_release`, `coord_board_post`, `coord_board_read`, `coord_status`.
@@ -148,6 +149,30 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
   a worker's worktree are normalized to the same relative key. Listed locks include `repo` (the
   canonical Git common directory). Manual `pi_claim` / `pi_release` calls can select a `repo`;
   omitting it uses the daemon default repo, while worker sessions always use their own repository.
+
+## Cleanup & branch retention
+
+`pi_gc` reclaims finished work in two steps: it stops/evicts finished workers and removes their
+clean worktrees, then deletes the branches of finished workstreams (`success_first`,
+`success_second`, `taken_over`) that are **proven merged**.
+
+- **Ancestry criterion**: a branch is deleted only when its tip is an ancestor of the repository's
+  current `HEAD` (`git merge-base --is-ancestor`), i.e. its commits are contained in the integrated
+  history. Squash- or rebase-integrated branches are *not* ancestors and are retained for manual
+  inspection; gc never force-deletes.
+- **Historical scope**: candidates come from persisted session metadata, so branches whose worktree
+  was already removed (e.g. after a daemon restart) are still reclaimed. Sessions are deduplicated
+  per repo+branch, and missing worktrees never block the check.
+- **Safety rails**: `abandoned`/unfinished sessions are retained; a branch is never deleted when it
+  is the current/default branch, checked out in any worktree, tied to an active session, or tied to
+  an existing dirty worktree. These rails hold regardless of `PI_MCP_DELETE_BRANCHES`.
+- **Reporting**: gc returns `branches_deleted` (count of actual deletions) and `branches_retained`
+  (`{repo, branch, reason}` for each retained candidate). A failed git call retains the branch and is
+  reported, never counted as deleted.
+- **Closure workflow**: review the full diff, verify the acceptance command, merge, close the
+  workstream with `pi_finish`, then run `pi_gc`. Merged finished branches disappear automatically;
+  anything retained stays inspectable and can be removed deliberately. Explicit `pi_stop` with
+  `delete_branch: true` remains the force-delete escape hatch; gc never uses it.
 
 ## Adaptive routing & scoreboard
 
@@ -182,7 +207,7 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_BASE_REF` | `HEAD` | Branch base for new worktrees. |
 | `PI_MCP_AUTO_CLEAN` | `1` | Auto-remove finished workers' worktrees (branches kept). |
 | `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished+idle worker is kept before the sweeper cleans it. |
-| `PI_MCP_DELETE_BRANCHES` | `0` | Also delete worker branches during cleanup (default keeps them). |
+| `PI_MCP_DELETE_BRANCHES` | `0` | Default for explicit `pi_stop` `delete_branch` (force-delete; default keeps the branch). `pi_gc` ignores it and only deletes ancestry-proven merged branches. |
 | `PI_MCP_TOKEN` | (none) | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state (locks, mailbox, board, sessions). |
 

@@ -146,6 +146,89 @@ export async function pruneWorktrees(repo: string): Promise<void> {
   await git(repo, ["worktree", "prune"]).catch(() => {});
 }
 
+export interface BranchDeleteResult {
+  branch: string;
+  deleted: boolean;
+  reason: string;
+}
+
+/** First useful line of a failed git call, for reporting without claiming success. */
+function gitErrorText(out: GitOutcome): string {
+  const text = (out.stderr.trim() || out.message.trim()).split("\n")[0];
+  return text || "git command failed";
+}
+
+/** Branch names checked out by any worktree, parsed from `git worktree list --porcelain`. */
+async function checkedOutBranches(repo: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  const out = await gitOutcome(repo, ["worktree", "list", "--porcelain"]);
+  if (!out.ok) return names;
+  for (const line of out.stdout.split("\n")) {
+    const match = /^branch refs\/heads\/(.+)$/.exec(line.trim());
+    if (match) names.add(match[1]);
+  }
+  return names;
+}
+
+/** Remote default branch short name (e.g. `origin/HEAD -> main`), when configured. */
+async function remoteDefaultBranch(repo: string): Promise<string | null> {
+  const out = await gitOutcome(repo, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]);
+  if (!out.ok) return null;
+  const ref = out.stdout.trim();
+  const slash = ref.indexOf("/");
+  return slash >= 0 && slash + 1 < ref.length ? ref.slice(slash + 1) : null;
+}
+
+/**
+ * Delete a worker branch once its work is proven integrated into the repository's current HEAD.
+ *
+ * Safety rails (all required):
+ *  - the full ref must resolve; invalid/empty metadata is refused, never guessed;
+ *  - the branch must not be checked out in any worktree and must not be the current or default branch;
+ *  - the branch tip must be an ancestor of HEAD (`merge-base --is-ancestor`), so squashed or rebased
+ *    work is retained for manual inspection instead of being mistaken for integrated work;
+ *  - deletion uses non-force `git branch -d`, so git's own merged/checked-out checks still apply on top.
+ *
+ * Any git failure or safety refusal returns `deleted:false` with the reason: callers must never report
+ * a deletion that did not happen.
+ */
+export async function deleteMergedBranch(repo: string, branch: string): Promise<BranchDeleteResult> {
+  const name = branch.trim();
+  if (!name) return { branch, deleted: false, reason: "empty branch name" };
+  const fullRef = `refs/heads/${name}`;
+  const rev = await gitOutcome(repo, ["rev-parse", "--verify", "--quiet", fullRef]);
+  if (!rev.ok || !rev.stdout.trim()) {
+    // Missing/invalid refs exit quietly; repo-level errors land on stderr and are surfaced as-is.
+    return { branch: name, deleted: false, reason: rev.stderr.trim() ? gitErrorText(rev) : "branch not found" };
+  }
+  if (name === "main" || name === "master") {
+    return { branch: name, deleted: false, reason: "default branch" };
+  }
+  const checkedOut = await checkedOutBranches(repo);
+  if (checkedOut.has(name)) {
+    return { branch: name, deleted: false, reason: "checked out in a worktree" };
+  }
+  const current = await gitOutcome(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (current.ok && current.stdout.trim() === name) {
+    return { branch: name, deleted: false, reason: "current branch" };
+  }
+  if ((await remoteDefaultBranch(repo)) === name) {
+    return { branch: name, deleted: false, reason: "default branch" };
+  }
+  const ancestor = await gitOutcome(repo, ["merge-base", "--is-ancestor", fullRef, "HEAD"]);
+  if (!ancestor.ok) {
+    return {
+      branch: name,
+      deleted: false,
+      reason: ancestor.stderr.trim() ? gitErrorText(ancestor) : "not an ancestor of HEAD",
+    };
+  }
+  // Non-force: git still refuses if its own merged/checked-out checks disagree with ours.
+  const del = await gitOutcome(repo, ["branch", "-d", "--", name]);
+  if (!del.ok) return { branch: name, deleted: false, reason: gitErrorText(del) };
+  return { branch: name, deleted: true, reason: "merged into HEAD" };
+}
+
 export interface DiffSummary {
   base: string;
   stat: string;

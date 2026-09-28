@@ -75,6 +75,20 @@ Rules:
 - Resolve conflicts yourself or with a dedicated worker; never discard work silently.
 - Commit with meaningful messages; push last. Workers never push.
 
+## Cleanup after closure (pi_gc)
+Once a workstream is merged and closed with `pi_finish`, reclaim it with `pi_gc` instead of manual
+branch management. gc deletes only branches whose tip is an ancestor of the repo's current HEAD,
+which is the proof that the merge is already in the integrated history:
+- Squash/rebase-integrated branches are NOT ancestry-proven and are retained. After review, remove
+  those deliberately (e.g. explicit `pi_stop` with `delete_branch:true`) or leave them.
+- Historical sessions whose worktree is already gone are still checked. Abandoned/unfinished
+  sessions, active sessions, existing dirty worktrees, checked-out branches, and the current/default
+  branch are never touched - gc has no force mode.
+- Read the result: `branches_deleted` counts real deletions and `branches_retained` lists every
+  branch kept with its reason. A git failure retains the branch; it is never reported as deleted.
+- Closure order: review full diff -> verify acceptance -> merge -> `pi_finish(outcome)` -> `pi_gc`
+  -> `pi_report`.
+
 ## When NOT to use a worker
 - Specifying the task costs more than doing it.
 - The task is entangled with other in-flight changes.
