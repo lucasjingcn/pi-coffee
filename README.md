@@ -186,25 +186,29 @@ The daemon and Codex should run as the **same Unix user**, and that user must ha
 authenticated **`pi`** (`~/.pi/agent/auth.json`). Otherwise workers either can't authenticate or
 can't write worktrees under the repo's ownership.
 
-- If Codex runs as user X, install/authenticate `pi` for X and run `./run.sh` as X.
-- On this machine `pi` is currently installed and authenticated for **root**, so either run Codex as
-  root, or set up `pi` for the Codex user first.
+- If Codex runs as user X, install/authenticate `pi` for X and run `./run.sh` as X. There is no
+  requirement to run as root: any user with a working `pi` and permission to the repo works.
 
 ## Testing
 
-One-command end-to-end smoke test: boots a throwaway repo + daemon and checks the full control
-surface (spec linter, task-type gate, scope overlap, acceptance test-first + lock, committed diff,
-two-strikes gate, adaptive escalation, finish/report, restart persistence).
-
 ```bash
-./smoke.sh                # or: npm run smoke   (includes a couple of tiny live model calls)
-SMOKE_LIVE=0 ./smoke.sh   # deterministic checks only, no model needed
+npm test                  # build, then run all tests/*.test.mjs (offline, no pi credentials needed)
+SMOKE_LIVE=0 ./smoke.sh   # deterministic end-to-end smoke only (no model calls)
+./smoke.sh                # same, plus a couple of tiny live model calls
 ```
 
-## Not yet included
+`npm test` builds the TypeScript sources and runs the test suite. The offline smoke test boots a
+throwaway git repo + daemon and exercises the full control surface (spec linter, task-type gate,
+scope overlap, acceptance test-first + lock, committed diff, adaptive escalation, two-strikes gate,
+finish/report, restart persistence) against a disposable fake `pi` JSONL RPC, so it needs no
+installed/authenticated `pi` and no network or model access. With `SMOKE_LIVE=1` (the default when
+unset) the same checks run, but the workers make a couple of tiny real model calls instead of
+answering from the fake.
 
-- Auto-merge/commit/push tools (Codex performs git integration itself; branches are shared refs, so
-  it can `git merge pi/<id>` from the main repo).
-- Auth for multi-host use (by design loopback-only).
-- Persisting live pi processes across daemon restarts (session JSONL is kept; workers are restarted
-  fresh).
+`./smoke.sh` always rebuilds the sources before running the smoke.
+
+## Limits
+
+- Live worker processes do not survive a daemon restart: shutting the daemon down stops its
+  workers, and after restart you must spawn new sessions (the session JSONL written by workers is
+  kept, but the daemon does not automatically restart workers).
