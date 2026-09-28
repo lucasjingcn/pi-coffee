@@ -113,7 +113,7 @@ export async function createWorktree(opts: {
     // Branch already exists: attach to it.
     await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]).catch(async () => {
       await git(opts.repo, ["worktree", "prune"]).catch(() => {});
-      await git(opts.repo, ["worktree", "add", "-f", opts.dir, opts.branch]);
+      await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]);
     });
   } else {
     await git(opts.repo, ["worktree", "add", "-b", opts.branch, opts.dir, baseRef]).catch(async () => {

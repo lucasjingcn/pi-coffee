@@ -4,7 +4,7 @@ import {mkdtemp, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {mergeBranch} from '../dist/worktree.js';
+import {mergeBranch, createWorktree} from '../dist/worktree.js';
 
 async function fixture(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'pi-git-conflicts-'));
@@ -21,6 +21,12 @@ async function fixture(fn) {
     await rm(dir, {recursive: true, force: true});
   }
 }
+
+test('existing checked-out branch cannot be force-attached to a second worktree', async () => fixture(async (dir, git) => {
+  const branch = git('branch', '--show-current').trim();
+  await assert.rejects(createWorktree({ repo: dir, dir: join(dir, 'duplicate'), branch }));
+  assert.equal(git('branch', '--show-current').trim(), branch);
+}));
 
 test('merge conflict paths are exact for unicode/space/newline filenames', async () =>
   fixture(async (dir, git) => {

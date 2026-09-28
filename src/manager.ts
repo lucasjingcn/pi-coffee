@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
+import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
@@ -309,7 +310,7 @@ export class Coordinator {
     const branch = opts.branch ?? `pi/${id}`;
     const dir = join(this.config.workspaceRoot, id);
     const requestedBase = opts.baseRef ?? this.config.defaultBaseRef;
-    const acceptancePaths = (opts.acceptanceFiles ?? []).map((f) => f.path);
+    const acceptancePaths = (opts.acceptanceFiles ?? []).map((f) => acceptancePath(f.path));
     let acceptanceReserved = false;
 
     // Scope pre-claim & overlap pre-check: reserve the declared scope before creating anything, so
@@ -365,13 +366,11 @@ export class Coordinator {
     // Test-first delegation: write Codex-authored acceptance files BEFORE the worker starts.
     try {
       for (const f of opts.acceptanceFiles ?? []) {
-        const abs = join(wt.dir, f.path);
-        await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, f.content, "utf8");
+        await writeAcceptanceFile(wt.dir, f.path, f.content);
       }
     } catch (e) {
       this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
-      await removeWorktree(repo, wt.dir, branch).catch(() => {});
+      await removeWorktree(repo, wt.dir).catch(() => {});
       throw e;
     }
 
@@ -775,7 +774,9 @@ export class Coordinator {
         if (!rt || rt.meta.status === "error" || rt.meta.status === "stopped") continue;
         const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
         if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
-        void this.send(sid, body, rt.client.isStreaming ? "steer" : "followup", false).catch(() => {});
+        void this.send(sid, body, rt.client.isStreaming ? "steer" : "followup", false)
+          .then(() => this.markRead([m.id], sid))
+          .catch(() => {});
         delivered = true;
       }
     }
@@ -786,8 +787,8 @@ export class Coordinator {
     return this.mailbox.inbox(sessionId, { unreadOnly });
   }
 
-  markRead(ids: string[]): void {
-    this.mailbox.markRead(ids);
+  markRead(ids: string[], sessionId?: string): void {
+    this.mailbox.markRead(ids, sessionId);
     this.scheduleSave();
   }
 
@@ -979,16 +980,23 @@ function runCommand(
   timeoutMs: number,
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const proc = spawn("bash", ["-lc", command], { cwd, env: process.env });
+    const grouped = process.platform !== "win32";
+    const proc = spawn("bash", ["-lc", command], { cwd, env: process.env, detached: grouped });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill("SIGKILL");
+      try {
+        if (grouped && proc.pid) process.kill(-proc.pid, "SIGKILL");
+        else proc.kill("SIGKILL");
+      } catch { /* process already exited */ }
+      // Descendants that detached themselves must not keep this request's pipes open forever.
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
     }, timeoutMs);
-    proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-    proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+    proc.stdout?.on("data", (d: Buffer) => (stdout = (stdout + d.toString("utf8")).slice(-200_000)));
+    proc.stderr?.on("data", (d: Buffer) => (stderr = (stderr + d.toString("utf8")).slice(-50_000)));
     proc.on("error", (e) => {
       clearTimeout(timer);
       resolve({ code: null, stdout, stderr: stderr + String(e), timedOut });

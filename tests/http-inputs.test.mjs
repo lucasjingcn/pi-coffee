@@ -49,3 +49,11 @@ test('MCP authenticates before parsing untrusted bodies', { timeout: 10000 }, as
   assert.equal((await fetch(base + '/mcp', { method: 'POST', body: '{bad' })).status, 401);
   assert.equal((await fetch(base + '/mcp', { method: 'POST', body: '{bad', headers: { authorization: 'Bearer test-token' } })).status, 400);
 }, 'test-token'));
+
+test('HTTP broadcast read acknowledgements reach only their recipient', { timeout: 10000 }, async () => daemon(async base => {
+  const post = async (path, body) => (await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const message = await post('/internal/send', { from: 'sender', to: '*', text: 'broadcast', deliver: false });
+  await post('/internal/read', { ids: [message.id], sessionId: 'one' });
+  assert.equal((await (await fetch(base + '/internal/inbox?sessionId=one&unread=1')).json()).messages.length, 0);
+  assert.equal((await (await fetch(base + '/internal/inbox?sessionId=two&unread=1')).json()).messages.length, 1);
+}));

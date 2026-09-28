@@ -123,7 +123,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 
       case "/internal/read": {
         const ids = (body.ids as string[]) ?? [];
-        coord.markRead(ids);
+        coord.markRead(ids, body.sessionId);
         return sendJson(res, 200, { ok: true });
       }
 

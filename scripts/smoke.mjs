@@ -320,9 +320,6 @@ async function main() {
   // --- persistence across restart ----------------------------------------------------------
   await mcpCall("pi_stop", { session_id: s1.id });
   check("J  finished worker's worktree auto-cleaned", !existsSync(join(WORKTREES, s1.id)), join(WORKTREES, s1.id));
-  // Daemon state is saved on a short debounce; give it a beat before the restart so the archived
-  // outcome is actually on disk (the daemon itself has no flush-on-shutdown guarantee).
-  await sleep(800);
   await stopDaemon();
   startDaemon(piBin);
   await waitHealth();
