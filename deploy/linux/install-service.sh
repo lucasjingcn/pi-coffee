@@ -29,6 +29,8 @@ Environment=PI_MCP_PORT=$PORT
 Environment=PI_MCP_DATA_DIR=$HOME/.pi-mcp"
 [ -n "$PI_BIN" ] && ENV_BLOCK="$ENV_BLOCK
 Environment=PI_MCP_PI_BIN=$PI_BIN"
+[ -n "${PI_MCP_DEFAULT_REPO:-}" ] && ENV_BLOCK="$ENV_BLOCK
+Environment=PI_MCP_DEFAULT_REPO=$PI_MCP_DEFAULT_REPO"
 
 if [ "$(id -u)" = "0" ]; then
   UNIT="/etc/systemd/system/$UNIT_NAME.service"

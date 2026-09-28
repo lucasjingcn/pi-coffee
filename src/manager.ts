@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import type { Config } from "./config.js";
@@ -160,6 +161,12 @@ export class Coordinator {
       throw new Error(`max sessions reached (${this.config.maxSessions})`);
     }
     const repo = opts.repo ?? this.config.defaultRepo;
+    if (!repo) {
+      throw new Error("repo is required: pass repo to pi_spawn, or set PI_MCP_DEFAULT_REPO for the daemon");
+    }
+    if (!existsSync(repo)) {
+      throw new Error(`repo path does not exist: ${repo}`);
+    }
     const id = this.nextId();
     const name = opts.name ?? `${id}-${(opts.task ?? "task").slice(0, 40)}`;
     const branch = opts.branch ?? `pi/${id}`;

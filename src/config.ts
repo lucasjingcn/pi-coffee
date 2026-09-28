@@ -43,7 +43,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     port: Number(env("PI_MCP_PORT") ?? 8787),
     piBin: env("PI_MCP_PI_BIN") ?? "pi",
     workspaceRoot: env("PI_MCP_WORKSPACE_ROOT") ?? join(dataDir, "worktrees"),
-    defaultRepo: env("PI_MCP_DEFAULT_REPO") ?? process.cwd(),
+    defaultRepo: env("PI_MCP_DEFAULT_REPO") ?? "",
     provider: env("PI_MCP_PROVIDER") ?? "deepseek",
     model: env("PI_MCP_MODEL") ?? "deepseek-flash",
     strongModel: env("PI_MCP_STRONG_MODEL") ?? "deepseek-v4-pro",

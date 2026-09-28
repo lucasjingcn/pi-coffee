@@ -45,6 +45,32 @@ Then start the daemon (keep it running; systemd/tmux recommended):
 Restart Codex. It connects to pi-mcp, receives the 大总管 instructions, loads the
 `pi-orchestrator` skill, and can call the `pi_*` tools.
 
+## Run and connect Codex (Linux and macOS)
+
+1. Build + register — run as the **same user that runs Codex** (and whose `pi` is authenticated):
+   ```bash
+   cd pi-mcp
+   ./install.sh     # npm install + build + install the Codex skill + `codex mcp add pi`
+   ```
+2. Start the daemon (binds loopback only):
+   ```bash
+   ./run.sh                                  # foreground, quick test
+   sudo ./deploy/linux/install-service.sh    # Linux: systemd system service
+   ./deploy/macos/install-daemon.sh          # macOS: launchd user agent
+   ```
+3. Verify: `curl http://127.0.0.1:8787/internal/health` → `{"ok":true,...}`
+4. Restart Codex. It connects, receives the 大总管 instructions, loads the `pi-orchestrator`
+   skill, and exposes the `pi_*` tools.
+
+If `codex` is not on PATH, add the server manually to `~/.codex/config.toml` and restart Codex:
+```toml
+[mcp_servers.pi]
+url = "http://127.0.0.1:8787/mcp"
+```
+
+For a non-root Linux user service: run `./deploy/linux/install-service.sh` as that user (installs to
+`~/.config/systemd/user/`); run `loginctl enable-linger <user>` once so it starts on boot.
+
 ## macOS / remote deployment
 
 The daemon is plain Node + git + HTTP, so it runs on macOS unchanged. Two topologies:
@@ -136,7 +162,7 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_HOST` | `127.0.0.1` | Bind address (loopback only). |
 | `PI_MCP_PORT` | `8787` | HTTP port for `/mcp` and `/internal/*`. |
 | `PI_MCP_PI_BIN` | `pi` | pi executable. |
-| `PI_MCP_DEFAULT_REPO` | cwd | Default repo for `pi_spawn`. |
+| `PI_MCP_DEFAULT_REPO` | (none) | Default repo for `pi_spawn`; if unset, every `pi_spawn` must pass `repo`. |
 | `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worktrees are created. |
 | `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker model (first attempt). |
 | `PI_MCP_STRONG_MODEL` | `deepseek-v4-pro` | Model a worker is escalated to on a retry. |

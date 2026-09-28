@@ -25,6 +25,8 @@ chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true
 
 # launchd has a minimal PATH; make sure the daemon can find git + node + pi.
 DAEMON_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.pi/agent/bin:$HOME/.bun/bin"
+REPO_KEYS=""
+[ -n "${PI_MCP_DEFAULT_REPO:-}" ] && REPO_KEYS="    <key>PI_MCP_DEFAULT_REPO</key><string>$PI_MCP_DEFAULT_REPO</string>"
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -43,6 +45,7 @@ cat > "$PLIST" <<EOF
     <key>PATH</key><string>$DAEMON_PATH</string>
     <key>HOME</key><string>$HOME</string>
     <key>PI_MCP_PORT</key><string>$PORT</string>
+$REPO_KEYS
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

@@ -76,7 +76,7 @@ Set these before starting the daemon (or inside the LaunchAgent's `EnvironmentVa
 |---|---|---|
 | `PI_MCP_PORT` | `8787` | HTTP port. |
 | `PI_MCP_PI_BIN` | `pi` | Absolute path to the `pi` binary if not on PATH. |
-| `PI_MCP_DEFAULT_REPO` | cwd | Default repo when `pi_spawn` omits `repo`. |
+| `PI_MCP_DEFAULT_REPO` | (none) | Default repo when `pi_spawn` omits `repo`; if unset, `repo` is required. |
 | `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worker worktrees are created. |
 | `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker model. |
 | `PI_MCP_MAX_SESSIONS` | `8` | Concurrency cap. |
