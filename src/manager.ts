@@ -6,6 +6,7 @@ import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
+import { resolveRepoIdentity } from "./lock-repo.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
@@ -68,6 +69,8 @@ interface Runtime {
   lastNotifiedQuestionIds: Set<string>;
   /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
   acceptanceReserved?: boolean;
+  /** Canonical repository identity this session's locks are namespaced under. */
+  repoIdentity: string;
 }
 
 export interface SpawnOptions {
@@ -305,6 +308,16 @@ export class Coordinator {
     if (!existsSync(repo)) {
       throw new Error(`repo path does not exist: ${repo}`);
     }
+    // Resolve the canonical repository identity before reserving any lock. Symlinks, subdirectories
+    // and linked worktrees of the same repo collapse to one namespace; separate repos never share.
+    let repoIdentity: string;
+    try {
+      repoIdentity = resolveRepoIdentity(repo);
+    } catch (e) {
+      throw new Error(
+        `repo is not a usable git repository: ${repo} (${e instanceof Error ? e.message : String(e)})`,
+      );
+    }
     const id = this.nextId();
     const name = opts.name ?? `${id}-${(opts.task ?? "task").slice(0, 40)}`;
     const branch = opts.branch ?? `pi/${id}`;
@@ -317,9 +330,9 @@ export class Coordinator {
     // two workstreams with overlapping files are rejected at dispatch instead of mid-flight.
     const scope = opts.spec?.scope ?? [];
     if (scope.length) {
-      const pre = this.locks.claim(id, scope, "rw");
+      const pre = this.locks.claim(id, scope, "rw", repoIdentity);
       if (!pre.ok) {
-        this.locks.releaseAll(id);
+        this.locks.releaseAll(id, repoIdentity);
         throw new Error(
           `scope conflicts with active sessions: ${pre.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
         );
@@ -330,19 +343,19 @@ export class Coordinator {
     // any existing lock (including another Codex-held acceptance reservation), then re-claim under
     // the shared "codex" owner so the worker never owns its own tests.
     if (acceptancePaths.length) {
-      const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw");
+      const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw", repoIdentity);
       if (!pre.ok) {
-        this.locks.releaseAll(id);
+        this.locks.releaseAll(id, repoIdentity);
         this.scheduleSave();
         throw new Error(
           `acceptance files conflict with active locks: ${pre.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
         );
       }
-      this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths);
-      const acc = this.locks.claim("codex", acceptancePaths, "rw");
+      this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, repoIdentity);
+      const acc = this.locks.claim("codex", acceptancePaths, "rw", repoIdentity);
       if (!acc.ok) {
         // Not expected (no await between precheck and claim), but never leak partial reservations.
-        this.locks.releaseAll(id);
+        this.locks.releaseAll(id, repoIdentity);
         this.scheduleSave();
         throw new Error(
           `acceptance files conflict with active locks: ${acc.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
@@ -359,7 +372,7 @@ export class Coordinator {
       baseSha = await resolveRef(repo, requestedBase);
       wt = await createWorktree({ repo, dir, branch, baseRef: baseSha });
     } catch (e) {
-      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       throw e;
     }
 
@@ -369,7 +382,7 @@ export class Coordinator {
         await writeAcceptanceFile(wt.dir, f.path, f.content);
       }
     } catch (e) {
-      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       await removeWorktree(repo, wt.dir).catch(() => {});
       throw e;
     }
@@ -405,7 +418,7 @@ export class Coordinator {
       },
     });
 
-    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved };
+    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
     this.runtimes.set(id, rt);
     // The runtime now occupies the slot: stop counting it in `reserved` so it is not double-counted
     // by activeCount() while the child is starting.
@@ -422,7 +435,7 @@ export class Coordinator {
       meta.error = String(e);
       // A failed startup must not leak the child process or any reservations.
       await client.stop().catch(() => {});
-      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       rt.acceptanceReserved = false;
       this.scheduleSave();
       this.notifyWaiters();
@@ -491,7 +504,7 @@ export class Coordinator {
         rt.meta.status = "error";
         rt.meta.error = rt.client.getStderr().slice(-2000) || "pi rpc exited";
       }
-      this.locks.releaseAll(rt.meta.id);
+      this.locks.releaseAll(rt.meta.id, rt.repoIdentity);
       this.notifyWaiters();
       this.scheduleSave();
     });
@@ -548,9 +561,14 @@ export class Coordinator {
   }
 
   /** Undo all lock reservations made while starting a session that then failed. */
-  private releaseSpawnReservations(id: string, acceptancePaths: string[], acceptanceReserved: boolean): void {
-    this.locks.releaseAll(id);
-    if (acceptanceReserved && acceptancePaths.length) this.locks.release("codex", acceptancePaths);
+  private releaseSpawnReservations(
+    id: string,
+    acceptancePaths: string[],
+    acceptanceReserved: boolean,
+    repoIdentity: string,
+  ): void {
+    this.locks.releaseAll(id, repoIdentity);
+    if (acceptanceReserved && acceptancePaths.length) this.locks.release("codex", acceptancePaths, repoIdentity);
     this.scheduleSave();
   }
 
@@ -700,12 +718,13 @@ export class Coordinator {
     await rt.client.stop();
     rt.meta.status = "stopped";
     rt.meta.lastActivity = Date.now();
-    this.locks.releaseAll(id);
+    this.locks.releaseAll(id, rt.repoIdentity);
     // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
+    // Scoped to this worker's repository namespace so stopping A never releases B's codex locks.
     // Only release once: a failed startup already released them, and a newer worker may have since
     // re-acquired the same path under "codex".
     if (rt.acceptanceReserved && rt.meta.acceptance?.files?.length) {
-      this.locks.release("codex", rt.meta.acceptance.files);
+      this.locks.release("codex", rt.meta.acceptance.files, rt.repoIdentity);
       rt.acceptanceReserved = false;
     }
     this.archive(rt.meta);
@@ -735,16 +754,46 @@ export class Coordinator {
 
   // --- locks ----------------------------------------------------------------
 
-  claim(sessionId: string, paths: string[], mode: LockMode): ClaimResult {
-    const res = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode);
+  claim(sessionId: string, paths: string[], mode: LockMode, repo?: string): ClaimResult {
+    const namespace = this.namespaceFor(sessionId, repo);
+    const res = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode, namespace);
     if (res.ok) this.scheduleSave();
     return res;
   }
 
-  releaseLocks(sessionId: string, paths?: string[]): number {
-    const n = this.locks.release(sessionId, paths ? this.normalizeLockPaths(sessionId, paths) : undefined);
+  releaseLocks(sessionId: string, paths?: string[], repo?: string): number {
+    const namespace = this.namespaceFor(sessionId, repo);
+    const n = this.locks.release(
+      sessionId,
+      paths ? this.normalizeLockPaths(sessionId, paths) : undefined,
+      namespace,
+    );
     this.scheduleSave();
     return n;
+  }
+
+  /**
+   * Lock namespace for a claim/release. A known worker always derives its own repository identity
+   * and cannot override it. A manual claimant (e.g. "codex") may select an explicit repo, else the
+   * configured default applies; an unknown claimant with no resolvable repo is an error rather
+   * than silently falling into a global namespace.
+   */
+  private namespaceFor(sessionId: string, repo?: string): string {
+    const rt = this.runtimes.get(sessionId);
+    if (rt) return rt.repoIdentity;
+    const target = repo ?? this.config.defaultRepo;
+    if (!target) {
+      throw new Error(
+        `cannot resolve repository for manual claimant "${sessionId}": pass repo or configure PI_MCP_DEFAULT_REPO`,
+      );
+    }
+    try {
+      return resolveRepoIdentity(target);
+    } catch (e) {
+      throw new Error(
+        `cannot resolve repository for manual claimant "${sessionId}" from ${target}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /**
