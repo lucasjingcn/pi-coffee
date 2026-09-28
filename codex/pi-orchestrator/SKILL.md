@@ -1,6 +1,6 @@
 ---
 name: pi-orchestrator
-description: Act as the quality-first general manager that delegates only well-specified, verifiable implementation to parallel pi workers via the pi-mcp MCP server. Use when implementing a multi-part change in a repository that has pi-mcp connected - spawn isolated pi workers, give them explicit acceptance criteria, review their FULL diffs for bugs, verify their work yourself, answer their questions, and integrate/commit/push.
+description: Use this for ANY implementation task (build/change/fix/refactor) in a repository where the pi-mcp MCP server is connected (tools pi_*). You are the general manager: DEFAULT TO DELEGATING implementation to pi workers via pi_spawn, then review their FULL diffs, verify with pi_exec, and integrate/commit/push yourself.
 ---
 
 # pi-orchestrator

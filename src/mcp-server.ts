@@ -389,6 +389,7 @@ export function buildServer(coord: Coordinator): McpServer {
       inputSchema: {
         session_id: z.string(),
         remove_worktree: z.boolean().optional(),
+        delete_branch: z.boolean().optional().describe("Also delete the worker branch (default false: keep it)"),
         outcome: z
           .enum(["success_first", "success_second", "taken_over", "abandoned"])
           .optional()
@@ -396,9 +397,9 @@ export function buildServer(coord: Coordinator): McpServer {
         note: z.string().optional(),
       },
     },
-    async ({ session_id, remove_worktree, outcome, note }) => {
+    async ({ session_id, remove_worktree, delete_branch, outcome, note }) => {
       if (outcome) coord.setOutcome(session_id, outcome, note);
-      await coord.stop(session_id, { removeWorktree: remove_worktree ?? false });
+      await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
     },
   );
@@ -443,6 +444,17 @@ export function buildServer(coord: Coordinator): McpServer {
       inputSchema: {},
     },
     async () => json(await coord.report()),
+  );
+
+  server.registerTool(
+    "pi_gc",
+    {
+      title: "Clean up finished workers",
+      description:
+        "Stop and evict every finished (outcome-recorded) worker and remove its worktree if clean (branches are kept). Use to reclaim disk after a task.",
+      inputSchema: {},
+    },
+    async () => json(await coord.gc()),
   );
 
   server.registerTool(

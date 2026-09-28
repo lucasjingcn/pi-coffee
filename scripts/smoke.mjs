@@ -175,6 +175,7 @@ async function main() {
 
   // --- persistence across restart ----------------------------------------------------------
   await mcpCall("pi_stop", { session_id: s1.id });
+  check("J  finished worker's worktree auto-cleaned", !existsSync(join(WORKTREES, s1.id)), join(WORKTREES, s1.id));
   await stopDaemon();
   startDaemon();
   await waitHealth();

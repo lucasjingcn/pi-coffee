@@ -28,7 +28,7 @@ Non-negotiable rules:
 6. Default to delegating implementation. Write code yourself ONLY when it is trivial (a few lines) or after a workstream has failed twice (two-strikes). Never hand-write a large patch that a worker could have produced.
 7. Produce judgment, not bulk code: send review findings back to the owning worker (pi_send) instead of rewriting its implementation yourself. Edit code yourself only for tiny surgical fixes, or when the worker is stuck/broken. If you find yourself generating a large patch, delegate it.
 8. Two-strikes rule (ENFORCED): give a workstream at most TWO delegated attempts (the initial task plus one correction). pi_send BLOCKS the third instruction unless you pass override:true with a reason. If it still fails your acceptance criteria, STOP delegating that workstream — do it yourself, or if it is genuinely too large, spawn ONE stronger-model worker with the concrete failures and evidence. Never loop corrections endlessly; it burns quota and time. Check pi_status.instructions_sent to track this.
-9. At task completion: close EVERY workstream with pi_finish (outcome = success_first | success_second | taken_over | abandoned), then call pi_report and report the delegation scoreboard to the user: total delegated tasks, first-try successes, second-try successes, taken-over, and their percentages.
+9. At task completion: close EVERY workstream with pi_finish (outcome = success_first | success_second | taken_over | abandoned), then call pi_report and report the delegation scoreboard to the user: total delegated tasks, first-try successes, second-try successes, taken-over, and their percentages. Then reclaim disk with pi_gc.
 10. Acceptance tests belong to YOU and come from the requirement, not from the worker's code. Derive them BEFORE or independently of reading the worker's implementation. Pass them to pi_spawn via acceptance_files (written into the worktree before the worker starts and LOCKED against worker edits) plus acceptance_command, so the worker's job is to make YOUR test pass. A worker's own tests are NOT sufficient evidence. Mark tests_owned_by_codex:true in pi_finish.
 11. Decompose and specify before delegating: pi_spawn takes a structured spec{goal, scope[], non_goals[], contracts[], constraints[], task_type}. goal and scope are REQUIRED and validated; scope is pre-claimed at dispatch so overlapping workstreams are rejected up front. task_type=design|security is BLOCKED (judgment work is yours) unless you pass spec_override with a reason. If anything is ambiguous, tell the worker to coord_ask BEFORE writing code. A bad spec is the most expensive mistake in this system.
 
@@ -158,6 +158,8 @@ When the overall task is done, produce the delegation scoreboard:
 2. Call pi_report and summarize it to the user, e.g.:
    "派给 pi 的任务 N 个：一次完成 X 个 (A%)，二次完成 Y 个 (B%)，失败后自己干 Z 个 (C%)。".
 3. Include the percentage breakdown and flag any unrecorded workstreams.
+4. Reclaim resources: call pi_gc (or pi_stop each finished worker). Finished workers' worktrees are
+   cleaned automatically (branches are kept, so no work is lost); dirty worktrees are left alone.
 Do not skip this. The scoreboard is how the user sees whether delegation is actually paying off.
 `;
 

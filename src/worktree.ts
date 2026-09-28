@@ -91,6 +91,20 @@ export async function removeWorktree(repo: string, dir: string, branch?: string)
   if (branch) await git(repo, ["branch", "-D", branch]).catch(() => {});
 }
 
+/** True when the worktree has no uncommitted or untracked changes. */
+export async function isWorktreeClean(dir: string): Promise<boolean> {
+  try {
+    const out = await git(dir, ["status", "--porcelain"]);
+    return out.trim() === "";
+  } catch {
+    return false; // unknown -> treat as not clean (never auto-delete)
+  }
+}
+
+export async function pruneWorktrees(repo: string): Promise<void> {
+  await git(repo, ["worktree", "prune"]).catch(() => {});
+}
+
 export interface DiffSummary {
   base: string;
   stat: string;

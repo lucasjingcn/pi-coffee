@@ -168,6 +168,9 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_STRONG_MODEL` | `deepseek-v4-pro` | Model a worker is escalated to on a retry. |
 | `PI_MCP_MAX_SESSIONS` | `8` | Concurrency cap. |
 | `PI_MCP_BASE_REF` | `HEAD` | Branch base for new worktrees. |
+| `PI_MCP_AUTO_CLEAN` | `1` | Auto-remove finished workers' worktrees (branches kept). |
+| `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished+idle worker is kept before the sweeper cleans it. |
+| `PI_MCP_DELETE_BRANCHES` | `0` | Also delete worker branches during cleanup (default keeps them). |
 | `PI_MCP_TOKEN` | (none) | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state (locks, mailbox, board, sessions). |
 

@@ -8,7 +8,7 @@ import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
-import { commitAll, createWorktree, currentBranch, mergeBranch, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
+import { commitAll, createWorktree, currentBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
 
 export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
 
@@ -91,6 +91,7 @@ export class Coordinator {
   private counter = 0;
   private history: SessionMeta[] = [];
   private saveTimer: NodeJS.Timeout | null = null;
+  private sweeper: NodeJS.Timeout | null = null;
   private waiters = new Set<() => void>();
 
   constructor(config: Config) {
@@ -102,6 +103,75 @@ export class Coordinator {
     await mkdir(join(this.config.dataDir, "sessions"), { recursive: true });
     await mkdir(this.config.workspaceRoot, { recursive: true });
     await this.load();
+    // Sessions never survive a daemon restart, so any leftover worktree is an orphan.
+    await this.sweepOnStartup();
+    this.startSweeper();
+  }
+
+  /** Remove finished workers' worktrees left over from a previous run (branches are kept). */
+  private async sweepOnStartup(): Promise<void> {
+    if (!this.config.autoClean) return;
+    const repos = new Set<string>();
+    for (const h of this.history) {
+      if (!h.repo) continue;
+      repos.add(h.repo);
+      await this.cleanMeta(h).catch(() => {});
+    }
+    for (const repo of repos) await pruneWorktrees(repo).catch(() => {});
+  }
+
+  private startSweeper(): void {
+    if (this.sweeper) return;
+    this.sweeper = setInterval(() => void this.sweep().catch(() => {}), 60_000);
+    this.sweeper.unref?.();
+  }
+
+  /** Periodically stop+clean finished workers that have been idle past the TTL, and evict them. */
+  private async sweep(): Promise<void> {
+    if (!this.config.autoClean) return;
+    const ttlMs = Math.max(1, this.config.worktreeTtlMin) * 60_000;
+    const now = Date.now();
+    for (const [id, rt] of [...this.runtimes]) {
+      if (now - rt.meta.lastActivity < ttlMs) continue;
+      const finished = rt.meta.outcome === "success_first" || rt.meta.outcome === "success_second" || rt.meta.outcome === "taken_over";
+      if (finished && (rt.meta.status === "idle" || rt.meta.status === "working")) {
+        await this.stop(id).catch(() => {});
+      } else if (rt.meta.status === "stopped") {
+        await this.cleanMeta(rt.meta).catch(() => {});
+        this.runtimes.delete(id); // already archived at stop(); report uses history
+        this.notifyWaiters();
+      }
+    }
+  }
+
+  /**
+   * Remove a finished worker's worktree if it is clean. Never deletes branches unless configured,
+   * never touches dirty worktrees, and never touches non-success outcomes (leave for inspection).
+   */
+  private async cleanMeta(meta: SessionMeta): Promise<boolean> {
+    const ok =
+      meta.outcome === "success_first" || meta.outcome === "success_second" || meta.outcome === "taken_over";
+    if (!ok || !meta.worktree || !existsSync(meta.worktree)) return false;
+    if (!(await isWorktreeClean(meta.worktree))) return false;
+    await removeWorktree(meta.repo, meta.worktree, this.config.deleteBranches ? meta.branch : undefined).catch(() => {});
+    return true;
+  }
+
+  /** Manual cleanup: stop+clean every finished, non-running worker and evict it from memory. */
+  async gc(): Promise<Record<string, unknown>> {
+    let cleaned = 0;
+    let evicted = 0;
+    for (const [id, rt] of [...this.runtimes]) {
+      if (!rt.meta.outcome || rt.meta.status === "working" || rt.meta.status === "starting") continue;
+      if (rt.meta.status !== "stopped") await this.stop(id).catch(() => {});
+      const didClean = await this.cleanMeta(rt.meta).catch(() => false);
+      if (didClean) cleaned++;
+      this.runtimes.delete(id);
+      evicted++;
+    }
+    this.notifyWaiters();
+    this.scheduleSave();
+    return { worktrees_cleaned: cleaned, sessions_evicted: evicted, remaining_live: this.runtimes.size };
   }
 
   // --- persistence ----------------------------------------------------------
@@ -506,16 +576,22 @@ export class Coordinator {
     this.notifyWaiters();
   }
 
-  async stop(id: string, opts: { removeWorktree?: boolean } = {}): Promise<void> {
+  async stop(id: string, opts: { removeWorktree?: boolean; deleteBranch?: boolean } = {}): Promise<void> {
     const rt = this.get(id);
     await rt.client.stop();
     rt.meta.status = "stopped";
+    rt.meta.lastActivity = Date.now();
     this.locks.releaseAll(id);
     // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
     if (rt.meta.acceptance?.files?.length) this.locks.release("codex", rt.meta.acceptance.files);
     this.archive(rt.meta);
     if (opts.removeWorktree) {
-      await removeWorktree(rt.meta.repo, rt.meta.worktree, rt.meta.branch).catch(() => {});
+      // Explicit request: remove even if dirty.
+      const delBranch = opts.deleteBranch ?? this.config.deleteBranches;
+      await removeWorktree(rt.meta.repo, rt.meta.worktree, delBranch ? rt.meta.branch : undefined).catch(() => {});
+    } else if (this.config.autoClean) {
+      // Safe auto-clean: only finished + clean worktrees, branch kept.
+      await this.cleanMeta(rt.meta).catch(() => {});
     }
     this.notifyWaiters();
     this.scheduleSave();
