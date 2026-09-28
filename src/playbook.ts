@@ -117,13 +117,12 @@ Rules:
 A workstream gets at most TWO delegated attempts: the initial task plus ONE correction. This is a hard
 gate, not advice: pi_send returns an error and refuses the third instruction unless you pass
 override:true together with override_reason.
-- The second attempt AUTOMATICALLY escalates the worker to the strong model (deepseek-v4-pro); the
-  first attempt stays on the cheap model. This is the adaptive routing: cheap first, smart on retry,
-  take over on the third. Pass an explicit model to pi_send to override.
+- Automatic model escalation is DISABLED. A retry stays on the SAME model as the spawn unless you
+  explicitly pass a model to pi_send. Do not silently route a worker to a costlier model.
 - If it still fails your acceptance criteria after the second attempt, stop delegating it.
 - Do it yourself. That is the correct call, not a failure of process.
-- If it is genuinely too large for you to take on directly, spawn ONE stronger-model worker
-  (deepseek-v4-pro) with the concrete failures and evidence attached, then verify hard.
+- If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
+  stronger model (set PI_MCP_STRONG_MODEL and pass it), with the concrete failures and evidence attached, then verify hard.
 - Never enter an endless correction loop. It burns quota, time, and the worker's context.
 - pi_status exposes instructions_sent; overrides are recorded on the pi-mcp board for audit.
 
@@ -143,9 +142,8 @@ coherence - exactly the class of defect most likely to slip. So:
   replayed in one long thread.
 
 ## Model routing
-- Mechanical / verifiable -> cheap worker model (deepseek-flash).
-- Tricky but still delegable -> stronger worker model (deepseek-v4-pro).
-- On a retry, pi_send auto-escalates the worker to deepseek-v4-pro unless you pass an explicit model.
+- Default worker model: deepseek-flash. Automatic escalation is DISABLED.
+- A retry stays on the same model unless you explicitly pass a model to pi_send.
 - Judgment calls / design / debugging -> you, the general manager.
 
 ## Delegation threshold (when to do it yourself)

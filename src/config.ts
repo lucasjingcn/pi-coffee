@@ -16,7 +16,7 @@ export interface Config {
   /** Default provider/model for spawned pi sessions. */
   provider: string;
   model: string;
-  /** Stronger model to escalate a worker to on the second delegated attempt. */
+  /** Stronger model for an explicit manual upgrade (NO automatic escalation). Empty = disabled. */
   strongModel: string;
   /** pi thinking level for workers (off|minimal|low|medium|high|xhigh|max). */
   thinking: string;
@@ -134,7 +134,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     defaultRepo: env("PI_MCP_DEFAULT_REPO") ?? "",
     provider: env("PI_MCP_PROVIDER") ?? "deepseek",
     model: env("PI_MCP_MODEL") ?? "deepseek-flash",
-    strongModel: env("PI_MCP_STRONG_MODEL") ?? "deepseek-v4-pro",
+    strongModel: env("PI_MCP_STRONG_MODEL") ?? "",
     thinking: env("PI_MCP_THINKING") ?? "xhigh",
     maxSessions: resolveNumber(overrides, "maxSessions", "PI_MCP_MAX_SESSIONS", 8, {
       integer: true,

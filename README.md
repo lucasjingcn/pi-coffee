@@ -154,9 +154,10 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 - **Structured delegation**: `pi_spawn` requires a `spec` with `goal` and `scope` (validated). `scope`
   is pre-claimed at dispatch, so two workstreams with overlapping files are rejected before any code is
   written. `task_type=design|security` is blocked (judgment work stays with Codex).
-- **Cheap first, smart on retry**: the first instruction runs on `PI_MCP_MODEL`; the second
-  (correction) automatically escalates the worker to `PI_MCP_STRONG_MODEL`. That keeps weak-model
-  token spend for the common case and brings in the stronger model exactly when it matters.
+- **Cheap first, no auto-upgrade**: every worker runs on `PI_MCP_MODEL` (`deepseek-flash`).
+  Automatic model escalation is DISABLED; a retry stays on the same model unless Codex explicitly
+  passes `model` to `pi_send`. `PI_MCP_STRONG_MODEL` (default empty) is only used for an explicit
+  manual upgrade.
 - **Two-strikes gate**: after two instructions, `pi_send` refuses a third unless `override:true`.
 - **Delegation scoreboard**: close each workstream with `pi_finish` (outcome + `tests_owned_by_codex`)
   and call `pi_report` at task completion for first-try / second-try / taken-over counts and
@@ -175,7 +176,7 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_DEFAULT_REPO` | (none) | Default repo for `pi_spawn`; if unset, every `pi_spawn` must pass `repo`. |
 | `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worktrees are created. |
 | `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker model (first attempt). |
-| `PI_MCP_STRONG_MODEL` | `deepseek-v4-pro` | Model a worker is escalated to on a retry. |
+| `PI_MCP_STRONG_MODEL` | (empty) | Model for an EXPLICIT manual upgrade. Empty disables escalation (it is never automatic). |
 | `PI_MCP_THINKING` | `xhigh` | pi thinking level for workers (`off`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`). Overridable per spawn via `pi_spawn.thinking`. |
 | `PI_MCP_MAX_SESSIONS` | `8` | Hard concurrency cap. |
 | `PI_MCP_PARALLEL_WARN` | `4` | Soft parallelism guideline; `pi_spawn` warns at/above this many active workers. |

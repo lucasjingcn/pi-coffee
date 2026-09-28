@@ -229,7 +229,7 @@ export function buildServer(coord: Coordinator): McpServer {
           reason: `${sent} instructions already sent to ${session_id} without meeting the acceptance criteria.`,
           do_this_instead: [
             "Do the work yourself (preferred).",
-            "If it is genuinely too large, spawn ONE stronger-model worker (deepseek-v4-pro) with the concrete failures and evidence, then verify hard.",
+            "If it is genuinely too large, spawn ONE worker with an explicit stronger model (set PI_MCP_STRONG_MODEL) and the concrete failures and evidence, then verify hard.",
             "To insist on another delegated correction anyway, call pi_send with override:true and override_reason.",
           ],
         });
@@ -242,10 +242,9 @@ export function buildServer(coord: Coordinator): McpServer {
           "codex",
         );
       }
-      // Adaptive model routing: the first attempt uses the cheap model; a retry escalates to the
-      // strong model so the second attempt is more likely to succeed (and avoid a costly take-over).
-      const escalate = sent >= 1 && !model;
-      const useModel = model ?? (escalate ? coord.config.strongModel : undefined);
+      // Model routing: the worker stays on its spawn model unless Codex explicitly passes `model`.
+      // Automatic escalation is DISABLED (owner decision): never silently switch to a costlier model.
+      const useModel = model ?? undefined;
       await coord.send(session_id, message, mode ?? "prompt", true, { provider, model: useModel });
       return json({
         ok: true,
@@ -253,7 +252,7 @@ export function buildServer(coord: Coordinator): McpServer {
         mode: mode ?? "prompt",
         instructions_sent: sent + 1,
         overridden: sent >= MAX_DELEGATED_ATTEMPTS,
-        escalated_to: escalate ? useModel : null,
+        escalated_to: null,
       });
     },
   );
