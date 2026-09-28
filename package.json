@@ -4,7 +4,7 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "MCP server that lets Codex orchestrate multiple concurrent pi coding sessions (git worktree isolated, with inter-session messaging and file locks).",
+  "description": "MCP server that orchestrates multiple concurrent pi coding agents, each isolated in a git worktree, with file locks and inter-session messaging.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lucasjingcn/pi-coffee.git"

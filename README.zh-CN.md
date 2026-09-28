@@ -2,13 +2,13 @@
 
 # pi-coffee
 
-pi-coffee 是 **pi-mcp** 这个项目的仓库。pi-mcp 是一个 MCP 服务，让 Codex 能同时带好几个 **pi**
-编码代理。（npm 包名、`bin` 名和 MCP server 名都叫 `pi-mcp`，只有这个仓库叫 `pi-coffee`。）
-Codex 仍然负责统筹：把任务拆成边界清楚的几块，交给不同的代理，审查它们交回来的东西，最后合并。
-真正敲代码的是那些代理。
+pi-coffee 是 **pi-mcp** 这个项目的仓库。pi-mcp 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理。
+任何支持 MCP 的客户端都能驱动它——Codex 是参考客户端，Claude、Cursor 等同样可用。（npm 包名、
+`bin` 名和 MCP server 名都叫 `pi-mcp`，只有这个仓库叫 `pi-coffee`。）客户端充当统筹方：把任务拆成
+边界清楚的几块，交给不同的代理，审查它们交回来的东西，最后合并。真正敲代码的是那些代理。
 
 同一个仓库上挂两个代理，默认结果就是互相覆盖。这里换了个做法：每个代理在自己的 git worktree、
-自己的分支上干活；动手写某个文件之前先声明；需要沟通时给别的代理发消息，或者直接向 Codex 提问。
+自己的分支上干活；动手写某个文件之前先声明；需要沟通时给别的代理发消息，或者直接向统筹方提问。
 
 [![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
@@ -64,7 +64,7 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
 
 ```mermaid
 flowchart LR
-    Codex[Codex<br/>统筹方] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>注册表 · 锁 · 信箱 · 黑板]
+    Codex[MCP 客户端<br/>如 Codex] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>注册表 · 锁 · 信箱 · 黑板]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -87,7 +87,7 @@ worker 通过 stdin/stdout 上的 JSONL 和 daemon 通信，daemon 再通过 MCP
 | **Node.js ≥ 22.19** | 运行时和测试都需要。CI 覆盖 22.19 和 24。 |
 | **git** | worktree、diff、merge、分支清理都靠它。 |
 | **pi** | 已安装，且以 daemon 用户身份登录。 |
-| **Codex** | 任意支持 MCP 的版本即可。 |
+| **MCP 客户端** | Codex 是参考实现，任何支持 MCP 的客户端都可用。 |
 
 **请让 daemon、Codex 和 worker 用同一个 Unix 用户跑。** 它们要共享文件属主和同一个
 `~/.pi/agent/auth.json`。不需要 root，只要这个用户能正常用 `pi`、并且对仓库有写权限就行。

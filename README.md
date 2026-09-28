@@ -2,14 +2,16 @@
 
 # pi-coffee
 
-pi-coffee is the repository for **pi-mcp**, an MCP server that lets Codex run several **pi** coding
-agents at once. (The npm package, the `bin` entry, and the MCP server are all named `pi-mcp`; only
-this repository is called `pi-coffee`.) Codex stays the manager: it splits a job into well-defined
-pieces, hands each piece to an agent, reviews what comes back, and merges. The agents do the typing.
+pi-coffee is the repository for **pi-mcp**, an MCP server that orchestrates several **pi** coding
+agents at once. Any MCP client can drive it — Codex is the reference client, but Claude, Cursor, or
+anything else that speaks MCP works too. (The npm package, the `bin` entry, and the MCP server are
+all named `pi-mcp`; only this repository is called `pi-coffee`.) The client stays the manager: it
+splits a job into well-defined pieces, hands each piece to an agent, reviews what comes back, and
+merges. The agents do the typing.
 
 Two agents editing the same repository normally overwrite each other. Here each agent works in its
 own git worktree on its own branch, claims the files it is about to touch, and can message the other
-agents or ask Codex a question when something is unclear.
+agents or ask the orchestrator a question when something is unclear.
 
 [![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
@@ -68,7 +70,7 @@ of this document is the mechanics.
 
 ```mermaid
 flowchart LR
-    Codex[Codex<br/>manager] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>registry · locks · mailbox · board]
+    Codex[MCP client<br/>e.g. Codex] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>registry · locks · mailbox · board]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -93,7 +95,7 @@ daemon deliberately runs the `pi` executable rather than importing pi's internal
 | **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19 and 24. |
 | **git** | Worktrees, diffs, merges, branch cleanup. |
 | **pi** | Installed and logged in as the daemon user. |
-| **Codex** | Any build with MCP support. |
+| **An MCP client** | Codex is the reference client; any MCP-capable client works. |
 
 Run the daemon, Codex, and the workers as the **same Unix user**. They need to share file ownership
 and the same `~/.pi/agent/auth.json`. Root is not required — any user with a working `pi` and write
