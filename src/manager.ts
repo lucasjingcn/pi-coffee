@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
@@ -9,6 +9,13 @@ import { PiRpcClient } from "./rpc-client.js";
 import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
 import { commitAll, createWorktree, currentBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
+
+/**
+ * Temporary lock owner used to precheck acceptance reservations. LockManager skips locks whose
+ * owner matches the claimant, so claiming acceptance files under the shared "codex" owner would
+ * silently ignore another Codex-owned acceptance reservation; a distinct sentinel surfaces it.
+ */
+const ACCEPTANCE_PRECHECK_OWNER = "__acceptance_precheck__";
 
 export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
 
@@ -58,6 +65,8 @@ interface Runtime {
   meta: SessionMeta;
   client: PiRpcClient;
   lastNotifiedQuestionIds: Set<string>;
+  /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
+  acceptanceReserved?: boolean;
 }
 
 export interface SpawnOptions {
@@ -93,6 +102,12 @@ export class Coordinator {
   private saveTimer: NodeJS.Timeout | null = null;
   private sweeper: NodeJS.Timeout | null = null;
   private waiters = new Set<() => void>();
+  /** Concurrency slots reserved by in-flight spawns that have not yet registered a runtime. */
+  private reserved = 0;
+  /** Serializes state writes so concurrent saves cannot interleave temp files/renames. */
+  private saveChain: Promise<void> = Promise.resolve();
+  /** Unique suffix per write so atomic temp names never collide. */
+  private saveSeq = 0;
 
   constructor(config: Config) {
     this.config = config;
@@ -184,10 +199,20 @@ export class Coordinator {
     try {
       const raw = JSON.parse(await readFile(this.stateFile(), "utf8"));
       if (raw.counter) this.counter = raw.counter;
-      if (raw.locks) this.locks.import(raw.locks);
+      // Locks are held by live sessions, and sessions never survive a daemon restart. Drop any
+      // persisted locks instead of resurrecting orphaned locks that would block new spawns.
+      this.locks = new LockManager();
       if (raw.mailbox) this.mailbox.import(raw.mailbox);
       if (raw.board) this.board.import(raw.board);
-      if (Array.isArray(raw.history)) this.history = raw.history;
+      if (Array.isArray(raw.history)) {
+        // Any snapshot that was live when the daemon died is now stopped history; completed
+        // outcomes and tests-ownership metadata on it are preserved as-is.
+        this.history = raw.history.map((h: SessionMeta) =>
+          h && (h.status === "starting" || h.status === "idle" || h.status === "working")
+            ? { ...h, status: "stopped", pendingQuestions: [] }
+            : h,
+        );
+      }
     } catch {
       /* fresh start */
     }
@@ -201,19 +226,51 @@ export class Coordinator {
     }, 500);
   }
 
-  private async save(): Promise<void> {
+  /** Persist the latest state, serializing writes so concurrent saves cannot interleave. */
+  private save(): Promise<void> {
+    this.saveChain = this.saveChain.then(() => this.writeState()).catch(() => {});
+    return this.saveChain;
+  }
+
+  private async writeState(): Promise<void> {
     const data = {
       counter: this.counter,
       locks: this.locks.export(),
       mailbox: this.mailbox.export(),
       board: this.board.export(),
-      history: this.history,
+      // Include live snapshots so a crash/restart can report in-flight work as stopped history
+      // while preserving completed outcomes and tests-ownership metadata.
+      history: this.mergedHistory(),
     };
+    const file = this.stateFile();
+    const tmp = `${file}.${process.pid}.${++this.saveSeq}.tmp`;
     try {
-      await writeFile(this.stateFile(), JSON.stringify(data, null, 2));
+      await writeFile(tmp, JSON.stringify(data, null, 2));
+      await rename(tmp, file);
     } catch {
       /* best effort */
     }
+  }
+
+  /** Persisted history overlaid with the live sessions (live wins on id collisions). */
+  private mergedHistory(): SessionMeta[] {
+    const byId = new Map<string, SessionMeta>();
+    for (const h of this.history) byId.set(h.id, h);
+    for (const rt of this.runtimes.values()) {
+      byId.set(rt.meta.id, { ...rt.meta, pendingQuestions: [] });
+    }
+    let all = [...byId.values()];
+    if (all.length > 500) all = all.slice(-500);
+    return all;
+  }
+
+  /** Cancel any pending debounced save and wait for the freshest state to hit disk. */
+  private async flush(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    await this.save();
   }
 
   // --- sessions -------------------------------------------------------------
@@ -227,9 +284,19 @@ export class Coordinator {
   }
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
-    if (this.activeCount() >= this.config.maxSessions) {
-      throw new Error(`max sessions reached (${this.config.maxSessions})`);
+    // Reserve a concurrency slot synchronously, before the first await, so two concurrent spawns
+    // cannot both pass the cap check and oversubscribe the daemon. The slot is transferred to the
+    // runtime once it is registered; until then, every failure path releases it here.
+    this.reserveSlot();
+    const slot = { transferred: false };
+    try {
+      return await this.spawnSession(opts, slot);
+    } finally {
+      if (!slot.transferred) this.releaseReservation();
     }
+  }
+
+  private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_MCP_DEFAULT_REPO for the daemon");
@@ -242,6 +309,8 @@ export class Coordinator {
     const branch = opts.branch ?? `pi/${id}`;
     const dir = join(this.config.workspaceRoot, id);
     const requestedBase = opts.baseRef ?? this.config.defaultBaseRef;
+    const acceptancePaths = (opts.acceptanceFiles ?? []).map((f) => f.path);
+    let acceptanceReserved = false;
 
     // Scope pre-claim & overlap pre-check: reserve the declared scope before creating anything, so
     // two workstreams with overlapping files are rejected at dispatch instead of mid-flight.
@@ -255,31 +324,53 @@ export class Coordinator {
         );
       }
     }
+    // Reserve Codex-owned acceptance files before creating anything. LockManager skips same-owner
+    // collisions, so precheck under a temporary distinct owner first: that surfaces overlaps with
+    // any existing lock (including another Codex-held acceptance reservation), then re-claim under
+    // the shared "codex" owner so the worker never owns its own tests.
+    if (acceptancePaths.length) {
+      const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw");
+      if (!pre.ok) {
+        this.locks.releaseAll(id);
+        this.scheduleSave();
+        throw new Error(
+          `acceptance files conflict with active locks: ${pre.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
+        );
+      }
+      this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths);
+      const acc = this.locks.claim("codex", acceptancePaths, "rw");
+      if (!acc.ok) {
+        // Not expected (no await between precheck and claim), but never leak partial reservations.
+        this.locks.releaseAll(id);
+        this.scheduleSave();
+        throw new Error(
+          `acceptance files conflict with active locks: ${acc.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
+        );
+      }
+      acceptanceReserved = true;
+    }
 
-    let wt: WorktreeInfo;
+    // Resolve the requested base to a concrete SHA and create the worktree on that same SHA in one
+    // guarded block. A failed resolve must propagate (no symbolic-ref fallback) and release locks.
+    let baseSha!: string;
+    let wt!: WorktreeInfo;
     try {
-      wt = await createWorktree({ repo, dir, branch, baseRef: requestedBase });
+      baseSha = await resolveRef(repo, requestedBase);
+      wt = await createWorktree({ repo, dir, branch, baseRef: baseSha });
     } catch (e) {
-      this.locks.releaseAll(id);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
       throw e;
     }
-    // Store a concrete SHA, not "HEAD": a symbolic ref would make `base...HEAD` empty after
-    // the worker commits, hiding committed changes from pi_diff.
-    const baseSha = await resolveRef(repo, requestedBase).catch(() => requestedBase);
 
     // Test-first delegation: write Codex-authored acceptance files BEFORE the worker starts.
-    const acceptancePaths: string[] = [];
     try {
-      if (opts.acceptanceFiles?.length) {
-        for (const f of opts.acceptanceFiles) {
-          const abs = join(wt.dir, f.path);
-          await mkdir(dirname(abs), { recursive: true });
-          await writeFile(abs, f.content, "utf8");
-          acceptancePaths.push(f.path);
-        }
+      for (const f of opts.acceptanceFiles ?? []) {
+        const abs = join(wt.dir, f.path);
+        await mkdir(dirname(abs), { recursive: true });
+        await writeFile(abs, f.content, "utf8");
       }
     } catch (e) {
-      this.locks.releaseAll(id);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
       await removeWorktree(repo, wt.dir, branch).catch(() => {});
       throw e;
     }
@@ -315,20 +406,25 @@ export class Coordinator {
       },
     });
 
-    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set() };
+    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved };
     this.runtimes.set(id, rt);
+    // The runtime now occupies the slot: stop counting it in `reserved` so it is not double-counted
+    // by activeCount() while the child is starting.
+    slot.transferred = true;
+    this.releaseReservation();
     this.wireEvents(rt);
 
-    // Reserve the acceptance files for Codex so worker edits to them are blocked (immutable tests).
-    if (acceptancePaths.length) this.locks.claim("codex", acceptancePaths, "rw");
-
+    // Acceptance files were already reserved for Codex before the worktree was created.
     try {
       await client.start();
       meta.status = "idle";
     } catch (e) {
       meta.status = "error";
       meta.error = String(e);
-      this.locks.releaseAll(id);
+      // A failed startup must not leak the child process or any reservations.
+      await client.stop().catch(() => {});
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
+      rt.acceptanceReserved = false;
       this.scheduleSave();
       this.notifyWaiters();
       throw e;
@@ -433,6 +529,25 @@ export class Coordinator {
       if (rt.meta.status === "starting" || rt.meta.status === "idle" || rt.meta.status === "working") n++;
     }
     return n;
+  }
+
+  /** Claim a concurrency slot synchronously; throws when the cap (including in-flight spawns) is hit. */
+  private reserveSlot(): void {
+    if (this.activeCount() + this.reserved >= this.config.maxSessions) {
+      throw new Error(`max sessions reached (${this.config.maxSessions})`);
+    }
+    this.reserved++;
+  }
+
+  private releaseReservation(): void {
+    if (this.reserved > 0) this.reserved--;
+  }
+
+  /** Undo all lock reservations made while starting a session that then failed. */
+  private releaseSpawnReservations(id: string, acceptancePaths: string[], acceptanceReserved: boolean): void {
+    this.locks.releaseAll(id);
+    if (acceptanceReserved && acceptancePaths.length) this.locks.release("codex", acceptancePaths);
+    this.scheduleSave();
   }
 
   markExtension(sessionId: string): void {
@@ -583,7 +698,12 @@ export class Coordinator {
     rt.meta.lastActivity = Date.now();
     this.locks.releaseAll(id);
     // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
-    if (rt.meta.acceptance?.files?.length) this.locks.release("codex", rt.meta.acceptance.files);
+    // Only release once: a failed startup already released them, and a newer worker may have since
+    // re-acquired the same path under "codex".
+    if (rt.acceptanceReserved && rt.meta.acceptance?.files?.length) {
+      this.locks.release("codex", rt.meta.acceptance.files);
+      rt.acceptanceReserved = false;
+    }
     this.archive(rt.meta);
     if (opts.removeWorktree) {
       // Explicit request: remove even if dirty.
@@ -598,9 +718,15 @@ export class Coordinator {
   }
 
   async stopAll(): Promise<void> {
+    // Stop periodic work first so no timer can re-dirty state after the final flush.
+    if (this.sweeper) {
+      clearInterval(this.sweeper);
+      this.sweeper = null;
+    }
     for (const id of [...this.runtimes.keys()]) {
       await this.stop(id).catch(() => {});
     }
+    await this.flush();
   }
 
   // --- locks ----------------------------------------------------------------
@@ -688,6 +814,7 @@ export class Coordinator {
       h.outcome = outcome;
       if (note !== undefined) h.outcomeNote = note;
     }
+    this.scheduleSave();
     this.notifyWaiters();
   }
 
@@ -703,6 +830,9 @@ export class Coordinator {
   setTestsOwned(id: string, owned: boolean): void {
     const rt = this.get(id);
     rt.meta.testsOwnedByCodex = owned;
+    const h = this.history.find((x) => x.id === id);
+    if (h) h.testsOwnedByCodex = owned;
+    this.scheduleSave();
     this.notifyWaiters();
   }
 
