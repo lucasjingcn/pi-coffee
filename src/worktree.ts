@@ -69,6 +69,9 @@ function nulPaths(out: string): string[] {
   return out.split("\0").filter((p) => p.length > 0);
 }
 
+/** Porcelain v1 status codes that mark an unresolved merge conflict. */
+const CONFLICT_CODES = new Set(["UU", "AA", "DD", "AU", "UA", "DU", "UD"]);
+
 export async function isGitRepo(dir: string): Promise<boolean> {
   try {
     await git(dir, ["rev-parse", "--is-inside-work-tree"]);
@@ -217,11 +220,13 @@ export async function mergeBranch(
     .filter(Boolean)
     .join("\n")
     .trim();
-  const status = await gitRaw(repo, ["status", "--porcelain"]).catch(() => "");
-  const conflicts = status
-    .split("\n")
-    .filter((l) => /^(UU|AA|DD|AU|UA|DU|UD) /.test(l))
-    .map((l) => l.slice(3).trim());
+  // `-z` gives literal (unquoted, untrimmed) paths, so filenames containing
+  // spaces, Unicode or newlines survive exactly. A git failure here must
+  // surface rather than be reported as "no conflicts".
+  const status = await gitRaw(repo, ["status", "--porcelain", "-z"]);
+  const conflicts = nulPaths(status)
+    .filter((entry) => entry.length > 3 && entry[2] === " " && CONFLICT_CODES.has(entry.slice(0, 2)))
+    .map((entry) => entry.slice(3));
   return { ok: outcome.ok, branch, into, conflicts, output };
 }
 
