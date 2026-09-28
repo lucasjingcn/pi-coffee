@@ -82,7 +82,7 @@ For a non-root Linux user service: run `./deploy/linux/install-service.sh` as th
 The daemon is plain Node + git + HTTP, so it runs on macOS unchanged. Two topologies:
 
 ### A. Everything on the Mac (recommended when the repo is on the Mac)
-1. Prereqs: **Node >= 20.11**, **git**, and **`pi`** installed + authenticated as the same user.
+1. Prereqs: **Node >= 22.19**, **git**, and **`pi`** installed + authenticated as the same user.
 2. Copy this directory to the Mac (exclude `node_modules`/`dist`):
    `rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-mcp/`
 3. On the Mac: `cd ~/pi-mcp && ./install.sh && ./run.sh`
@@ -142,8 +142,12 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 
 - **Auto-claim**: on `edit`/`write` it claims the target path; on `bash` it heuristically claims
   redirect/`tee`/`sed -i` targets. A conflicting claim blocks the tool with an explanatory reason,
-  so the worker coordinates instead of stomping another worker. Lock keys are repo-relative;
-  absolute paths inside a worktree are normalized to the same key.
+  so the worker coordinates instead of stomping another worker. Lock keys combine the canonical
+  Git common directory with a repo-relative path: separate repositories do not collide, while
+  symlink aliases and linked worktrees of the same repository still conflict. Absolute paths inside
+  a worker's worktree are normalized to the same relative key. Listed locks include `repo` (the
+  canonical Git common directory). Manual `pi_claim` / `pi_release` calls can select a `repo`;
+  omitting it uses the daemon default repo, while worker sessions always use their own repository.
 
 ## Adaptive routing & scoreboard
 
@@ -181,6 +185,18 @@ Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_in
 | `PI_MCP_TOKEN` | (none) | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state (locks, mailbox, board, sessions). |
 
+Startup rejects invalid effective settings: ports must be integers from 1 to 65535, session caps
+and parallel warning thresholds must be positive safe integers, and TTL must be finite and at
+least one minute (fractional minutes are allowed). Numeric env settings use decimal notation;
+boolean settings accept only `0` or `1`. Explicit programmatic overrides take precedence.
+
+State is saved by serialized atomic replacement of `state.json`, with the previous validated
+snapshot kept in `state.json.bak`. Loading validates the entire snapshot before applying it. A
+missing or corrupt primary can recover from a valid backup with a warning on stderr; corruption
+without a valid backup, or a filesystem read error, aborts startup instead of resetting history.
+Save failures are logged on stderr; a failed shutdown flush exits with a nonzero status. The backup
+may lag the primary by one save and does not provide power-loss durability or multi-daemon locking.
+
 ## Deployment note (important)
 
 The daemon and Codex should run as the **same Unix user**, and that user must have a working,
@@ -193,6 +209,8 @@ can't write worktrees under the repo's ownership.
 ## Testing
 
 ```bash
+npm ci                    # development/CI: Node >= 22.19
+npm run verify            # source + real pi extension API types + full offline tests
 npm test                  # build, then run all tests/*.test.mjs (offline, no pi credentials needed)
 SMOKE_LIVE=0 ./smoke.sh   # deterministic end-to-end smoke only (no model calls)
 ./smoke.sh                # same, plus a couple of tiny live model calls
@@ -207,6 +225,10 @@ unset) the same checks run, but the workers make a couple of tiny real model cal
 answering from the fake.
 
 `./smoke.sh` always rebuilds the sources before running the smoke.
+
+GitHub Actions runs `npm ci` and `npm run verify` on pushes and pull requests using Node 22.19.0
+and Node 24. The pi API dependency is pinned for development type checking; these checks do not
+authenticate or call a model provider.
 
 ## Limits
 
