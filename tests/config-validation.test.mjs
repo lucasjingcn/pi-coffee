@@ -6,6 +6,7 @@ test('configuration validates merged numeric values and rejects invalid boolean 
  const saved=Object.fromEntries(keys.map(k=>[k,process.env[k]]));keys.forEach(k=>delete process.env[k]);
  try{
   assert.equal(loadConfig().port,8787);
+  assert.equal(loadConfig({port:undefined,maxSessions:undefined,autoClean:undefined}).port,8787);
   for(const [field,key,values] of [
    ['port','PI_MCP_PORT',[0,-1,65536,1.5,NaN,Infinity]],
    ['maxSessions','PI_MCP_MAX_SESSIONS',[0,-1,1.5,NaN,Infinity]],

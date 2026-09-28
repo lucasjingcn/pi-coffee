@@ -165,5 +165,5 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_MCP_DELETE_BRANCHES", false),
   };
-  return { ...base, ...overrides };
+  return { ...base, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) };
 }
