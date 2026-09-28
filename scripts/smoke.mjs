@@ -6,13 +6,18 @@
  * spec linter, task-type gate, scope overlap, acceptance test-first + lock, committed-diff,
  * two-strikes gate, adaptive model escalation, finish/report, and scoreboard persistence.
  *
- * Live model calls are on by default (a couple of tiny worker prompts); set SMOKE_LIVE=0 to run
- * only the deterministic checks (no model needed).
+ * In the default live mode the daemon drives real `pi` workers (a couple of tiny prompts).
+ * With SMOKE_LIVE=0 the smoke is fully deterministic and credential-free: it installs a
+ * disposable fake `pi` that speaks just enough JSONL RPC (state/stats/prompt/model) and never
+ * touches installed pi or any model provider.
  *
- * Usage: node scripts/smoke.mjs           (or: npm run smoke)
+ * The daemon is always started with an isolated environment (own host/port/data dir/worktree
+ * root/no token) so inherited PI_MCP_* settings cannot leak into the test.
+ *
+ * Usage: node scripts/smoke.mjs           (or: npm run smoke / ./smoke.sh)
  */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +32,7 @@ const DATA = join(WORK, "data");
 const WORKTREES = join(DATA, "worktrees");
 
 let failures = 0;
+let daemon = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function check(name, cond, detail) {
@@ -60,16 +66,119 @@ async function mcpCall(name, args) {
   return { isError: !!r.isError, data };
 }
 
-let daemon = null;
-function startDaemon() {
+/**
+ * A disposable fake `pi --mode rpc` used by SMOKE_LIVE=0. It implements the small JSONL RPC
+ * surface the daemon needs (get_state, get_session_stats, prompt/set_model/...), so the offline
+ * smoke needs no installed `pi` and no model credentials.
+ */
+const FAKE_PI_SOURCE = String.raw`#!/usr/bin/env node
+// Disposable fake pi for the offline pi-mcp smoke test. Speaks minimal JSONL RPC.
+import { createInterface } from "node:readline";
+
+const argv = process.argv.slice(2);
+function argValue(flag) {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+const provider = argValue("--provider") ?? "fake";
+const model = argValue("--model") ?? "fake-model";
+const name = argValue("--name") ?? "fake";
+const sessionId = "fake-session";
+
+let streaming = false;
+function send(obj) {
+  process.stdout.write(JSON.stringify(obj) + "\n");
+}
+function respond(cmd, data) {
+  send({ id: cmd.id, type: "response", command: cmd.type, success: true, data: data ?? {} });
+}
+function event(type, extra) {
+  send({ type, ...(extra ?? {}) });
+}
+
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let cmd;
+  try {
+    cmd = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  switch (cmd.type) {
+    case "get_state":
+      return respond(cmd, {
+        isStreaming: streaming,
+        sessionId,
+        sessionName: name,
+        model: { provider, id: model, name: model },
+        messageCount: 0,
+        pendingMessageCount: 0,
+      });
+    case "get_session_stats":
+      return respond(cmd, {
+        sessionId,
+        userMessages: 1,
+        assistantMessages: 1,
+        toolCalls: 0,
+        totalMessages: 2,
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
+        cost: 0,
+        contextUsage: { tokens: 15, contextWindow: 100000, percent: 0.015 },
+      });
+    case "get_last_assistant_text":
+      return respond(cmd, { text: null });
+    case "get_entries":
+      return respond(cmd, { entries: [], leafId: null });
+    case "clear_queue":
+      return respond(cmd, { steering: [], followUp: [] });
+    case "prompt":
+    case "steer":
+    case "follow_up": {
+      respond(cmd, {});
+      streaming = true;
+      event("agent_start");
+      setImmediate(() => {
+        streaming = false;
+        event("agent_settled");
+      });
+      return;
+    }
+    default:
+      // set_session_name, set_model, abort, new_session, compact, bash, ...
+      return respond(cmd, {});
+  }
+});
+rl.on("close", () => process.exit(0));
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+`;
+
+function createFakePi() {
+  const path = join(WORK, "fake-pi");
+  writeFileSync(path, FAKE_PI_SOURCE, { mode: 0o755 });
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function startDaemon(piBin) {
+  // Isolate every inherited PI_MCP_* setting that could redirect the daemon or break the health
+  // check (host bind, token auth, shared worktree root, auto-clean) and pin our own temp dirs.
+  const env = {
+    ...process.env,
+    PI_MCP_HOST: "127.0.0.1",
+    PI_MCP_PORT: PORT,
+    PI_MCP_DEFAULT_REPO: REPO,
+    PI_MCP_DATA_DIR: DATA,
+    PI_MCP_WORKSPACE_ROOT: WORKTREES,
+    PI_MCP_AUTO_CLEAN: "1",
+    PI_MCP_PI_BIN: piBin,
+  };
+  delete env.PI_MCP_TOKEN;
   daemon = spawn(process.execPath, ["dist/index.js"], {
     cwd: ROOT,
-    env: {
-      ...process.env,
-      PI_MCP_PORT: PORT,
-      PI_MCP_DEFAULT_REPO: REPO,
-      PI_MCP_DATA_DIR: DATA,
-    },
+    env,
     stdio: ["ignore", "ignore", "pipe"],
   });
   daemon.stderr.on("data", (d) => process.env.SMOKE_VERBOSE && process.stderr.write(d));
@@ -90,20 +199,23 @@ async function waitHealth(timeoutMs = 20000) {
 }
 
 async function stopDaemon() {
-  if (!daemon) return;
-  daemon.kill("SIGTERM");
-  await new Promise((res) => {
-    const t = setTimeout(res, 5000);
-    daemon.once("exit", () => {
-      clearTimeout(t);
-      res();
-    });
-  });
+  const proc = daemon;
+  if (!proc) return;
   daemon = null;
+  const exited = new Promise((res) => proc.once("exit", res));
+  if (proc.exitCode === null && proc.signalCode === null) {
+    proc.kill("SIGTERM");
+    await Promise.race([exited, sleep(6000)]);
+  }
+  if (proc.exitCode === null && proc.signalCode === null) {
+    proc.kill("SIGKILL");
+    await Promise.race([exited, sleep(2000)]);
+  }
 }
 
 async function main() {
   console.log(`pi-mcp smoke test (port ${PORT}, live=${LIVE})`);
+  const piBin = LIVE ? process.env.PI_MCP_PI_BIN || "pi" : createFakePi();
   mkdirSync(REPO, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: REPO, stdio: "ignore" });
   git(["config", "user.email", "smoke@test"]);
@@ -112,7 +224,7 @@ async function main() {
   git(["add", "-A"]);
   git(["commit", "-qm", "init"]);
 
-  startDaemon();
+  startDaemon(piBin);
   await waitHealth();
 
   // --- spec linter -------------------------------------------------------------------------
@@ -176,8 +288,11 @@ async function main() {
   // --- persistence across restart ----------------------------------------------------------
   await mcpCall("pi_stop", { session_id: s1.id });
   check("J  finished worker's worktree auto-cleaned", !existsSync(join(WORKTREES, s1.id)), join(WORKTREES, s1.id));
+  // Daemon state is saved on a short debounce; give it a beat before the restart so the archived
+  // outcome is actually on disk (the daemon itself has no flush-on-shutdown guarantee).
+  await sleep(800);
   await stopDaemon();
-  startDaemon();
+  startDaemon(piBin);
   await waitHealth();
   r = await mcpCall("pi_report", {});
   check(
