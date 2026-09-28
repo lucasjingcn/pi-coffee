@@ -285,6 +285,9 @@ export class Coordinator {
   // --- sessions -------------------------------------------------------------
 
   private nextId(): string {
+    if (this.counter >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("session id space exhausted");
+    }
     return `s${++this.counter}`;
   }
 

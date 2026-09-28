@@ -58,11 +58,17 @@ export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
   const history = optionalArray(raw.history, file, "history", validateHistoryEntry);
 
   // Session ids are allocated as s<N>; restoring the counter to at least the highest one seen
-  // prevents a restart from reusing an id that history already records.
-  for (const h of history) {
+  // prevents a restart from reusing an id that history already records. An out-of-range numeric
+  // suffix is a shape error, so a hostile/broken snapshot cannot derail future allocations.
+  history.forEach((h, index) => {
     const match = /^s(\d+)$/.exec(h.id);
-    if (match) counter = Math.max(counter, Number(match[1]));
-  }
+    if (!match) return;
+    const n = Number(match[1]);
+    if (!Number.isSafeInteger(n)) {
+      fail(file, `history[${index}].id has an out-of-range session number`);
+    }
+    counter = Math.max(counter, n);
+  });
 
   return { counter, mailbox, board, history };
 }
@@ -166,14 +172,14 @@ export class StateStore {
 
   async load(): Promise<LoadResult> {
     const primary = await this.readIfExists(this.path);
-    if (primary.kind === "error") throw primary.error;
+    if (primary.kind === "error") this.readError(this.path, primary.error);
 
     if (primary.kind === "ok") {
       const parsed = this.tryValidate(primary.raw, this.path);
       if (parsed.ok) return { state: parsed.state, recoveredFromBackup: false };
 
       const backup = await this.readIfExists(this.backupPath);
-      if (backup.kind === "error") throw backup.error;
+      if (backup.kind === "error") this.readError(this.backupPath, backup.error);
       if (backup.kind === "missing") {
         this.logLoadFailure(this.path, parsed.reason, "no usable backup present");
         throw new Error(`cannot load state: ${this.path} is invalid (${parsed.reason}) and no backup exists`);
@@ -189,7 +195,7 @@ export class StateStore {
 
     // Primary is missing: a valid backup still recovers; both missing is a quiet fresh boot.
     const backup = await this.readIfExists(this.backupPath);
-    if (backup.kind === "error") throw backup.error;
+    if (backup.kind === "error") this.readError(this.backupPath, backup.error);
     if (backup.kind === "missing") return { state: emptyState(), recoveredFromBackup: false };
     const recovered = this.tryValidate(backup.raw, this.backupPath);
     if (!recovered.ok) {
@@ -212,6 +218,14 @@ export class StateStore {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { kind: "missing" };
       return { kind: "error", error };
     }
+  }
+
+  /** Log a contextual read failure (operation/path/code) before surfacing the underlying error. */
+  private readError(path: string, error: unknown): never {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    const detail = safeReason(error);
+    console.error(`[state] load failed for ${path}${code ? ` [${code}]` : ""}: ${detail}`);
+    throw error;
   }
 
   private tryValidate(raw: string, file: string): ValidateResult {
