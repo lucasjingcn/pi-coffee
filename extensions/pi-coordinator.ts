@@ -12,6 +12,7 @@
 import { isAbsolute, relative } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { bashPaths } from "../src/bash-paths.js";
 
 export default function (pi: ExtensionAPI) {
   const base = process.env.PI_COORD_URL;
@@ -56,24 +57,9 @@ export default function (pi: ExtensionAPI) {
     if (typeof p !== "string" || p.length === 0) return undefined;
     const abs = isAbsolute(p) ? p : `${ctx.cwd}/${p}`;
     const rel = relative(ctx.cwd, abs).split("\\").join("/");
-    return rel.startsWith("..") ? undefined : rel; // outside the worktree: not ours to lock
-  }
-
-  /** Best-effort extraction of repo files a bash command will write. */
-  function bashPaths(cmd: string): string[] {
-    const out = new Set<string>();
-    const add = (raw?: string) => {
-      if (!raw) return;
-      const p = raw.replace(/^["']|["']$/g, "");
-      if (!p || p.startsWith("-") || /[$`*?{|]/.test(p) || p.startsWith("&")) return;
-      out.add(p);
-    };
-    for (const m of cmd.matchAll(/(?:^|[^0-9>])>>?\s*("[^"]+"|'[^']+'|[^\s;|&<>()]+)/g)) add(m[1]);
-    for (const m of cmd.matchAll(/\btee\b(?:\s+-a)?\s+("[^"]+"|'[^']+'|[^\s;|&<>()]+)/g)) add(m[1]);
-    if (/\bsed\b[^\n]*\s-i/.test(cmd)) {
-      for (const tok of cmd.split(/\s+/)) if (tok.includes("/") || /\.\w+$/.test(tok)) add(tok);
-    }
-    return [...out];
+    // Reject only real parent traversal, not legitimate names like "..notes.txt".
+    if (rel === ".." || rel.startsWith("../")) return undefined;
+    return rel; // outside the worktree: not ours to lock
   }
 
   function ok(text: string) {
