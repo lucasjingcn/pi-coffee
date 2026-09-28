@@ -122,7 +122,7 @@ override:true together with override_reason.
 - If it still fails your acceptance criteria after the second attempt, stop delegating it.
 - Do it yourself. That is the correct call, not a failure of process.
 - If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
-  stronger model (set PI_MCP_STRONG_MODEL and pass it), with the concrete failures and evidence attached, then verify hard.
+  stronger model (pass an explicit model id to pi_spawn), with the concrete failures and evidence attached, then verify hard.
 - Never enter an endless correction loop. It burns quota, time, and the worker's context.
 - pi_status exposes instructions_sent; overrides are recorded on the pi-mcp board for audit.
 

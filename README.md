@@ -123,7 +123,7 @@ the default.
 | Tool | Purpose |
 |---|---|
 | `pi_spawn` | Create worktree+branch, start a worker. Takes a structured `spec{goal, scope[], non_goals[], contracts[], constraints[], task_type}` (goal+scope required and validated); `scope` is pre-claimed so overlapping workstreams are rejected at dispatch; `task_type=design\|security` is blocked unless `spec_override`; `acceptance_files` + `acceptance_command` write Codex-authored tests into the worktree before start and lock them (test-first delegation). |
-| `pi_send` | Instruct a worker: `mode=prompt\|steer\|followup`. The 3rd instruction is blocked (two-strikes) unless `override:true`; a retry auto-escalates to the strong model. |
+| `pi_send` | Instruct a worker: `mode=prompt\|steer\|followup`. The 3rd instruction is blocked (two-strikes) unless `override:true`; a retry keeps the SAME model (no auto-escalation). |
 | `pi_wait` | Block until `settled` or until a worker `question`. Re-poll with timeouts ≤ 120s. |
 | `pi_status` / `pi_list` | Snapshots: status, model, cost, context, pending questions. |
 | `pi_tail` | Incremental transcript (`since=lastEntryId`). |
@@ -245,7 +245,7 @@ SMOKE_LIVE=0 ./smoke.sh   # deterministic end-to-end smoke only (no model calls)
 
 `npm test` builds the TypeScript sources and runs the test suite. The offline smoke test boots a
 throwaway git repo + daemon and exercises the full control surface (spec linter, task-type gate,
-scope overlap, acceptance test-first + lock, committed diff, adaptive escalation, two-strikes gate,
+scope overlap, acceptance test-first + lock, committed diff, explicit model override, two-strikes gate,
 finish/report, restart persistence) against a disposable fake `pi` JSONL RPC, so it needs no
 installed/authenticated `pi` and no network or model access. With `SMOKE_LIVE=1` (the default when
 unset) the same checks run, but the workers make a couple of tiny real model calls instead of

@@ -229,7 +229,11 @@ export function buildServer(coord: Coordinator): McpServer {
           reason: `${sent} instructions already sent to ${session_id} without meeting the acceptance criteria.`,
           do_this_instead: [
             "Do the work yourself (preferred).",
-            "If it is genuinely too large, spawn ONE worker with an explicit stronger model (set PI_MCP_STRONG_MODEL) and the concrete failures and evidence, then verify hard.",
+            "If it is genuinely too large, spawn ONE worker with an explicit stronger model" +
+              (coord.config.strongModel
+                ? ` ("${coord.config.strongModel}")`
+                : " (pass a model id you trust to pi_spawn)") +
+              " and the concrete failures and evidence, then verify hard.",
             "To insist on another delegated correction anyway, call pi_send with override:true and override_reason.",
           ],
         });

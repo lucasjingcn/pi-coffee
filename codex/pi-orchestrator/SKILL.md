@@ -86,8 +86,8 @@ which is the proof that the merge is already in the integrated history:
   branch are never touched - gc has no force mode.
 - Read the result: `branches_deleted` counts real deletions and `branches_retained` lists every
   branch kept with its reason. A git failure retains the branch; it is never reported as deleted.
-- Closure order: review full diff -> verify acceptance -> merge -> `pi_finish(outcome)` -> `pi_gc`
-  -> `pi_report`.
+- Closure order: review full diff -> verify acceptance -> merge -> `pi_finish(outcome)` -> `pi_report`
+  -> `pi_gc`. Report remaining workers, worktrees, and retained branches explicitly.
 
 ## When NOT to use a worker
 - Specifying the task costs more than doing it.
@@ -104,7 +104,7 @@ gate, not advice: `pi_send` refuses the third instruction unless you pass `overr
 - If it still fails your acceptance criteria after the second attempt, stop delegating it.
 - Do it yourself. That is the correct call, not a failure of process.
 - If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
-  stronger model (set `PI_MCP_STRONG_MODEL` and pass it) plus the concrete failures and evidence, then verify hard.
+  stronger model (pass an explicit model id to `pi_spawn`) plus the concrete failures and evidence, then verify hard.
 - Never enter an endless correction loop. It burns quota, time, and the worker's context.
 - `pi_status` exposes `instructions_sent`; overrides are recorded on the pi-mcp board for audit.
 
