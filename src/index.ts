@@ -219,8 +219,8 @@ async function shutdown(signal: string): Promise<void> {
   process.exit(0);
 }
 
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT").catch((error) => { log("shutdown failed:", error); process.exit(1); }));
+process.on("SIGTERM", () => void shutdown("SIGTERM").catch((error) => { log("shutdown failed:", error); process.exit(1); }));
 
 main().catch((e) => {
   log("fatal:", e);
