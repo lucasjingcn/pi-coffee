@@ -2,8 +2,17 @@
   "name": "pi-mcp",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "MCP server that lets Codex orchestrate multiple concurrent pi coding sessions (git worktree isolated, with inter-session messaging and file locks).",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucasjingcn/pi-coffee.git"
+  },
+  "homepage": "https://github.com/lucasjingcn/pi-coffee#readme",
+  "bugs": {
+    "url": "https://github.com/lucasjingcn/pi-coffee/issues"
+  },
   "bin": {
     "pi-mcp": "dist/index.js"
   },

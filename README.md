@@ -1,267 +1,401 @@
-# pi-mcp
+**[English](README.md) | [简体中文](README.zh-CN.md)**
 
-Let **Codex act as the general manager (大总管)** that drives multiple concurrent **pi** coding
-sessions. Codex decomposes work, spawns isolated pi workers, assigns tasks, reviews their diffs for
-bugs, answers their questions, tracks progress, and owns the final merge/commit/push.
+# pi-coffee
 
-- **Isolation**: every worker gets its own `git worktree` + branch, so file edits never collide.
-- **No collisions beyond that too**: workers auto-claim files (edit/write/bash) and are blocked if
-  another worker holds a conflicting claim.
-- **Inter-session messaging**: mailbox + shared board; workers can message each other or Codex.
-- **Human-in-the-loop for agents**: workers ask blocking questions (`coord_ask`) that surface to
-  Codex as MCP tool results and are answered with `pi_answer`.
-- **Codex instructions on connect**: MCP `instructions` + an `orchestrate` prompt + a
-  `pi-orchestrator` Codex skill.
+pi-coffee is the repository for **pi-mcp**, an MCP server that lets Codex run several **pi** coding
+agents at once. (The npm package, the `bin` entry, and the MCP server are all named `pi-mcp`; only
+this repository is called `pi-coffee`.) Codex stays the manager: it splits a job into well-defined
+pieces, hands each piece to an agent, reviews what comes back, and merges. The agents do the typing.
 
-## Architecture
+Two agents editing the same repository normally overwrite each other. Here each agent works in its
+own git worktree on its own branch, claims the files it is about to touch, and can message the other
+agents or ask Codex a question when something is unclear.
 
+[![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Protocol](https://img.shields.io/badge/protocol-MCP-6E56CF)](https://modelcontextprotocol.io)
+
+## Contents
+
+- [Background](#background)
+- [What you get](#what-you-get)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Install and run](#install-and-run)
+- [Pointing Codex at the daemon](#pointing-codex-at-the-daemon)
+- [A task, start to finish](#a-task-start-to-finish)
+- [Deployment](#deployment)
+- [Tool reference](#tool-reference)
+- [Worker-side tools](#worker-side-tools)
+- [How file claims work](#how-file-claims-work)
+- [Cleaning up finished work](#cleaning-up-finished-work)
+- [Configuration](#configuration)
+- [State and recovery](#state-and-recovery)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+## Background
+
+A single coding agent is easy to supervise. Several of them on one checkout is not: they save over
+each other's files, or produce long-lived branches that are painful to merge. The usual fixes
+(copying the repo, serializing everything) either waste the parallelism or waste your time.
+
+pi-mcp takes the opposite approach. Give every agent its own worktree, make file ownership explicit,
+and keep one supervisor — Codex — responsible for the final result. That is the whole idea; the rest
+of this document is the mechanics.
+
+## What you get
+
+- **One worktree and branch per worker.** Edits cannot collide because the checkouts are separate.
+- **Advisory file claims.** A worker claims a path before writing to it. If another worker already
+  holds a conflicting claim, the write is blocked with an explanation instead of silently racing.
+- **A mailbox and a shared board.** Workers can send each other durable messages, and post facts or
+  decisions that everyone can read.
+- **Blocking questions.** A stuck worker can ask Codex a question through `coord_ask`. It shows up
+  in `pi_wait` / `pi_status` and Codex answers with `pi_answer`.
+- **Acceptance tests written by Codex.** Codex drops the test into the worktree and locks it before
+  the worker starts, so the worker has to make the test pass rather than rewrite it.
+- **Structured specs and a paper trail.** Every spawn carries a goal and a scope; the daemon rejects
+  overlapping scopes up front. When the task is done, `pi_report` tells you how much of the work
+  landed on the first try.
+
+## How it works
+
+```mermaid
+flowchart LR
+    Codex[Codex<br/>manager] -- "streamable HTTP MCP" --> Daemon[pi-mcp daemon<br/>registry · locks · mailbox · board]
+    Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + branch]
+    Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + branch]
+    Daemon -- "RPC JSONL" --> WN[pi worker N ...]
+    W1 -. "worker extension:<br/>claims, inbox polling, coord_* tools" .-> Daemon
+    W2 -. "worker extension" .-> Daemon
+    WN -. "worker extension" .-> Daemon
 ```
-Codex ──streamable HTTP MCP──► pi-mcp daemon ──RPC JSONL──► pi worker 1 (worktree/branch)
-  ▲                            (registry, locks,        ──RPC JSONL──► pi worker 2 (worktree/branch)
-  └── skill + instructions      mailbox, board, UI)      ──RPC JSONL──► pi worker N ...
-                                     ▲
-                     worker-side pi extension (pi-coordinator.ts):
-                     auto file-claims, inbox polling, coord_* tools
-```
 
-The daemon spawns each worker as a long-lived `pi --mode rpc` child and injects the worker extension.
-The runtime path is deliberately the `pi` executable, not pi's internal modules, so `pi update`
-doesn't break the integration.
+The daemon (a small Node process) exposes an MCP endpoint over HTTP and an internal HTTP API. When
+Codex calls `pi_spawn`, the daemon creates a worktree, starts `pi --mode rpc` as a child process, and
+injects a worker-side extension into it. That extension is what enforces file claims, polls the
+mailbox, and provides the `coord_*` tools inside the worker.
 
-## Install
+Workers talk to the daemon over JSONL lines on stdin/stdout; the daemon talks to Codex over MCP. The
+daemon deliberately runs the `pi` executable rather than importing pi's internal modules, so a
+`pi update` does not break the integration.
 
-Run as the **same Unix user that runs Codex** (see Deployment note):
+## Requirements
+
+| | |
+|---|---|
+| **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19 and 24. |
+| **git** | Worktrees, diffs, merges, branch cleanup. |
+| **pi** | Installed and logged in as the daemon user. |
+| **Codex** | Any build with MCP support. |
+
+Run the daemon, Codex, and the workers as the **same Unix user**. They need to share file ownership
+and the same `~/.pi/agent/auth.json`. Root is not required — any user with a working `pi` and write
+access to the repository is fine.
+
+## Install and run
+
+Grab the repository first if you have not already:
 
 ```bash
-./install.sh          # npm install + build + install codex skill + `codex mcp add pi`
+git clone https://github.com/lucasjingcn/pi-coffee.git
+cd pi-coffee
 ```
 
-Then start the daemon (keep it running; systemd/tmux recommended):
+Then:
 
 ```bash
-./run.sh              # listens on http://127.0.0.1:8787
+./install.sh     # npm install + build + install the Codex skill + register the MCP server
+./run.sh         # start the daemon in the foreground (http://127.0.0.1:8787)
 ```
 
-Restart Codex. It connects to pi-mcp, receives the 大总管 instructions, loads the
-`pi-orchestrator` skill, and can call the `pi_*` tools.
+`install.sh` registers the **stdio proxy** as the Codex MCP server. The proxy forwards to the HTTP
+daemon and reconnects on its own, so restarting the daemon does not break the Codex session.
 
-## Run and connect Codex (Linux and macOS)
+Check that it came up:
 
-1. Build + register — run as the **same user that runs Codex** (and whose `pi` is authenticated):
-   ```bash
-   cd pi-mcp
-   ./install.sh     # npm install + build + install the Codex skill + `codex mcp add pi`
-   ```
-2. Start the daemon (binds loopback only):
-   ```bash
-   ./run.sh                                  # foreground, quick test
-   sudo ./deploy/linux/install-service.sh    # Linux: systemd system service
-   ./deploy/macos/install-daemon.sh          # macOS: launchd user agent
-   ```
-3. Verify: `curl http://127.0.0.1:8787/internal/health` → `{"ok":true,...}`
-4. Restart Codex. It connects, receives the 大总管 instructions, loads the `pi-orchestrator`
-   skill, and exposes the `pi_*` tools.
+```bash
+curl http://127.0.0.1:8787/internal/health   # {"ok":true,...}
+```
 
-If `codex` is not on PATH, add the server manually to `~/.codex/config.toml` and restart Codex:
+Restart Codex. It connects, picks up the orchestration instructions, loads the `pi-orchestrator`
+skill, and the `pi_*` tools appear. For a daemon that survives logout and reboots, install it as a
+service — see [Deployment](#deployment).
+
+## Pointing Codex at the daemon
+
+`install.sh` handles this when `codex` is on your `PATH`. Otherwise, add the server yourself in
+`~/.codex/config.toml` and restart Codex. Locally, use the stdio proxy:
+
 ```toml
 [mcp_servers.pi]
-command = "node"            # absolute path recommended
-args = ["<abs-path>/pi-mcp/dist/stdio-proxy.js"]
+command = "node"            # an absolute path to node is recommended
+args = ["/absolute/path/to/pi-mcp/dist/stdio-proxy.js"]
 
 [mcp_servers.pi.env]
 PI_MCP_URL = "http://127.0.0.1:8787/mcp"
 ```
-Codex launches the tiny **stdio proxy**, which forwards to the HTTP daemon and auto-reconnects, so a
-daemon restart never breaks the Codex session (unlike a direct `url =` connection).
 
-For a non-root Linux user service: run `./deploy/linux/install-service.sh` as that user (installs to
-`~/.config/systemd/user/`); run `loginctl enable-linger <user>` once so it starts on boot.
+If the daemon runs on another machine, connect to it directly and pass a token:
 
-## macOS / remote deployment
-
-The daemon is plain Node + git + HTTP, so it runs on macOS unchanged. Two topologies:
-
-### A. Everything on the Mac (recommended when the repo is on the Mac)
-1. Prereqs: **Node >= 22.19**, **git**, and **`pi`** installed + authenticated as the same user.
-2. Copy this directory to the Mac (exclude `node_modules`/`dist`):
-   `rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-mcp/`
-3. On the Mac: `cd ~/pi-mcp && ./install.sh && ./run.sh`
-   Codex then connects to `http://127.0.0.1:8787/mcp`. Repos should be cloned on the Mac.
-
-Keep the daemon running as a launchd agent (auto-start on login, restart on crash):
-```bash
-cd ~/pi-mcp && npm install && npm run build
-./deploy/macos/install-daemon.sh      # writes ~/Library/LaunchAgents/com.pimcp.daemon.plist
-# logs: ~/.pi-mcp/logs/daemon.{out,err}.log   stop: launchctl bootout gui/$(id -u)/com.pimcp.daemon
-```
-The LaunchAgent sets a PATH that includes Homebrew and `~/.pi/agent/bin`, so `pi` and `git` resolve.
-
-If `codex` is not on the Mac's PATH (e.g. the desktop app), add the server manually in the app or
-in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.pi]
-url = "http://127.0.0.1:8787/mcp"
+url = "http://daemon-host:8787/mcp"
+
+[mcp_servers.pi.env]
+PI_MCP_TOKEN = "your-secret"
 ```
 
-### B. Mac Codex -> daemon on another machine (e.g. this Linux box)
-Use when the repository and `pi` credentials live on the daemon host and Mac Codex only orchestrates.
-Bind to the LAN/VPN and set a token:
+## A task, start to finish
+
+This is roughly what a single delegated change looks like.
+
+1. Codex derives an acceptance test from the requirement. It calls `pi_spawn` with a `spec`
+   (`goal`, `scope`), the test in `acceptance_files`, and an `acceptance_command`. The test lands in
+   the new worktree and is locked before the worker starts.
+2. The worker reads the spec, edits files, and runs the test. If it needs a decision, it calls
+   `coord_ask`; if it wants to touch a file another worker holds, `coord_send` is the way to
+   negotiate.
+3. Codex calls `pi_wait`, follows progress with `pi_tail`, and reads the full patch with `pi_diff`.
+4. Before trusting the result, Codex runs the acceptance command itself with `pi_exec`.
+5. Once it is happy, Codex merges (`pi_merge`), closes the workstream (`pi_finish`), prints the
+   scoreboard (`pi_report`), and reclaims disk (`pi_gc`).
+
+A worker gets two attempts: the original task plus one correction. A third instruction is refused
+unless Codex explicitly overrides it and says why. If it still is not right, Codex takes over — that
+is the intended outcome, not a failure.
+
+## Deployment
+
+### Linux (systemd)
+
+```bash
+sudo ./deploy/linux/install-service.sh    # system-wide service
+./deploy/linux/install-service.sh         # or a per-user service in ~/.config/systemd/user/
+loginctl enable-linger "$USER"            # required for a user service to start at boot
+```
+
+### macOS (launchd)
+
+```bash
+npm install && npm run build
+./deploy/macos/install-daemon.sh          # writes ~/Library/LaunchAgents/com.pimcp.daemon.plist
+```
+
+Logs go to `~/.pi-mcp/logs/daemon.{out,err}.log`. Stop the agent with
+`launchctl bootout gui/$(id -u)/com.pimcp.daemon`. The launch agent sets a `PATH` that includes
+Homebrew and `~/.pi/agent/bin` so `pi` and `git` resolve.
+
+To keep everything on one Mac (useful when the repository lives there):
+
+```bash
+rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-mcp/
+# then, on the Mac:
+cd ~/pi-mcp && ./install.sh && ./run.sh
+```
+
+### Daemon on another machine
+
+If the repository and the `pi` credentials live on one host and you only run Codex elsewhere, bind
+the daemon to the LAN or VPN and set a shared token:
+
 ```bash
 PI_MCP_HOST=0.0.0.0 PI_MCP_TOKEN=<secret> ./run.sh
 ```
-On the Mac:
+
+On the Codex machine:
+
 ```bash
 PI_MCP_TOKEN=<secret> codex mcp add pi \
   --url http://<daemon-host>:8787/mcp --bearer-token-env-var PI_MCP_TOKEN
 ```
-`pi_diff` / `pi_commit` / `pi_merge` / `pi_push` let Codex review and integrate code that lives on
-the daemon host without direct filesystem access. Only expose on a trusted network/VPN; loopback is
-the default.
 
-## Tools exposed to Codex
+`pi_diff`, `pi_commit`, `pi_merge`, and `pi_push` let Codex review and integrate code it cannot
+reach directly. Do this only on a network you trust; the default bind is loopback.
 
-| Tool | Purpose |
+## Tool reference
+
+| Tool | What it does |
 |---|---|
-| `pi_spawn` | Create worktree+branch, start a worker. Takes a structured `spec{goal, scope[], non_goals[], contracts[], constraints[], task_type}` (goal+scope required and validated); `scope` is pre-claimed so overlapping workstreams are rejected at dispatch; `task_type=design\|security` is blocked unless `spec_override`; `acceptance_files` + `acceptance_command` write Codex-authored tests into the worktree before start and lock them (test-first delegation). |
-| `pi_send` | Instruct a worker: `mode=prompt\|steer\|followup`. The 3rd instruction is blocked (two-strikes) unless `override:true`; a retry keeps the SAME model (no auto-escalation). |
-| `pi_wait` | Block until `settled` or until a worker `question`. Re-poll with timeouts ≤ 120s. |
-| `pi_status` / `pi_list` | Snapshots: status, model, cost, context, pending questions. |
-| `pi_tail` | Incremental transcript (`since=lastEntryId`). |
-| `pi_diff` | Committed + uncommitted + untracked changes of a worker branch. |
-| `pi_commit` / `pi_merge` / `pi_push` | Commit a worker, merge its branch into the main repo (conflicts returned), push. |
-| `pi_answer` | Answer a worker question (`confirmed` / `value` / `cancelled`). |
-| `pi_claim` / `pi_release` / `pi_locks` | Manual file claims / inspect conflicts. |
-| `pi_message` / `pi_inbox` | Durable mailbox; optional injection into the recipient. |
-| `pi_board_post` / `pi_board_read` | Shared blackboard (contracts, ownership, decisions). |
-| `pi_stop` | Stop a worker; optionally remove its worktree/branch. |
-| `pi_gc` | Reclaim finished work: stop+evict workers, remove clean finished worktrees, and delete only branches proven merged (tip is an ancestor of the repo's current HEAD). Retains abandoned/unfinished, active, dirty, checked-out, current/default, and squash/rebase branches; reports `branches_deleted` + per-branch `branches_retained` reasons. |
+| `pi_spawn` | Create a worktree and branch, then start a worker. Takes a structured `spec` (`goal`, `scope` required; `non_goals`, `contracts`, `constraints`, `task_type` optional). The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
+| `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
+| `pi_wait` | Block until every listed session is `settled`, or until any worker asks a `question`. Keep timeouts at or under two minutes and poll again. |
+| `pi_status` / `pi_list` | Current state: status, model, cost, context usage, pending questions. |
+| `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
+| `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
+| `pi_commit` | Stage and commit everything in a worker's worktree. |
+| `pi_merge` | Merge a worker branch into the main repo. On conflict the merge is left in progress and the conflicting files are returned. |
+| `pi_push` | Push the current branch (or an explicit one) to a remote. |
+| `pi_exec` | Run a shell command in a worker's worktree — this is how Codex verifies the acceptance test itself. |
+| `pi_answer` | Answer a worker's pending question with `confirmed`, `value`, or `cancelled`. |
+| `pi_claim` / `pi_release` / `pi_locks` | Claim paths by hand, release them, or list what is held. |
+| `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
+| `pi_board_post` / `pi_board_read` | Post to the shared board and read it, with a `latest=true` view per key. |
+| `pi_stop` | Stop a worker, optionally removing its worktree and branch. |
+| `pi_finish` | Record how a workstream ended: `success_first`, `success_second`, `taken_over`, or `abandoned`. |
+| `pi_report` | The delegation scoreboard: first-try, second-try, and take-over counts with percentages. |
+| `pi_gc` | Reclaim finished work. Removes clean finished worktrees and deletes only branches proven merged. |
+| `pi_metrics` | Worker output tokens and cost versus how much Codex itself sent down the wire. |
 
-Worker-side tools (inside each pi session): `coord_ask`, `coord_send`, `coord_inbox`,
-`coord_claim`, `coord_release`, `coord_board_post`, `coord_board_read`, `coord_status`.
+## Worker-side tools
 
-## Worker extension behavior
+Each daemon-spawned pi session also gets these tools from the worker extension:
 
-- **Auto-claim**: on `edit`/`write` it claims the target path; on `bash` it heuristically claims
-  redirect/`tee`/`sed -i` targets. A conflicting claim blocks the tool with an explanatory reason,
-  so the worker coordinates instead of stomping another worker. Lock keys combine the canonical
-  Git common directory with a repo-relative path: separate repositories do not collide, while
-  symlink aliases and linked worktrees of the same repository still conflict. Absolute paths inside
-  a worker's worktree are normalized to the same relative key. Listed locks include `repo` (the
-  canonical Git common directory). Manual `pi_claim` / `pi_release` calls can select a `repo`;
-  omitting it uses the daemon default repo, while worker sessions always use their own repository.
+`coord_ask`, `coord_send`, `coord_inbox`, `coord_claim`, `coord_release`,
+`coord_board_post`, `coord_board_read`, `coord_status`.
 
-## Cleanup & branch retention
+## How file claims work
 
-`pi_gc` reclaims finished work in two steps: it stops/evicts finished workers and removes their
-clean worktrees, then deletes the branches of finished workstreams (`success_first`,
-`success_second`, `taken_over`) that are **proven merged**.
+Before a worker writes, it claims the path. On `edit` and `write` that is the target file. On `bash`
+it scans the command for literal redirect, `tee`, and `sed -i` targets and claims those. If a claim
+conflicts with another worker's, the tool call is blocked and the worker is told who holds it, so it
+can coordinate instead of trampling the other change.
 
-- **Ancestry criterion**: a branch is deleted only when its tip is an ancestor of the repository's
-  current `HEAD` (`git merge-base --is-ancestor`), i.e. its commits are contained in the integrated
-  history. Squash- or rebase-integrated branches are *not* ancestors and are retained for manual
-  inspection; gc never force-deletes.
-- **Historical scope**: candidates come from persisted session metadata, so branches whose worktree
-  was already removed (e.g. after a daemon restart) are still reclaimed. Sessions are deduplicated
-  per repo+branch, and missing worktrees never block the check.
-- **Safety rails**: `abandoned`/unfinished sessions are retained; a branch is never deleted when it
-  is the current/default branch, checked out in any worktree, tied to an active session, or tied to
-  an existing dirty worktree. These rails hold regardless of `PI_MCP_DELETE_BRANCHES`.
-- **Reporting**: gc returns `branches_deleted` (count of actual deletions) and `branches_retained`
-  (`{repo, branch, reason}` for each retained candidate). A failed git call retains the branch and is
-  reported, never counted as deleted.
-- **Closure workflow**: review the full diff, verify the acceptance command, merge, close the
-  workstream with `pi_finish`, record `pi_report`, then run `pi_gc`. Merged finished branches disappear automatically;
-  anything retained stays inspectable and can be removed deliberately. Explicit `pi_stop` with
-  `delete_branch: true` remains the force-delete escape hatch; gc never uses it.
+Claims are namespaced by the repository's canonical git common directory, combined with a
+repo-relative path. Two checkouts of the same repository — including symlink aliases and linked
+worktrees — share a namespace, while unrelated repositories never collide even if their file names
+match. Absolute paths inside a worker's worktree are normalized to the same relative key before they
+are hashed. `pi_claim` and `pi_release` can target a specific `repo`; if you leave it out, the daemon
+default is used, while worker sessions always use their own repository.
 
-Automatic worktree cleanup now always keeps branches; `PI_MCP_DELETE_BRANCHES` applies only to
-explicit worktree removal through `pi_stop`. Run `pi_gc` for safe merged-branch cleanup.
+The locks are advisory. They cover recognizable literal targets; variables, command substitution,
+and globs are not resolved. For genuinely untrusted workers, use a read-only acceptance directory
+and separate process isolation rather than relying on claims.
 
-## Adaptive routing & scoreboard
+## Cleaning up finished work
 
-- **Structured delegation**: `pi_spawn` requires a `spec` with `goal` and `scope` (validated). `scope`
-  is pre-claimed at dispatch, so two workstreams with overlapping files are rejected before any code is
-  written. `task_type=design|security` is blocked (judgment work stays with Codex).
-- **Cheap first, no auto-upgrade**: every worker runs on `PI_MCP_MODEL` (`deepseek-flash`).
-  Automatic model escalation is DISABLED; a retry stays on the same model unless Codex explicitly
-  passes `model` to `pi_send`. `PI_MCP_STRONG_MODEL` (default empty) is only used for an explicit
-  manual upgrade.
-- **Two-strikes gate**: after two instructions, `pi_send` refuses a third unless `override:true`.
-- **Delegation scoreboard**: close each workstream with `pi_finish` (outcome + `tests_owned_by_codex`)
-  and call `pi_report` at task completion for first-try / second-try / taken-over counts and
-  percentages.
-- **Inbox polling**: every 2.5s it injects unread mailbox messages as follow-ups.
-- **Question loop**: `coord_ask` opens a `ctx.ui` dialog which becomes an RPC UI request; the daemon
-  surfaces it through `pi_wait`/`pi_status`, and Codex resolves it via `pi_answer`.
+`pi_gc` does two things. First it stops and evicts finished workers and removes their clean
+worktrees. Then it deletes branches of finished workstreams that are proven merged.
 
-## Configuration (env)
+A branch is only deleted when its tip is an ancestor of the repository's current `HEAD`. Work
+integrated by squash or rebase is not an ancestor, so it is left alone for you to inspect — gc never
+force-deletes. Candidates come from persisted metadata, so branches whose worktree is already gone
+(for example, after a daemon restart) are still eligible. Branches are deduplicated per repo and
+branch name.
 
-| Env | Default | Meaning |
+Nothing is deleted while it is a current or default branch, checked out in any worktree, attached to
+an active session, or attached to an existing dirty worktree. Abandoned and unfinished workstreams
+are kept. These rules apply no matter how `PI_MCP_DELETE_BRANCHES` is set.
+
+The result reports `branches_deleted` and a `branches_retained` entry with a reason for every branch
+it kept. If git fails on a branch, it is retained and reported, never counted as deleted for you.
+
+## Configuration
+
+Everything is configured through environment variables.
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `PI_MCP_HOST` | `127.0.0.1` | Bind address (loopback only). |
-| `PI_MCP_PORT` | `8787` | HTTP port for `/mcp` and `/internal/*`. |
-| `PI_MCP_PI_BIN` | `pi` | pi executable. |
-| `PI_MCP_DEFAULT_REPO` | (none) | Default repo for `pi_spawn`; if unset, every `pi_spawn` must pass `repo`. |
+| `PI_MCP_HOST` | `127.0.0.1` | Bind address. Loopback by default. |
+| `PI_MCP_PORT` | `8787` | Port for `/mcp` and `/internal/*`. |
+| `PI_MCP_PI_BIN` | `pi` | The pi executable. |
+| `PI_MCP_DEFAULT_REPO` | *(none)* | Default repository for `pi_spawn`. If unset, every spawn must pass `repo`. |
 | `PI_MCP_WORKSPACE_ROOT` | `~/.pi-mcp/worktrees` | Where worktrees are created. |
-| `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker model (first attempt). |
-| `PI_MCP_STRONG_MODEL` | (empty) | Model for an EXPLICIT manual upgrade. Empty disables escalation (it is never automatic). |
-| `PI_MCP_THINKING` | `xhigh` | pi thinking level for workers (`off`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`). Overridable per spawn via `pi_spawn.thinking`. |
-| `PI_MCP_MAX_SESSIONS` | `8` | Hard concurrency cap. |
-| `PI_MCP_PARALLEL_WARN` | `4` | Soft parallelism guideline; `pi_spawn` warns at/above this many active workers. |
-| `PI_MCP_BASE_REF` | `HEAD` | Branch base for new worktrees. |
-| `PI_MCP_AUTO_CLEAN` | `1` | Auto-remove finished workers' worktrees (branches kept). |
-| `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished+idle worker is kept before the sweeper cleans it. |
-| `PI_MCP_DELETE_BRANCHES` | `0` | Default for explicit `pi_stop` `delete_branch` (force-delete; default keeps the branch). `pi_gc` ignores it and only deletes ancestry-proven merged branches. |
-| `PI_MCP_TOKEN` | (none) | Optional shared secret for `/mcp` and `/internal/*`. |
-| `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state (locks, mailbox, board, sessions). |
+| `PI_MCP_PROVIDER` / `PI_MCP_MODEL` | `deepseek` / `deepseek-flash` | Worker provider and model. |
+| `PI_MCP_STRONG_MODEL` | *(empty)* | Model for an explicit manual upgrade. Empty means no upgrade is available. |
+| `PI_MCP_THINKING` | `xhigh` | pi thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Overridable per spawn. |
+| `PI_MCP_MAX_SESSIONS` | `8` | Hard cap on concurrent workers. |
+| `PI_MCP_PARALLEL_WARN` | `4` | Warn in `pi_spawn` once this many workers are active. |
+| `PI_MCP_BASE_REF` | `HEAD` | Base ref for new worktrees. |
+| `PI_MCP_AUTO_CLEAN` | `1` | Remove finished workers' worktrees automatically (branches are kept). |
+| `PI_MCP_WORKTREE_TTL_MIN` | `60` | Minutes a finished, idle worker is kept before the sweeper cleans it. |
+| `PI_MCP_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
+| `PI_MCP_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
+| `PI_MCP_DATA_DIR` | `~/.pi-mcp` | Daemon state: locks, mailbox, board, session metadata. |
 
-Startup rejects invalid effective settings: ports must be integers from 1 to 65535, session caps
-and parallel warning thresholds must be positive safe integers, and TTL must be finite and at
-least one minute (fractional minutes are allowed). Numeric env settings use decimal notation;
-boolean settings accept only `0` or `1`. Explicit programmatic overrides take precedence.
+Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
+caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least
+one minute (fractional minutes are fine). Numbers use decimal notation, and booleans accept only `0`
+or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and defaults.
 
-State is saved by serialized atomic replacement of `state.json`, with the previous validated
-snapshot kept in `state.json.bak`. Loading validates the entire snapshot before applying it. A
-missing or corrupt primary can recover from a valid backup with a warning on stderr; corruption
-without a valid backup, or a filesystem read error, aborts startup instead of resetting history.
-Save failures are logged on stderr; a failed shutdown flush exits with a nonzero status. The backup
-may lag the primary by one save and does not provide power-loss durability or multi-daemon locking.
+## State and recovery
 
-## Deployment note (important)
+Daemon state lives in `state.json` inside `PI_MCP_DATA_DIR`. Writes are serialized and atomic: a
+unique temp file is renamed into place, and the previous validated snapshot is kept as
+`state.json.bak`.
 
-The daemon and Codex should run as the **same Unix user**, and that user must have a working,
-authenticated **`pi`** (`~/.pi/agent/auth.json`). Otherwise workers either can't authenticate or
-can't write worktrees under the repo's ownership.
+On startup the whole snapshot is validated before any of it is applied. If the primary file is
+missing or corrupt, a valid backup is used and a warning goes to stderr. If both are bad, or the
+filesystem cannot be read, startup fails instead of quietly starting from scratch. Save failures are
+logged; a failed flush during shutdown exits with a non-zero status.
 
-- If Codex runs as user X, install/authenticate `pi` for X and run `./run.sh` as X. There is no
-  requirement to run as root: any user with a working `pi` and permission to the repo works.
+The backup can lag the primary by one save, and there is no power-loss durability or multi-daemon
+write locking. Run one daemon per state directory.
 
-## Testing
+## Security
+
+- The daemon binds to loopback and has no authentication by default. Setting `PI_MCP_TOKEN` enables
+  it: the same secret must be presented on `/mcp` and `/internal/*`, either as
+  `x-pi-coord-token` or `Authorization: Bearer <token>`.
+- If you expose the daemon beyond loopback, use the token and a trusted network or VPN. A token on
+  a shared network is not a substitute for network controls.
+- File claims are a coordination mechanism, not a sandbox. Treat a worker as able to run arbitrary
+  code in its worktree and plan accordingly.
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to try |
+|---|---|---|
+| `{"error":"unauthorized"}` | Token mismatch between daemon and client | Set the same `PI_MCP_TOKEN` on the daemon and in the Codex/proxy environment. |
+| `pi_spawn` fails with "repo is required" | No default repository configured | Set `PI_MCP_DEFAULT_REPO`, or pass `repo` on every spawn. |
+| A worker starts and immediately errors out | `pi` is not logged in as the daemon user | Run `pi` once as that user to authenticate. |
+| `git` complains about "dubious ownership" | The daemon user differs from the repo owner | The daemon already passes `safe.directory=*` to its own git calls; if you see this elsewhere, check your git version. |
+| Sessions show `stopped` after a restart | Workers do not survive a daemon restart | This is expected. Spawn new sessions; the transcript files are still on disk. |
+| The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_MCP_PORT` to a free port. |
+| `codex mcp add` is not found | `codex` is not on the daemon user's `PATH` | Register the server manually in `~/.codex/config.toml`. |
+| A worker is blocked by a file claim | Another worker holds a conflicting claim | Use `coord_send` to coordinate, or `pi_release` if the claim is stale. |
+
+## Development
 
 ```bash
-npm ci                    # development/CI: Node >= 22.19
-npm run verify            # source + real pi extension API types + full offline tests
-npm test                  # build, then run all tests/*.test.mjs (offline, no pi credentials needed)
-SMOKE_LIVE=0 ./smoke.sh   # deterministic end-to-end smoke only (no model calls)
-./smoke.sh                # same, plus a couple of tiny live model calls
+npm ci                 # install (Node >= 22.19)
+npm run build          # compile TypeScript to dist/
+npm run dev            # run the daemon from source with tsx
+npm run typecheck      # main sources
+npm run typecheck:extensions   # extension against the real pi API types
+npm test               # build, then run the offline test suite
+npm run verify         # typecheck + typecheck:extensions + test
+./smoke.sh             # full end-to-end smoke (a couple of tiny live model calls)
+SMOKE_LIVE=0 ./smoke.sh   # deterministic smoke only, no model calls
 ```
 
-`npm test` builds the TypeScript sources and runs the test suite. The offline smoke test boots a
-throwaway git repo + daemon and exercises the full control surface (spec linter, task-type gate,
-scope overlap, acceptance test-first + lock, committed diff, explicit model override, two-strikes gate,
-finish/report, restart persistence) against a disposable fake `pi` JSONL RPC, so it needs no
-installed/authenticated `pi` and no network or model access. With `SMOKE_LIVE=1` (the default when
-unset) the same checks run, but the workers make a couple of tiny real model calls instead of
-answering from the fake.
+`npm test` compiles the sources and runs everything under `tests/`. The offline smoke test builds a
+throwaway git repository and daemon and drives the whole control surface — spec validation, the
+task-type gate, scope overlap, test-first acceptance, diffing, model overrides, the two-strikes
+gate, finishing and reporting, and restart persistence — against a fake `pi` that speaks JSONL, so
+it needs no credentials and no network.
 
-`./smoke.sh` always rebuilds the sources before running the smoke.
+GitHub Actions runs `npm ci` and `npm run verify` on pushes and pull requests, on Node 22.19.0 and
+24. The pi dependency is pinned for development type checking only; CI does not log in to or call a
+model provider.
 
-GitHub Actions runs `npm ci` and `npm run verify` on pushes and pull requests using Node 22.19.0
-and Node 24. The pi API dependency is pinned for development type checking; these checks do not
-authenticate or call a model provider.
+### Repository layout
 
-## Limits
+```
+src/          daemon, MCP server, git plumbing, locks, state store
+extensions/   worker-side pi extension (claims, inbox, coord_* tools)
+tests/        offline test suite (node --test)
+scripts/      smoke and status helpers
+deploy/       systemd and launchd installers
+codex/        Codex skill installed by install.sh
+```
 
-- Live worker processes do not survive a daemon restart: shutting the daemon down stops its
-  workers, and after restart you must spawn new sessions (the session JSONL written by workers is
-  kept, but the daemon does not automatically restart workers).
+## Known limitations
+
+- Workers do not survive a daemon restart. Shutting the daemon down stops them, and they are not
+  brought back automatically. Their session files are kept, but you spawn new sessions.
+- File claims are advisory and only cover literal, recognizable targets.
+- The git worktree model assumes one worker per branch. Forcing the same branch into two worktrees
+  is not supported.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
+
+Copyright 2026 lucasjing.
