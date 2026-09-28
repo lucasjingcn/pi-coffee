@@ -10,6 +10,13 @@ import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
 import { commitAll, createWorktree, currentBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
 
+/**
+ * Temporary lock owner used to precheck acceptance reservations. LockManager skips locks whose
+ * owner matches the claimant, so claiming acceptance files under the shared "codex" owner would
+ * silently ignore another Codex-owned acceptance reservation; a distinct sentinel surfaces it.
+ */
+const ACCEPTANCE_PRECHECK_OWNER = "__acceptance_precheck__";
+
 export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
 
 export type Outcome = "success_first" | "success_second" | "taken_over" | "abandoned";
@@ -58,6 +65,8 @@ interface Runtime {
   meta: SessionMeta;
   client: PiRpcClient;
   lastNotifiedQuestionIds: Set<string>;
+  /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
+  acceptanceReserved?: boolean;
 }
 
 export interface SpawnOptions {
@@ -276,16 +285,18 @@ export class Coordinator {
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
     // Reserve a concurrency slot synchronously, before the first await, so two concurrent spawns
-    // cannot both pass the cap check and oversubscribe the daemon. Every exit path releases it.
+    // cannot both pass the cap check and oversubscribe the daemon. The slot is transferred to the
+    // runtime once it is registered; until then, every failure path releases it here.
     this.reserveSlot();
+    const slot = { transferred: false };
     try {
-      return await this.spawnSession(opts);
+      return await this.spawnSession(opts, slot);
     } finally {
-      this.releaseReservation();
+      if (!slot.transferred) this.releaseReservation();
     }
   }
 
-  private async spawnSession(opts: SpawnOptions): Promise<SessionMeta> {
+  private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_MCP_DEFAULT_REPO for the daemon");
@@ -299,6 +310,7 @@ export class Coordinator {
     const dir = join(this.config.workspaceRoot, id);
     const requestedBase = opts.baseRef ?? this.config.defaultBaseRef;
     const acceptancePaths = (opts.acceptanceFiles ?? []).map((f) => f.path);
+    let acceptanceReserved = false;
 
     // Scope pre-claim & overlap pre-check: reserve the declared scope before creating anything, so
     // two workstreams with overlapping files are rejected at dispatch instead of mid-flight.
@@ -312,28 +324,41 @@ export class Coordinator {
         );
       }
     }
-    // Reserve Codex-owned acceptance files before creating anything: a conflict must fail dispatch
-    // rather than let a worker start against tests that are already locked.
+    // Reserve Codex-owned acceptance files before creating anything. LockManager skips same-owner
+    // collisions, so precheck under a temporary distinct owner first: that surfaces overlaps with
+    // any existing lock (including another Codex-held acceptance reservation), then re-claim under
+    // the shared "codex" owner so the worker never owns its own tests.
     if (acceptancePaths.length) {
+      const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw");
+      if (!pre.ok) {
+        this.locks.releaseAll(id);
+        this.scheduleSave();
+        throw new Error(
+          `acceptance files conflict with active locks: ${pre.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
+        );
+      }
+      this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths);
       const acc = this.locks.claim("codex", acceptancePaths, "rw");
       if (!acc.ok) {
-        // The failed claim granted nothing, so only drop our own scope reservations.
+        // Not expected (no await between precheck and claim), but never leak partial reservations.
         this.locks.releaseAll(id);
         this.scheduleSave();
         throw new Error(
           `acceptance files conflict with active locks: ${acc.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
         );
       }
+      acceptanceReserved = true;
     }
 
-    // Resolve the requested base to a concrete SHA before creating the worktree, then create on
-    // that same SHA, so meta.baseRef can never drift from the worktree's actual base.
-    const baseSha = await resolveRef(repo, requestedBase).catch(() => requestedBase);
-    let wt: WorktreeInfo;
+    // Resolve the requested base to a concrete SHA and create the worktree on that same SHA in one
+    // guarded block. A failed resolve must propagate (no symbolic-ref fallback) and release locks.
+    let baseSha!: string;
+    let wt!: WorktreeInfo;
     try {
+      baseSha = await resolveRef(repo, requestedBase);
       wt = await createWorktree({ repo, dir, branch, baseRef: baseSha });
     } catch (e) {
-      this.releaseSpawnReservations(id, acceptancePaths);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
       throw e;
     }
 
@@ -345,7 +370,7 @@ export class Coordinator {
         await writeFile(abs, f.content, "utf8");
       }
     } catch (e) {
-      this.releaseSpawnReservations(id, acceptancePaths);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
       await removeWorktree(repo, wt.dir, branch).catch(() => {});
       throw e;
     }
@@ -381,8 +406,12 @@ export class Coordinator {
       },
     });
 
-    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set() };
+    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved };
     this.runtimes.set(id, rt);
+    // The runtime now occupies the slot: stop counting it in `reserved` so it is not double-counted
+    // by activeCount() while the child is starting.
+    slot.transferred = true;
+    this.releaseReservation();
     this.wireEvents(rt);
 
     // Acceptance files were already reserved for Codex before the worktree was created.
@@ -394,7 +423,8 @@ export class Coordinator {
       meta.error = String(e);
       // A failed startup must not leak the child process or any reservations.
       await client.stop().catch(() => {});
-      this.releaseSpawnReservations(id, acceptancePaths);
+      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved);
+      rt.acceptanceReserved = false;
       this.scheduleSave();
       this.notifyWaiters();
       throw e;
@@ -514,9 +544,9 @@ export class Coordinator {
   }
 
   /** Undo all lock reservations made while starting a session that then failed. */
-  private releaseSpawnReservations(id: string, acceptancePaths: string[]): void {
+  private releaseSpawnReservations(id: string, acceptancePaths: string[], acceptanceReserved: boolean): void {
     this.locks.releaseAll(id);
-    if (acceptancePaths.length) this.locks.release("codex", acceptancePaths);
+    if (acceptanceReserved && acceptancePaths.length) this.locks.release("codex", acceptancePaths);
     this.scheduleSave();
   }
 
@@ -668,7 +698,12 @@ export class Coordinator {
     rt.meta.lastActivity = Date.now();
     this.locks.releaseAll(id);
     // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
-    if (rt.meta.acceptance?.files?.length) this.locks.release("codex", rt.meta.acceptance.files);
+    // Only release once: a failed startup already released them, and a newer worker may have since
+    // re-acquired the same path under "codex".
+    if (rt.acceptanceReserved && rt.meta.acceptance?.files?.length) {
+      this.locks.release("codex", rt.meta.acceptance.files);
+      rt.acceptanceReserved = false;
+    }
     this.archive(rt.meta);
     if (opts.removeWorktree) {
       // Explicit request: remove even if dirty.
