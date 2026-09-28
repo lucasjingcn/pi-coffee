@@ -28,6 +28,50 @@ async function git(cwd: string, args: string[], timeout = 120_000): Promise<stri
   return stdout.trim();
 }
 
+/** Like `git`, but returns stdout verbatim so leading columns and patch whitespace survive. */
+async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<string> {
+  const { stdout } = await run("git", ["-C", cwd, ...args], {
+    timeout,
+    maxBuffer: 32 * 1024 * 1024,
+    env: gitEnv(),
+  });
+  return stdout;
+}
+
+interface GitOutcome {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  message: string;
+}
+
+/** Run git and report success/failure plus captured output instead of throwing. */
+async function gitOutcome(cwd: string, args: string[], timeout = 120_000): Promise<GitOutcome> {
+  try {
+    const { stdout, stderr } = await run("git", ["-C", cwd, ...args], {
+      timeout,
+      maxBuffer: 32 * 1024 * 1024,
+      env: gitEnv(),
+    });
+    return { ok: true, stdout, stderr, message: "" };
+  } catch (e: any) {
+    return {
+      ok: false,
+      stdout: typeof e?.stdout === "string" ? e.stdout : "",
+      stderr: typeof e?.stderr === "string" ? e.stderr : "",
+      message: String(e?.message ?? e),
+    };
+  }
+}
+
+/** Decode NUL-delimited git output into exact (unquoted, untrimmed) paths. */
+function nulPaths(out: string): string[] {
+  return out.split("\0").filter((p) => p.length > 0);
+}
+
+/** Porcelain v1 status codes that mark an unresolved merge conflict. */
+const CONFLICT_CODES = new Set(["UU", "AA", "DD", "AU", "UA", "DU", "UD"]);
+
 export async function isGitRepo(dir: string): Promise<boolean> {
   try {
     await git(dir, ["rev-parse", "--is-inside-work-tree"]);
@@ -117,29 +161,31 @@ export interface DiffSummary {
 
 /** Summarize a worker's changes: committed since base plus uncommitted/untracked edits. */
 export async function worktreeDiff(dir: string, base = "HEAD"): Promise<DiffSummary> {
-  const [stat, committed, uncommitted, status, names] = await Promise.all([
-    git(dir, ["diff", "--stat", `${base}...HEAD`]).catch(() => ""),
-    git(dir, ["diff", `${base}...HEAD`]).catch(() => ""),
-    git(dir, ["diff", "HEAD"]).catch(() => ""),
-    git(dir, ["status", "--porcelain"]).catch(() => ""),
-    git(dir, ["diff", "--name-only", `${base}...HEAD`])
-      .then((s) => s.split("\n").filter(Boolean))
-      .catch(() => [] as string[]),
+  // Any failing git call (e.g. an unknown base) rejects instead of masquerading
+  // as an empty, successful diff. Raw output keeps porcelain columns and patches intact.
+  const [stat, committed, uncommitted, status, committedNames, changedNames, untrackedRaw] = await Promise.all([
+    gitRaw(dir, ["diff", "--stat", `${base}...HEAD`]),
+    gitRaw(dir, ["diff", `${base}...HEAD`]),
+    gitRaw(dir, ["diff", "HEAD"]),
+    gitRaw(dir, ["status", "--porcelain"]),
+    gitRaw(dir, ["diff", "--name-only", "-z", `${base}...HEAD`]),
+    gitRaw(dir, ["diff", "--name-only", "-z", "HEAD"]),
+    gitRaw(dir, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
-  const untracked = status
-    .split("\n")
-    .filter((l) => l.startsWith("?? "))
-    .map((l) => l.slice(3).trim());
-  return { base, stat, committed, uncommitted, untracked, status, files: [...new Set([...names, ...untracked])] };
+  const untracked = nulPaths(untrackedRaw);
+  const files = [
+    ...new Set([...nulPaths(committedNames), ...nulPaths(changedNames), ...untracked]),
+  ];
+  return { base, stat, committed, uncommitted, untracked, status, files };
 }
 
 export async function commitAll(dir: string, message: string): Promise<string> {
   await git(dir, ["add", "-A"]);
-  try {
-    await git(dir, ["commit", "-m", message]);
-  } catch (e) {
-    return `nothing to commit: ${String(e)}`;
+  // A genuinely clean tree is the only no-op; every other commit failure must surface.
+  if ((await git(dir, ["status", "--porcelain"])) === "") {
+    return "nothing to commit: working tree clean";
   }
+  await git(dir, ["commit", "-m", message]);
   return git(dir, ["rev-parse", "--short", "HEAD"]);
 }
 
@@ -169,13 +215,19 @@ export async function mergeBranch(
   const current = await currentBranch(repo);
   if (current !== into) await git(repo, ["checkout", into]);
   const args = ["merge", ...(opts.noFf === false ? [] : ["--no-ff"]), branch, "-m", opts.message ?? `Merge ${branch} into ${into}`];
-  const output = await git(repo, args).catch((e: any) => String(e?.stdout ?? e?.message ?? e));
-  const status = await git(repo, ["status", "--porcelain"]).catch(() => "");
-  const conflicts = status
-    .split("\n")
-    .filter((l) => /^(UU|AA|DD|AU|UA|DU|UD) /.test(l))
-    .map((l) => l.slice(3).trim());
-  return { ok: conflicts.length === 0, branch, into, conflicts, output };
+  const outcome = await gitOutcome(repo, args);
+  const output = [outcome.stdout, outcome.stderr, outcome.ok ? "" : outcome.message]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  // `-z` gives literal (unquoted, untrimmed) paths, so filenames containing
+  // spaces, Unicode or newlines survive exactly. A git failure here must
+  // surface rather than be reported as "no conflicts".
+  const status = await gitRaw(repo, ["status", "--porcelain", "-z"]);
+  const conflicts = nulPaths(status)
+    .filter((entry) => entry.length > 3 && entry[2] === " " && CONFLICT_CODES.has(entry.slice(0, 2)))
+    .map((entry) => entry.slice(3));
+  return { ok: outcome.ok, branch, into, conflicts, output };
 }
 
 export async function pushBranch(repo: string, remote = "origin", branch?: string): Promise<string> {
