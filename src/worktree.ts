@@ -40,6 +40,7 @@ async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<s
 
 interface GitOutcome {
   ok: boolean;
+  exitCode?: number;
   stdout: string;
   stderr: string;
   message: string;
@@ -57,6 +58,7 @@ async function gitOutcome(cwd: string, args: string[], timeout = 120_000): Promi
   } catch (e: any) {
     return {
       ok: false,
+      exitCode: typeof e?.code === "number" ? e.code : undefined,
       stdout: typeof e?.stdout === "string" ? e.stdout : "",
       stderr: typeof e?.stderr === "string" ? e.stderr : "",
       message: String(e?.message ?? e),
@@ -162,7 +164,7 @@ function gitErrorText(out: GitOutcome): string {
 async function checkedOutBranches(repo: string): Promise<Set<string>> {
   const names = new Set<string>();
   const out = await gitOutcome(repo, ["worktree", "list", "--porcelain"]);
-  if (!out.ok) return names;
+  if (!out.ok) throw new Error(gitErrorText(out));
   for (const line of out.stdout.split("\n")) {
     const match = /^branch refs\/heads\/(.+)$/.exec(line.trim());
     if (match) names.add(match[1]);
@@ -173,7 +175,10 @@ async function checkedOutBranches(repo: string): Promise<Set<string>> {
 /** Remote default branch short name (e.g. `origin/HEAD -> main`), when configured. */
 async function remoteDefaultBranch(repo: string): Promise<string | null> {
   const out = await gitOutcome(repo, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]);
-  if (!out.ok) return null;
+  if (!out.ok) {
+    if (out.exitCode !== 1 || out.stderr.trim()) throw new Error(gitErrorText(out));
+    return null; // optional symbolic ref is not configured
+  }
   const ref = out.stdout.trim();
   const slash = ref.indexOf("/");
   return slash >= 0 && slash + 1 < ref.length ? ref.slice(slash + 1) : null;
@@ -193,9 +198,11 @@ async function remoteDefaultBranch(repo: string): Promise<string | null> {
  * a deletion that did not happen.
  */
 export async function deleteMergedBranch(repo: string, branch: string): Promise<BranchDeleteResult> {
-  const name = branch.trim();
-  if (!name) return { branch, deleted: false, reason: "empty branch name" };
+  const name = branch;
+  if (!name || name !== name.trim()) return { branch, deleted: false, reason: "invalid branch name" };
   const fullRef = `refs/heads/${name}`;
+  const valid = await gitOutcome(repo, ["check-ref-format", fullRef]);
+  if (!valid.ok) return { branch, deleted: false, reason: "invalid branch name" };
   const rev = await gitOutcome(repo, ["rev-parse", "--verify", "--quiet", fullRef]);
   if (!rev.ok || !rev.stdout.trim()) {
     // Missing/invalid refs exit quietly; repo-level errors land on stderr and are surfaced as-is.
@@ -209,6 +216,7 @@ export async function deleteMergedBranch(repo: string, branch: string): Promise<
     return { branch: name, deleted: false, reason: "checked out in a worktree" };
   }
   const current = await gitOutcome(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!current.ok) return { branch, deleted: false, reason: gitErrorText(current) };
   if (current.ok && current.stdout.trim() === name) {
     return { branch: name, deleted: false, reason: "current branch" };
   }

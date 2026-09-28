@@ -179,6 +179,7 @@ export class Coordinator {
     if (!ok || !meta.worktree || !existsSync(meta.worktree)) return false;
     if (!(await isWorktreeClean(meta.worktree))) return false;
     await removeWorktree(meta.repo, meta.worktree).catch(() => {});
+    if (existsSync(meta.worktree)) throw new Error(`worktree cleanup failed: ${meta.worktree}`);
     return true;
   }
 
@@ -192,11 +193,18 @@ export class Coordinator {
   async gc(): Promise<Record<string, unknown>> {
     let cleaned = 0;
     let evicted = 0;
+    const cleanupErrors: { session_id: string; reason: string }[] = [];
     for (const [id, rt] of [...this.runtimes]) {
       if (!rt.meta.outcome || rt.meta.status === "working" || rt.meta.status === "starting") continue;
-      if (rt.meta.status !== "stopped") await this.stop(id).catch(() => {});
-      const didClean = await this.cleanMeta(rt.meta).catch(() => false);
-      if (didClean) cleaned++;
+      const hadWorktree = !!rt.meta.worktree && existsSync(rt.meta.worktree);
+      try {
+        if (rt.meta.status !== "stopped") await this.stop(id);
+        await this.cleanMeta(rt.meta);
+      } catch (error) {
+        cleanupErrors.push({ session_id: id, reason: error instanceof Error ? error.message : String(error) });
+        if (rt.meta.status !== "stopped") continue;
+      }
+      if (hadWorktree && !existsSync(rt.meta.worktree)) cleaned++;
       this.runtimes.delete(id);
       evicted++;
     }
@@ -216,6 +224,7 @@ export class Coordinator {
       worktrees_cleaned: cleaned,
       branches_deleted: branches.deleted.length,
       branches_retained: branches.retained,
+      ...(cleanupErrors.length ? { cleanup_errors: cleanupErrors } : {}),
       ...(branches.failure ? { branches_error: branches.failure } : {}),
       sessions_evicted: evicted,
       remaining_live: this.runtimes.size,
@@ -232,16 +241,29 @@ export class Coordinator {
       blocked?: string;
     }
     const byRepoBranch = new Map<string, Candidate>();
+    const identities = new Map<string, string>();
     const metas: { meta: SessionMeta; live: boolean }[] = [
       ...this.history.map((meta) => ({ meta, live: false })),
       ...[...this.runtimes.values()].map((rt) => ({ meta: rt.meta, live: true })),
     ];
     for (const { meta, live } of metas) {
       if (!meta.repo || !meta.branch) continue;
-      const key = `${meta.repo}\u0000${meta.branch}`;
+      let identity = identities.get(meta.repo);
+      let identityError: string | undefined;
+      if (!identity) {
+        try {
+          identity = resolveRepoIdentity(meta.repo);
+          identities.set(meta.repo, identity);
+        } catch (error) {
+          if (live && meta.status !== "stopped") throw error;
+          identity = JSON.stringify(["unresolved", meta.repo]);
+          identityError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const key = JSON.stringify([identity, meta.branch]);
       let candidate = byRepoBranch.get(key);
       if (!candidate) {
-        candidate = { repo: meta.repo, branch: meta.branch };
+        candidate = { repo: meta.repo, branch: meta.branch, blocked: identityError };
         byRepoBranch.set(key, candidate);
       }
       if (candidate.blocked) continue;
@@ -249,7 +271,7 @@ export class Coordinator {
         candidate.blocked = `outcome ${meta.outcome ?? "unrecorded"}`;
         continue;
       }
-      if (live && (meta.status === "starting" || meta.status === "idle" || meta.status === "working")) {
+      if (live && meta.status !== "stopped") {
         candidate.blocked = "active session";
         continue;
       }

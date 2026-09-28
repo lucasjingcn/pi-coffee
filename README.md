@@ -170,9 +170,12 @@ clean worktrees, then deletes the branches of finished workstreams (`success_fir
   (`{repo, branch, reason}` for each retained candidate). A failed git call retains the branch and is
   reported, never counted as deleted.
 - **Closure workflow**: review the full diff, verify the acceptance command, merge, close the
-  workstream with `pi_finish`, then run `pi_gc`. Merged finished branches disappear automatically;
+  workstream with `pi_finish`, record `pi_report`, then run `pi_gc`. Merged finished branches disappear automatically;
   anything retained stays inspectable and can be removed deliberately. Explicit `pi_stop` with
   `delete_branch: true` remains the force-delete escape hatch; gc never uses it.
+
+Automatic worktree cleanup now always keeps branches; `PI_MCP_DELETE_BRANCHES` applies only to
+explicit worktree removal through `pi_stop`. Run `pi_gc` for safe merged-branch cleanup.
 
 ## Adaptive routing & scoreboard
 
