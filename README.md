@@ -23,6 +23,7 @@ agents or ask the orchestrator a question when something is unclear.
 
 - [Background](#background)
 - [What you get](#what-you-get)
+- [A typical use case: cheap code, expensive judgment](#a-typical-use-case-cheap-code-expensive-judgment)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Install and run](#install-and-run)
@@ -65,6 +66,31 @@ of this document is the mechanics.
 - **Structured specs and a paper trail.** Every spawn carries a goal and a scope; the daemon rejects
   overlapping scopes up front. When the task is done, `pi_report` tells you how much of the work
   landed on the first try.
+
+## A typical use case: cheap code, expensive judgment
+
+Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-mcp and let it
+stay the manager. Codex plans the change, writes the spec and the acceptance test, and hands the
+implementation to workers running on a cheap model — DeepSeek by default
+(`PI_MCP_PROVIDER=deepseek`, `PI_MCP_MODEL=deepseek-flash`). The workers write the code in isolated
+worktrees and run the tests; Codex reviews the diffs and verifies the result. The bulk of the
+generated code never passes through the expensive model's output, and that is where the token
+savings come from.
+
+The loop looks like this:
+
+1. Codex turns a requirement into a `spec` and an acceptance test.
+2. `pi_spawn` starts one or more DeepSeek workers; they write the code and run the tests.
+3. Codex reviews the diff and runs the acceptance command itself with `pi_exec`.
+4. You merge. Most of the patch was written by the cheap model.
+
+`pi_metrics` exposes `worker_output_per_orchestrator_token` for exactly this: a high ratio means the
+expensive model stuck to judgment while the workers emitted the code. If you see Codex producing
+large patches, you are paying premium prices for work a cheap model could have done.
+
+A few honest caveats. Review and verification still cost money, and the result depends on how good
+the spec is. The trade pays off when the task is bigger than a one-line fix; for tiny changes,
+delegating costs more than doing it yourself, which is why `pi_spawn` warns about that case.
 
 ## How it works
 
