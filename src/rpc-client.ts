@@ -56,6 +56,8 @@ export class PiRpcClient extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    if (this.disposed) throw new Error("pi rpc client has been disposed");
+    if (this.proc) throw new Error("pi rpc client already started");
     const args = ["--mode", "rpc"];
     if (this.opts.name) args.push("--name", this.opts.name);
     if (this.opts.provider) args.push("--provider", this.opts.provider);
@@ -76,22 +78,19 @@ export class PiRpcClient extends EventEmitter {
       this.stderr += chunk.toString("utf8");
       if (this.stderr.length > 200_000) this.stderr = this.stderr.slice(-200_000);
     });
-    // Swallow pipe errors. A broken stdin/stdout must never surface as an
-    // unhandled 'error' event; command write callbacks translate them into
-    // promise rejections instead.
-    proc.stdin.on("error", () => {});
-    proc.stdout.on("error", () => {});
+    // A broken pipe on stdin/stdout is terminal: outstanding work can never be
+    // completed, so reject it and notify exit consumers instead of swallowing
+    // the error. stderr is diagnostics-only, so a failure there is not fatal.
+    proc.stdin.on("error", (err: Error) => this.terminate(err));
+    proc.stdout.on("error", (err: Error) => this.terminate(err));
     proc.stderr.on("error", () => {});
     proc.on("error", (err) => {
       // A spawn/pipe error is terminal: the child will not accept work.
-      this.exited = true;
-      this.failAll(err);
+      this.terminate(err);
     });
     proc.on("exit", (code, signal) => {
-      this.exited = true;
       const err = new Error(`pi rpc exited (code=${code ?? "null"} signal=${signal ?? "null"})`);
-      this.failAll(err);
-      this.emit("exit", { code, signal });
+      this.terminate(err, code, signal);
     });
 
     // Wait until the process is actually accepting work (probe get_state).
@@ -163,6 +162,17 @@ export class PiRpcClient extends EventEmitter {
     this.rejectWaiters(err);
   }
 
+  /**
+   * Mark the client terminal exactly once. Rejects all outstanding work and
+   * notifies `exit` consumers so callers are not left waiting on a dead child.
+   */
+  private terminate(err: Error, code: number | null = null, signal: NodeJS.Signals | null = null): void {
+    if (this.exited) return;
+    this.exited = true;
+    this.failAll(err);
+    this.emit("exit", { code, signal });
+  }
+
   private rejectWaiters(err: Error): void {
     const waiters = [...this.waiters];
     this.waiters.clear();
@@ -208,8 +218,12 @@ export class PiRpcClient extends EventEmitter {
   }
 
   private write(rec: Record<string, any>): void {
-    if (!this.proc || this.disposed) return;
-    this.proc.stdin.write(JSON.stringify(rec) + "\n");
+    if (!this.proc || this.disposed || this.exited) return;
+    try {
+      this.proc.stdin.write(JSON.stringify(rec) + "\n");
+    } catch (e) {
+      this.terminate(e as Error);
+    }
   }
 
   /** Resolve when an event of `type` arrives. */
@@ -292,18 +306,86 @@ export class PiRpcClient extends EventEmitter {
     return this.command({ type: "bash", command }, 600_000);
   }
 
-  /** Wait until the agent is idle. Resolves immediately if already idle. */
+  /**
+   * Wait until the agent is idle. Resolves immediately if already idle.
+   *
+   * The `agent_settled` listener is installed *before* probing authoritative
+   * state so an event that lands while `get_state` is in flight is never lost.
+   * The listener, timer and waiter entry are always torn down, including when
+   * state already reports idle.
+   */
   async waitForSettled(timeoutMs = 300_000): Promise<void> {
-    if (!this.streaming) {
-      // Confirm with the authoritative state (covers races before first event).
-      try {
-        const st = await this.getState();
-        if (!st.isStreaming) return;
-      } catch {
-        return;
+    if (!this.proc || this.disposed || this.exited) throw new Error("pi rpc not running");
+
+    let finished = false;
+    let timer: NodeJS.Timeout | undefined;
+    let resolveSettled!: () => void;
+    let rejectSettled!: (e: Error) => void;
+    const settledPromise = new Promise<void>((resolve, reject) => {
+      resolveSettled = resolve;
+      rejectSettled = reject;
+    });
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      this.off("event", onEvent);
+      this.waiters.delete(waiter);
+    };
+    const onEvent = (ev: PiEvent) => {
+      if (finished || ev.type !== "agent_settled") return;
+      finished = true;
+      cleanup();
+      resolveSettled();
+    };
+    const waiter = {
+      reject: (e: Error) => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        rejectSettled(e);
+      },
+    };
+
+    this.waiters.add(waiter);
+    this.on("event", onEvent);
+
+    try {
+      if (!this.streaming) {
+        // Probe authoritative state. A settled event may arrive while this is
+        // in flight; `onEvent` above captures it so it cannot be missed.
+        let state: PiSessionState | null = null;
+        try {
+          state = await this.getState();
+        } catch {
+          state = null;
+        }
+        if (finished) {
+          // Settled (or terminated) while the probe was in flight.
+          await settledPromise;
+          return;
+        }
+        if (!this.exited && !this.disposed && state && !state.isStreaming) {
+          // Authoritative idle: done even though no event arrived.
+          finished = true;
+          cleanup();
+          return;
+        }
+      }
+      // Arm the timeout only once we are actually waiting for the event; the
+      // probe has its own command timeout.
+      timer = setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        rejectSettled(new Error(`timed out waiting for event 'agent_settled'`));
+      }, timeoutMs);
+      await settledPromise;
+    } finally {
+      if (!finished) {
+        finished = true;
+        cleanup();
       }
     }
-    await this.waitForEvent("agent_settled", timeoutMs);
   }
 
   respondUi(response: UiResponse): void {
