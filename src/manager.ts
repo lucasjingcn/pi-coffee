@@ -511,6 +511,8 @@ export class Coordinator {
     await rt.client.stop();
     rt.meta.status = "stopped";
     this.locks.releaseAll(id);
+    // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
+    if (rt.meta.acceptance?.files?.length) this.locks.release("codex", rt.meta.acceptance.files);
     this.archive(rt.meta);
     if (opts.removeWorktree) {
       await removeWorktree(rt.meta.repo, rt.meta.worktree, rt.meta.branch).catch(() => {});
