@@ -199,15 +199,16 @@ SMOKE_LIVE=0 ./smoke.sh   # deterministic end-to-end smoke only (no model calls)
 
 `npm test` builds the TypeScript sources and runs the test suite. The offline smoke test boots a
 throwaway git repo + daemon and exercises the full control surface (spec linter, task-type gate,
-scope overlap, acceptance test-first + lock, committed diff, two-strikes gate, adaptive escalation,
+scope overlap, acceptance test-first + lock, committed diff, adaptive escalation, two-strikes gate,
 finish/report, restart persistence) against a disposable fake `pi` JSONL RPC, so it needs no
 installed/authenticated `pi` and no network or model access. With `SMOKE_LIVE=1` (the default when
-unset) it additionally makes a couple of tiny live model calls to cover adaptive escalation and the
-two-strikes gate.
+unset) the same checks run, but the workers make a couple of tiny real model calls instead of
+answering from the fake.
 
 `./smoke.sh` always rebuilds the sources before running the smoke.
 
 ## Limits
 
-- Live pi worker processes are not persisted across daemon restarts (the session JSONL is kept, but
-  workers are restarted fresh).
+- Live worker processes do not survive a daemon restart: shutting the daemon down stops its
+  workers, and after restart you must spawn new sessions (the session JSONL written by workers is
+  kept, but the daemon does not automatically restart workers).
