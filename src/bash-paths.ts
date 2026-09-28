@@ -16,6 +16,7 @@ type Token = { kind: "word" | "op" | "io"; value: string };
 
 const OP_CHARS = new Set([">", "<", "&", "|", ";", "(", ")"]);
 const SEPARATORS = new Set(["|", "||", "&&", ";", ";;", ";&", "&", "\n", "(", ")"]);
+const REDIRECT_OPS = new Set([">", ">>", ">|", "&>", "&>>", ">&", "<&", "<", "<>", "<<<", "<<", "<<-"]);
 
 /** Skip a single-quoted span starting at `start` (the opening quote). */
 function skipSingle(s: string, start: number): number {
@@ -132,9 +133,16 @@ function readWord(s: string, start: number): { value: string; end: number; quote
       quoted = true;
       i++;
       while (i < n && s[i] !== '"') {
-        if (s[i] === "\\" && i + 1 < n && `"\\$` + "`".includes(s[i + 1])) {
-          value += s[i + 1];
-          i += 2;
+        if (s[i] === "\\" && i + 1 < n) {
+          const next = s[i + 1];
+          // Inside double quotes only $ ` " \ retain the backslash escape.
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
+            value += next;
+            i += 2;
+          } else {
+            value += s[i]; // keep the backslash before ordinary characters
+            i++;
+          }
         } else {
           value += s[i];
           i++;
@@ -220,6 +228,12 @@ function tokenize(cmd: string): Token[] {
       continue;
     }
     if (c === "<" && cmd[i + 1] === "<") {
+      if (cmd[i + 2] === "<") {
+        // here-string `<<<`: not a heredoc, no body to skip
+        tokens.push({ kind: "op", value: "<<<" });
+        i += 3;
+        continue;
+      }
       const stripTabs = cmd[i + 2] === "-";
       tokens.push({ kind: "op", value: stripTabs ? "<<-" : "<<" });
       i += stripTabs ? 3 : 2;
@@ -251,14 +265,54 @@ function tokenize(cmd: string): Token[] {
 
 type Adder = (raw?: string) => void;
 
+/**
+ * Consume a redirection operator (and its target word when present), adding
+ * the target only when it is an output filename. Returns the index of the last
+ * consumed token so callers continue just after it.
+ */
+function processRedirect(tokens: Token[], i: number, add: Adder): number {
+  const v = tokens[i].value;
+  const next = tokens[i + 1];
+  if (v === ">" || v === ">>" || v === ">|" || v === "&>" || v === "&>>") {
+    if (next && next.kind === "word") {
+      add(next.value);
+      return i + 1;
+    }
+    return i;
+  }
+  if (v === ">&" || v === "<&") {
+    if (next && next.kind === "word") {
+      // fd duplication (`2>&1`, `>&-`) is not a path
+      if (v === ">&" && !/^[0-9]*-?$/.test(next.value)) add(next.value);
+      return i + 1;
+    }
+    return i;
+  }
+  // Input targets (plain `<`, `<>`, here-string `<<<`) are not write targets.
+  if (v === "<" || v === "<>" || v === "<<<") {
+    if (next && next.kind === "word") return i + 1;
+    return i;
+  }
+  // Heredocs (`<<`, `<<-`) have no target word token; their body was already
+  // skipped during tokenization.
+  return i;
+}
+
 /** Parse the operands of `tee`. Returns the index of the last consumed token. */
 function parseTee(tokens: Token[], start: number, add: Adder): number {
   let i = start;
   let endOfOptions = false;
   for (; i < tokens.length; i++) {
     const t = tokens[i];
-    if (t.kind === "op") return i - 1; // separators/redirections handled by caller
-    if (t.kind === "io") return i - 1;
+    if (t.kind === "io") continue; // fd number preceding a redirection
+    if (t.kind === "op") {
+      if (SEPARATORS.has(t.value)) return i - 1;
+      if (REDIRECT_OPS.has(t.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return i - 1;
+    }
     const v = t.value;
     if (!endOfOptions) {
       if (v === "--") {
@@ -299,8 +353,15 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
   let endOfOptions = false;
   for (; i < tokens.length; i++) {
     const t = tokens[i];
-    if (t.kind === "op") return i - 1;
-    if (t.kind === "io") return i - 1;
+    if (t.kind === "io") continue;
+    if (t.kind === "op") {
+      if (SEPARATORS.has(t.value)) return i - 1;
+      if (REDIRECT_OPS.has(t.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return i - 1;
+    }
     const v = t.value;
 
     if (!endOfOptions && v === "--") {
@@ -360,37 +421,13 @@ export function bashPaths(cmd: string): string[] {
   let expectCommand = true;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
-    if (t.kind === "io") {
-      expectCommand = false;
-      continue;
-    }
+    if (t.kind === "io") continue; // fd number: never consumes command position
     if (t.kind === "op") {
       const v = t.value;
-      if (v === ">" || v === ">>" || v === ">|" || v === "&>" || v === "&>>") {
-        const next = tokens[i + 1];
-        if (next && next.kind === "word") {
-          add(next.value);
-          i++;
-        }
-        expectCommand = false;
+      if (REDIRECT_OPS.has(v)) {
+        i = processRedirect(tokens, i, add); // redirections never consume command position
         continue;
       }
-      if (v === ">&" || v === "<&") {
-        const next = tokens[i + 1];
-        if (next && next.kind === "word") {
-          // fd duplication (`2>&1`, `>&-`) is not a path
-          if (v === ">&" && !/^[0-9]*-?$/.test(next.value)) add(next.value);
-          i++;
-        }
-        expectCommand = false;
-        continue;
-      }
-      if (v === "<" || v === "<>") {
-        const next = tokens[i + 1];
-        if (next && next.kind === "word") i++; // input target: not a write
-        continue;
-      }
-      if (v === "<<" || v === "<<-") continue; // heredoc: body already skipped
       if (SEPARATORS.has(v)) {
         expectCommand = true;
         continue;
