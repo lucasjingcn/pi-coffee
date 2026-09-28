@@ -485,19 +485,30 @@ export function buildServer(coord: Coordinator): McpServer {
         session_id: z.string(),
         paths: z.array(z.string()).min(1).describe("Repo-relative paths (POSIX separators)"),
         mode: z.enum(["rw", "ro"]).optional(),
+        repo: z
+          .string()
+          .optional()
+          .describe("Repository path selecting the lock namespace for a manual claimant (e.g. codex); defaults to the daemon default repo"),
       },
     },
-    async ({ session_id, paths, mode }) => json(coord.claim(session_id, paths, mode ?? "rw")),
+    async ({ session_id, paths, mode, repo }) => json(coord.claim(session_id, paths, mode ?? "rw", repo)),
   );
 
   server.registerTool(
     "pi_release",
     {
       title: "Release file claims",
-      description: "Release claims for a session. Omit paths to release everything it holds.",
-      inputSchema: { session_id: z.string(), paths: z.array(z.string()).optional() },
+      description: "Release claims for a session. Omit paths to release everything it holds in its repository namespace.",
+      inputSchema: {
+        session_id: z.string(),
+        paths: z.array(z.string()).optional(),
+        repo: z
+          .string()
+          .optional()
+          .describe("Repository path selecting the lock namespace for a manual claimant (e.g. codex); defaults to the daemon default repo"),
+      },
     },
-    async ({ session_id, paths }) => json({ released: coord.releaseLocks(session_id, paths) }),
+    async ({ session_id, paths, repo }) => json({ released: coord.releaseLocks(session_id, paths, repo) }),
   );
 
   server.registerTool(

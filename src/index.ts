@@ -102,14 +102,19 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       }
 
       case "/internal/claim": {
-        const { sessionId, paths, mode } = body as { sessionId: string; paths: string[]; mode?: LockMode };
+        const { sessionId, paths, mode, repo } = body as {
+          sessionId: string;
+          paths: string[];
+          mode?: LockMode;
+          repo?: string;
+        };
         if (!sessionId || !Array.isArray(paths)) return sendJson(res, 400, { error: "sessionId and paths required" });
-        return sendJson(res, 200, coord.claim(sessionId, paths, mode ?? "rw"));
+        return sendJson(res, 200, coord.claim(sessionId, paths, mode ?? "rw", repo));
       }
 
       case "/internal/release": {
-        const { sessionId, paths } = body as { sessionId: string; paths?: string[] };
-        return sendJson(res, 200, { released: coord.releaseLocks(sessionId, paths) });
+        const { sessionId, paths, repo } = body as { sessionId: string; paths?: string[]; repo?: string };
+        return sendJson(res, 200, { released: coord.releaseLocks(sessionId, paths, repo) });
       }
 
       case "/internal/locks":
