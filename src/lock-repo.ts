@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+
+/** Upper bound for the synchronous Git identity lookup so a hung git can never wedge a claim. */
+const GIT_IDENTITY_TIMEOUT_MS = 10_000;
 
 /**
  * The daemon may run as a different Unix user than the repository owner (e.g. daemon as root,
@@ -16,8 +18,22 @@ function gitEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function clean(p: string): string {
-  return p.replace(/\/+$/, "") || "/";
+/**
+ * Remove exactly one trailing line-ending (LF or CRLF), preserving every other character in the
+ * path. Git paths may legitimately contain or end in whitespace or newlines, so `.trim()` is not
+ * safe here.
+ */
+function stripOneLineEnding(s: string): string {
+  if (s.endsWith("\r\n")) return s.slice(0, -2);
+  if (s.endsWith("\n") || s.endsWith("\r")) return s.slice(0, -1);
+  return s;
+}
+
+function errorDetail(error: any): string {
+  if (error?.code === "ETIMEDOUT" || error?.killed) {
+    return `timed out after ${GIT_IDENTITY_TIMEOUT_MS}ms`;
+  }
+  return String(error?.stderr ?? error?.message ?? error).trim();
 }
 
 /**
@@ -28,25 +44,33 @@ function clean(p: string): string {
  *
  * Synchronous on purpose: scope/acceptance/manual claims must resolve the namespace before
  * reserving any lock, and `Coordinator.claim` is a synchronous API.
+ *
+ * Failure is fatal: if the common dir cannot be resolved or canonicalized, this throws instead of
+ * falling back to a noncanonical path, so no lock is ever reserved under an unreliable identity.
  */
 export function resolveRepoIdentity(repo: string): string {
   let commonDir: string;
   try {
-    commonDir = execFileSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], {
-      encoding: "utf8",
-      env: gitEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    commonDir = execFileSync(
+      "git",
+      ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      {
+        encoding: "utf8",
+        env: gitEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: GIT_IDENTITY_TIMEOUT_MS,
+      },
+    );
   } catch (error: any) {
-    const detail = String(error?.stderr ?? error?.message ?? error).trim();
-    throw new Error(`cannot resolve git common dir for ${repo}: ${detail}`);
+    throw new Error(`cannot resolve git common dir for ${repo}: ${errorDetail(error)}`);
   }
-  if (!commonDir) throw new Error(`cannot resolve git common dir for ${repo}`);
-  const absolute = clean(isAbsolute(commonDir) ? commonDir : resolve(repo, commonDir));
+  const absolute = stripOneLineEnding(commonDir);
+  if (!absolute) throw new Error(`cannot resolve git common dir for ${repo}`);
   try {
-    return clean(realpathSync(absolute));
-  } catch {
-    // Unusual (common dir should exist); fall back to the normalized absolute path.
-    return absolute;
+    return realpathSync(absolute);
+  } catch (error: any) {
+    throw new Error(
+      `cannot canonicalize git common dir for ${repo} (${absolute}): ${error?.message ?? String(error)}`,
+    );
   }
 }
