@@ -7,6 +7,7 @@ export interface PiRpcClientOptions {
   piBin?: string;
   provider?: string;
   model?: string;
+  thinking?: string;
   name?: string;
   sessionDir?: string;
   extensionPath?: string;
@@ -62,6 +63,7 @@ export class PiRpcClient extends EventEmitter {
     if (this.opts.name) args.push("--name", this.opts.name);
     if (this.opts.provider) args.push("--provider", this.opts.provider);
     if (this.opts.model) args.push("--model", this.opts.model);
+    if (this.opts.thinking) args.push("--thinking", this.opts.thinking);
     if (this.opts.sessionDir) args.push("--session-dir", this.opts.sessionDir);
     if (this.opts.extensionPath) args.push("--extension", this.opts.extensionPath);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);

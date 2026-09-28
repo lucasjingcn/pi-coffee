@@ -83,6 +83,10 @@ export function buildServer(coord: Coordinator): McpServer {
         branch: z.string().optional(),
         model: z.string().optional(),
         provider: z.string().optional(),
+        thinking: z
+          .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+          .optional()
+          .describe("pi thinking level for this worker (default: PI_MCP_THINKING, xhigh). Lower it for purely mechanical work."),
         prompt: z.string().optional().describe("Optional first instruction to send immediately"),
         spec: z
           .object({
@@ -177,6 +181,7 @@ export function buildServer(coord: Coordinator): McpServer {
         branch: args.branch,
         model: args.model,
         provider: args.provider,
+        thinking: args.thinking,
         prompt: args.prompt,
         spec,
         acceptanceFiles: args.acceptance_files,

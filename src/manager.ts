@@ -82,6 +82,7 @@ export interface SpawnOptions {
   branch?: string;
   provider?: string;
   model?: string;
+  thinking?: string;
   prompt?: string;
   initialMessage?: string;
   /** Spec-derived acceptance test files (path is relative to the worktree) written before start. */
@@ -416,6 +417,7 @@ export class Coordinator {
       piBin: this.config.piBin,
       provider: opts.provider ?? this.config.provider,
       model: opts.model ?? this.config.model,
+      thinking: opts.thinking ?? this.config.thinking,
       name,
       sessionDir: join(this.config.dataDir, "sessions", id),
       extensionPath: this.config.extensionPath,

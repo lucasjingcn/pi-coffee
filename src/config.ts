@@ -18,6 +18,8 @@ export interface Config {
   model: string;
   /** Stronger model to escalate a worker to on the second delegated attempt. */
   strongModel: string;
+  /** pi thinking level for workers (off|minimal|low|medium|high|xhigh|max). */
+  thinking: string;
   /** Hard cap on concurrent pi sessions. */
   maxSessions: number;
   /** Soft parallelism guideline: warn when this many workers are active. */
@@ -133,6 +135,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     provider: env("PI_MCP_PROVIDER") ?? "deepseek",
     model: env("PI_MCP_MODEL") ?? "deepseek-flash",
     strongModel: env("PI_MCP_STRONG_MODEL") ?? "deepseek-v4-pro",
+    thinking: env("PI_MCP_THINKING") ?? "xhigh",
     maxSessions: resolveNumber(overrides, "maxSessions", "PI_MCP_MAX_SESSIONS", 8, {
       integer: true,
       min: 1,
