@@ -65,8 +65,14 @@ Restart Codex. It connects to pi-mcp, receives the 大总管 instructions, loads
 If `codex` is not on PATH, add the server manually to `~/.codex/config.toml` and restart Codex:
 ```toml
 [mcp_servers.pi]
-url = "http://127.0.0.1:8787/mcp"
+command = "node"            # absolute path recommended
+args = ["<abs-path>/pi-mcp/dist/stdio-proxy.js"]
+
+[mcp_servers.pi.env]
+PI_MCP_URL = "http://127.0.0.1:8787/mcp"
 ```
+Codex launches the tiny **stdio proxy**, which forwards to the HTTP daemon and auto-reconnects, so a
+daemon restart never breaks the Codex session (unlike a direct `url =` connection).
 
 For a non-root Linux user service: run `./deploy/linux/install-service.sh` as that user (installs to
 `~/.config/systemd/user/`); run `loginctl enable-linger <user>` once so it starts on boot.

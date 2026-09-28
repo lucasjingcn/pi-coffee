@@ -1,0 +1,126 @@
+#!/usr/bin/env node
+/**
+ * stdio -> HTTP bridge for pi-mcp.
+ *
+ * Codex starts this as a stdio MCP server. It forwards every JSON-RPC message to the
+ * pi-mcp HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint is stateless,
+ * a daemon restart never breaks the Codex session: the next request just reconnects.
+ *
+ * Env:
+ *   PI_MCP_URL    full MCP URL (default http://127.0.0.1:8787/mcp)
+ *   PI_MCP_PORT   used if PI_MCP_URL is unset
+ *   PI_MCP_TOKEN  optional bearer/x-pi-coord-token
+ */
+const URL = process.env.PI_MCP_URL || `http://127.0.0.1:${process.env.PI_MCP_PORT || 8787}/mcp`;
+const TOKEN = process.env.PI_MCP_TOKEN || "";
+
+function log(...a: unknown[]): void {
+  console.error("[pi-mcp-proxy]", ...a);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function headers(): Record<string, string> {
+  const h: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  if (TOKEN) h["x-pi-coord-token"] = TOKEN;
+  return h;
+}
+
+/** Parse either a plain JSON body or an SSE body (data: {...}). */
+function parseBody(text: string): unknown {
+  const t = text.trim();
+  if (!t) return undefined;
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      /* fall through */
+    }
+  }
+  for (const line of t.split("\n")) {
+    const s = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (s) {
+      try {
+        return JSON.parse(s);
+      } catch {
+        /* keep looking */
+      }
+    }
+  }
+  return undefined;
+}
+
+async function post(body: unknown): Promise<unknown> {
+  const attempts = 8;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(URL, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      return parseBody(text);
+    } catch (e) {
+      lastErr = e;
+      await sleep(Math.min(200 * (i + 1), 1500));
+    }
+  }
+  throw lastErr;
+}
+
+let buf = "";
+let pending = 0;
+let ended = false;
+function maybeExit(): void {
+  if (ended && pending === 0) process.exit(0);
+}
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+  buf += chunk;
+  let nl: number;
+  while ((nl = buf.indexOf("\n")) !== -1) {
+    const line = buf.slice(0, nl).replace(/\r$/, "");
+    buf = buf.slice(nl + 1);
+    if (line.trim()) {
+      pending++;
+      void handleLine(line).finally(() => {
+        pending--;
+        maybeExit();
+      });
+    }
+  }
+});
+process.stdin.on("end", () => {
+  ended = true;
+  maybeExit();
+});
+
+async function handleLine(line: string): Promise<void> {
+  let msg: any;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return;
+  }
+  const id = msg?.id;
+  const isRequest = id !== undefined && id !== null;
+  try {
+    const resp = await post(msg);
+    if (isRequest && resp !== undefined) {
+      process.stdout.write(JSON.stringify(resp) + "\n");
+    }
+  } catch (e) {
+    log("forward failed:", String(e));
+    if (isRequest) {
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32000, message: `pi-mcp daemon unreachable: ${String(e)}` },
+        }) + "\n",
+      );
+    }
+  }
+}

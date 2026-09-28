@@ -18,13 +18,16 @@ echo "==> install Codex skill -> $CODEX_HOME_DIR/skills/pi-orchestrator"
 mkdir -p "$CODEX_HOME_DIR/skills/pi-orchestrator"
 cp "$DIR/codex/pi-orchestrator/SKILL.md" "$CODEX_HOME_DIR/skills/pi-orchestrator/SKILL.md"
 
-echo "==> register MCP server with Codex (http://127.0.0.1:$PORT/mcp)"
+echo "==> register MCP server with Codex (stdio proxy -> http://127.0.0.1:$PORT/mcp)"
+NODE_BIN="$(command -v node || echo node)"
 if command -v codex >/dev/null 2>&1; then
   codex mcp remove pi >/dev/null 2>&1 || true
-  codex mcp add pi --url "http://127.0.0.1:$PORT/mcp"
+  codex mcp add pi -- "$NODE_BIN" "$DIR/dist/stdio-proxy.js"
 else
-  echo "   codex not on PATH; register manually:"
-  echo "   codex mcp add pi --url http://127.0.0.1:$PORT/mcp"
+  echo "   codex not on PATH; register manually in ~/.codex/config.toml:"
+  echo "     [mcp_servers.pi]"
+  echo "     command = \"$NODE_BIN\""
+  echo "     args = [\"$DIR/dist/stdio-proxy.js\"]"
 fi
 
 cat <<EOF
