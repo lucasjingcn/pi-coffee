@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
+import { StateStore } from "./state-store.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { PiEvent, UiRequest, UiResponse } from "./types.js";
 import type { DelegationSpec } from "./types.js";
@@ -110,11 +111,12 @@ export class Coordinator {
   private reserved = 0;
   /** Serializes state writes so concurrent saves cannot interleave temp files/renames. */
   private saveChain: Promise<void> = Promise.resolve();
-  /** Unique suffix per write so atomic temp names never collide. */
-  private saveSeq = 0;
+  /** Validated primary/backup store: atomic writes, corruption recovery, contextual errors. */
+  private store: StateStore;
 
   constructor(config: Config) {
     this.config = config;
+    this.store = new StateStore(join(config.dataDir, "state.json"));
   }
 
   async init(): Promise<void> {
@@ -195,45 +197,42 @@ export class Coordinator {
 
   // --- persistence ----------------------------------------------------------
 
-  private stateFile(): string {
-    return join(this.config.dataDir, "state.json");
-  }
-
   private async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.stateFile(), "utf8"));
-      if (raw.counter) this.counter = raw.counter;
-      // Locks are held by live sessions, and sessions never survive a daemon restart. Drop any
-      // persisted locks instead of resurrecting orphaned locks that would block new spawns.
-      this.locks = new LockManager();
-      if (raw.mailbox) this.mailbox.import(raw.mailbox);
-      if (raw.board) this.board.import(raw.board);
-      if (Array.isArray(raw.history)) {
-        // Any snapshot that was live when the daemon died is now stopped history; completed
-        // outcomes and tests-ownership metadata on it are preserved as-is.
-        this.history = raw.history.map((h: SessionMeta) =>
-          h && (h.status === "starting" || h.status === "idle" || h.status === "working")
-            ? { ...h, status: "stopped", pendingQuestions: [] }
-            : h,
-        );
-      }
-    } catch {
-      /* fresh start */
-    }
+    const { state } = await this.store.load();
+    this.counter = state.counter;
+    // Locks are held by live sessions, and sessions never survive a daemon restart. Drop any
+    // persisted locks instead of resurrecting orphaned locks that would block new spawns.
+    this.locks = new LockManager();
+    this.mailbox.import(state.mailbox);
+    this.board.import(state.board);
+    // Any snapshot that was live when the daemon died is now stopped history; completed
+    // outcomes and tests-ownership metadata on it are preserved as-is.
+    this.history = state.history.map((h) =>
+      h.status === "starting" || h.status === "idle" || h.status === "working"
+        ? { ...h, status: "stopped", pendingQuestions: [] }
+        : h,
+    );
   }
 
   private scheduleSave(): void {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      void this.save();
+      // Background failures are caught only here: log context, never the payload, and never an
+      // unhandled rejection. An explicit flush()/stopAll() still rejects on a failed newest save.
+      void this.save().catch((error) => this.reportSaveError("background save", error));
     }, 500);
   }
 
   /** Persist the latest state, serializing writes so concurrent saves cannot interleave. */
   private save(): Promise<void> {
-    this.saveChain = this.saveChain.then(() => this.writeState()).catch(() => {});
-    return this.saveChain;
+    const run = this.saveChain.then(() => this.writeState());
+    // Keep the chain usable after a failure so a later save (e.g. after FS recovery) can succeed.
+    this.saveChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private async writeState(): Promise<void> {
@@ -246,14 +245,14 @@ export class Coordinator {
       // while preserving completed outcomes and tests-ownership metadata.
       history: this.mergedHistory(),
     };
-    const file = this.stateFile();
-    const tmp = `${file}.${process.pid}.${++this.saveSeq}.tmp`;
-    try {
-      await writeFile(tmp, JSON.stringify(data, null, 2));
-      await rename(tmp, file);
-    } catch {
-      /* best effort */
-    }
+    await this.store.write(data);
+  }
+
+  /** Context-only stderr diagnostic: operation, file and error code, never serialized state. */
+  private reportSaveError(operation: string, error: unknown): void {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`[state] ${operation} failed for ${this.store.path}${code ? ` [${code}]` : ""}: ${detail}`);
   }
 
   /** Persisted history overlaid with the live sessions (live wins on id collisions). */
@@ -274,7 +273,13 @@ export class Coordinator {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      // Explicit shutdown/persistence requests must surface the failure, not swallow it.
+      this.reportSaveError("save", error);
+      throw error;
+    }
   }
 
   // --- sessions -------------------------------------------------------------
