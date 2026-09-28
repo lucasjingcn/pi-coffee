@@ -4,7 +4,7 @@ Everything runs on the Mac: `pi` workers, the pi-coffee daemon, and Codex. All t
 
 ## 0. Prerequisites (on the Mac)
 
-- **Node.js** >= 18 (20.11+ recommended): `node -v`
+- **Node.js** >= 22.19: `node -v`
 - **git**: `git --version` (Xcode CLT is enough)
 - **pi**, installed and authenticated for the **same macOS user** that runs Codex:
   - `pi --version` works, and `~/.pi/agent/auth.json` exists (e.g. run a quick `pi -p "hi"`).
@@ -51,9 +51,9 @@ cd ~/pi-coffee && npm run build          # ensure dist/ is current
 ./deploy/macos/install-daemon.sh
 ```
 
-- plist: `~/Library/LaunchAgents/com.pimcp.daemon.plist`
+- plist: `~/Library/LaunchAgents/com.picoffee.daemon.plist`
 - logs: `~/.pi-coffee/logs/daemon.out.log`, `~/.pi-coffee/logs/daemon.err.log`
-- stop: `launchctl bootout gui/$(id -u)/com.pimcp.daemon`
+- stop: `launchctl bootout gui/$(id -u)/com.picoffee.daemon`
 
 ## 4. Verify
 

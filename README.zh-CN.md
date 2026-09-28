@@ -292,11 +292,11 @@ loginctl enable-linger "$USER"            # 用户级服务要开机自启必须
 
 ```bash
 npm install && npm run build
-./deploy/macos/install-daemon.sh          # 写入 ~/Library/LaunchAgents/com.pimcp.daemon.plist
+./deploy/macos/install-daemon.sh          # 写入 ~/Library/LaunchAgents/com.picoffee.daemon.plist
 ```
 
 日志在 `~/.pi-coffee/logs/daemon.{out,err}.log`。停止命令：
-`launchctl bootout gui/$(id -u)/com.pimcp.daemon`。这个 launch agent 会把 Homebrew 和
+`launchctl bootout gui/$(id -u)/com.picoffee.daemon`。这个 launch agent 会把 Homebrew 和
 `~/.pi/agent/bin` 加进 `PATH`，保证 `pi` 和 `git` 能被找到。
 
 如果仓库就在 Mac 上，整套都放本机最省事：

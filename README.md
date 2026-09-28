@@ -308,11 +308,11 @@ loginctl enable-linger "$USER"            # required for a user service to start
 
 ```bash
 npm install && npm run build
-./deploy/macos/install-daemon.sh          # writes ~/Library/LaunchAgents/com.pimcp.daemon.plist
+./deploy/macos/install-daemon.sh          # writes ~/Library/LaunchAgents/com.picoffee.daemon.plist
 ```
 
 Logs go to `~/.pi-coffee/logs/daemon.{out,err}.log`. Stop the agent with
-`launchctl bootout gui/$(id -u)/com.pimcp.daemon`. The launch agent sets a `PATH` that includes
+`launchctl bootout gui/$(id -u)/com.picoffee.daemon`. The launch agent sets a `PATH` that includes
 Homebrew and `~/.pi/agent/bin` so `pi` and `git` resolve.
 
 To keep everything on one Mac (useful when the repository lives there):

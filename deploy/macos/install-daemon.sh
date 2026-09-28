@@ -5,14 +5,14 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${PI_COFFEE_PORT:-8787}"
-LABEL="com.pimcp.daemon"
+LABEL="com.picoffee.daemon"
 LA_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LA_DIR/$LABEL.plist"
 LOG_DIR="$HOME/.pi-coffee/logs"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
-  echo "error: node not found on PATH. Install Node >= 18 (20.11+ recommended)." >&2
+  echo "error: node not found on PATH. Install Node >= 22.19." >&2
   exit 1
 fi
 if [ ! -f "$PROJECT_DIR/dist/index.js" ]; then

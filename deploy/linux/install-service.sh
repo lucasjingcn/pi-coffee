@@ -13,7 +13,7 @@ UNIT_NAME="pi-coffee"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
-  echo "error: node not found on PATH (install Node >= 18, ideally 20.11+)" >&2
+  echo "error: node not found on PATH (install Node >= 22.19)" >&2
   exit 1
 fi
 if [ ! -f "$DIR/dist/index.js" ]; then
