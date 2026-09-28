@@ -2,13 +2,23 @@
 
 # pi-coffee
 
-pi-coffee 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理。任何支持 MCP 的客户端都能驱动它
-——Codex 是参考客户端，Claude、Cursor 等同样可用。客户端充当统筹方：把任务拆成边界清楚的几块，
-交给不同的代理，审查它们交回来的东西，最后合并。真正敲代码的是那些代理。
+**别再花贵模型的钱去写样板代码。** pi-coffee 是一个 MCP 服务，让贵的模型只当统筹方——做规划、
+写 spec、审查、验证——而代码交给跑在便宜模型上的 pi worker，在隔离的 git worktree 里完成。
+
+任何支持 MCP 的客户端都能驱动它。Codex 是参考客户端，Claude、Cursor 等同样可用。客户端把任务拆成
+边界清楚的几块，交给不同的代理，审查它们交回来的东西，最后合并。真正敲代码的是那些代理。
 
 同一个仓库上挂两个代理，默认结果就是互相覆盖。这里换了个做法：每个代理在自己的 git worktree、
 自己的分支上干活；动手写某个文件之前先声明；需要沟通时给别的代理发消息，或者直接向统筹方提问。
 
+> **钱省在哪**
+>
+> - 贵的模型只做规划、spec、审查和验证，输出量很小。
+> - 代码的大头交给跑在便宜模型（默认 DeepSeek）上的 worker。
+> - worker 能并行，省下的是真金白银的 token，而不是让一个贵模型慢慢串行干。
+> - `pi_metrics` 会给出比值，让你确认贵模型确实没在动手写代码。
+
+[![Focus](https://img.shields.io/badge/focus-cost%20saving-brightgreen)](#为什么能省钱)
 [![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -19,7 +29,7 @@ pi-coffee 是一个 MCP 服务，用来同时调度好几个 **pi** 编码代理
 
 - [背景](#背景)
 - [它能给你什么](#它能给你什么)
-- [典型用法：贵的模型做判断，便宜的模型写代码](#典型用法贵的模型做判断便宜的模型写代码)
+- [为什么能省钱](#为什么能省钱)
 - [工作原理](#工作原理)
 - [环境要求](#环境要求)
 - [安装与启动](#安装与启动)
@@ -62,7 +72,7 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
 - **结构化 spec 和可追溯记录。** 每次 spawn 都带 goal 和 scope，范围重叠会在派发阶段就被拒绝。
   任务结束时用 `pi_report` 就能看到有多少活儿是一次就过的。
 
-## 典型用法：贵的模型做判断，便宜的模型写代码
+## 为什么能省钱
 
 假设你要加一个功能。把 MCP 客户端（比如 Codex）接到 pi-coffee，让它继续当统筹方。Codex 规划改动、
 写好 spec 和验收测试，再把实现交给跑在便宜模型上的 worker —— 默认就是 DeepSeek

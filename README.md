@@ -2,15 +2,26 @@
 
 # pi-coffee
 
-pi-coffee is an MCP server that orchestrates several **pi** coding agents at once. Any MCP client
-can drive it — Codex is the reference client, but Claude, Cursor, or anything else that speaks MCP
-works too. The client stays the manager: it splits a job into well-defined pieces, hands each piece
-to an agent, reviews what comes back, and merges. The agents do the typing.
+**Stop paying premium-model prices to write boilerplate.** pi-coffee is an MCP server that lets your
+expensive model stay the manager — planning, writing specs, reviewing, and verifying — while cheap pi
+workers write the actual code in isolated git worktrees.
+
+Any MCP client can drive it. Codex is the reference client, but Claude, Cursor, or anything else that
+speaks MCP works too. The client splits a job into well-defined pieces, hands each piece to an agent,
+reviews what comes back, and merges. The agents do the typing.
 
 Two agents editing the same repository normally overwrite each other. Here each agent works in its
 own git worktree on its own branch, claims the files it is about to touch, and can message the other
 agents or ask the orchestrator a question when something is unclear.
 
+> **Where the savings come from**
+>
+> - The expensive model handles planning, specs, review, and verification — a small amount of output.
+> - The bulk of the code is written by workers on a cheap model (DeepSeek by default).
+> - Workers run in parallel, so you buy wall-clock time with cheap tokens instead of expensive ones.
+> - `pi_metrics` shows the ratio, so you can confirm the expensive model is staying out of the way.
+
+[![Focus](https://img.shields.io/badge/focus-cost%20saving-brightgreen)](#why-it-saves-money)
 [![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -21,7 +32,7 @@ agents or ask the orchestrator a question when something is unclear.
 
 - [Background](#background)
 - [What you get](#what-you-get)
-- [A typical use case: cheap code, expensive judgment](#a-typical-use-case-cheap-code-expensive-judgment)
+- [Why it saves money](#why-it-saves-money)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Install and run](#install-and-run)
@@ -67,7 +78,7 @@ of this document is the mechanics.
   overlapping scopes up front. When the task is done, `pi_report` tells you how much of the work
   landed on the first try.
 
-## A typical use case: cheap code, expensive judgment
+## Why it saves money
 
 Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-coffee and let it
 stay the manager. Codex plans the change, writes the spec and the acceptance test, and hands the
