@@ -9,19 +9,38 @@ import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
 import { StateStore } from "./state-store.js";
 import { PiRpcClient } from "./rpc-client.js";
-import type { PiEvent, UiRequest, UiResponse } from "./types.js";
-import type { DelegationSpec } from "./types.js";
-import { commitAll, createWorktree, currentBranch, deleteMergedBranch, isWorktreeClean, mergeBranch, pruneWorktrees, pushBranch, removeWorktree, resolveRef, worktreeDiff, type DiffSummary, type MergeResult, type WorktreeInfo } from "./worktree.js";
+import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
+import {
+  commitAll,
+  createWorktree,
+  currentBranch,
+  deleteMergedBranch,
+  isWorktreeClean,
+  mergeBranch,
+  pruneWorktrees,
+  pushBranch,
+  removeWorktree,
+  resolveRef,
+  worktreeDiff,
+  type DiffSummary,
+  type MergeResult,
+  type WorktreeInfo,
+} from "./worktree.js";
 
 /**
- * Temporary lock owner used to precheck acceptance reservations. LockManager skips locks whose
- * owner matches the claimant, so claiming acceptance files under the shared "codex" owner would
- * silently ignore another Codex-owned acceptance reservation; a distinct sentinel surfaces it.
+ * Temporary lock owner used to precheck acceptance reservations. LockManager
+ * skips locks whose owner matches the claimant, so claiming acceptance files
+ * under the shared "codex" owner would silently ignore another Codex-owned
+ * acceptance reservation; a distinct sentinel surfaces it.
  */
 const ACCEPTANCE_PRECHECK_OWNER = "__acceptance_precheck__";
 
 /** Workstream outcomes whose branches are eligible for safe cleanup once proven merged. */
 const FINISHED_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["success_first", "success_second", "taken_over"]);
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
 
@@ -100,8 +119,13 @@ export interface WaitResult {
   timedOut: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Coordinator
+// ---------------------------------------------------------------------------
+
 export class Coordinator {
   readonly config: Config;
+
   private runtimes = new Map<string, Runtime>();
   private locks = new LockManager();
   private mailbox = new Mailbox();
@@ -133,14 +157,19 @@ export class Coordinator {
     this.startSweeper();
   }
 
+  // -------------------------------------------------------------------------
+  // Worktree cleanup
+  // -------------------------------------------------------------------------
+
   /** Remove finished workers' worktrees left over from a previous run (branches are kept). */
   private async sweepOnStartup(): Promise<void> {
     if (!this.config.autoClean) return;
+
     const repos = new Set<string>();
-    for (const h of this.history) {
-      if (!h.repo) continue;
-      repos.add(h.repo);
-      await this.cleanMeta(h).catch(() => {});
+    for (const entry of this.history) {
+      if (!entry.repo) continue;
+      repos.add(entry.repo);
+      await this.cleanMeta(entry).catch(() => {});
     }
     for (const repo of repos) await pruneWorktrees(repo).catch(() => {});
   }
@@ -154,11 +183,14 @@ export class Coordinator {
   /** Periodically stop+clean finished workers that have been idle past the TTL, and evict them. */
   private async sweep(): Promise<void> {
     if (!this.config.autoClean) return;
+
     const ttlMs = Math.max(1, this.config.worktreeTtlMin) * 60_000;
     const now = Date.now();
+
     for (const [id, rt] of [...this.runtimes]) {
       if (now - rt.meta.lastActivity < ttlMs) continue;
-      const finished = rt.meta.outcome === "success_first" || rt.meta.outcome === "success_second" || rt.meta.outcome === "taken_over";
+
+      const finished = rt.meta.outcome !== undefined && FINISHED_OUTCOMES.has(rt.meta.outcome);
       if (finished && (rt.meta.status === "idle" || rt.meta.status === "working")) {
         await this.stop(id).catch(() => {});
       } else if (rt.meta.status === "stopped") {
@@ -170,32 +202,36 @@ export class Coordinator {
   }
 
   /**
-   * Remove a finished worker's worktree if it exists and is clean. Never deletes branches (gc's
-   * merged-only branch cleanup is explicit), never touches dirty worktrees, and leaves
-   * unfinished/abandoned outcomes for inspection.
+   * Remove a finished worker's worktree if it exists and is clean. Never deletes
+   * branches (gc's merged-only branch cleanup is explicit), never touches dirty
+   * worktrees, and leaves unfinished/abandoned outcomes for inspection.
    */
   private async cleanMeta(meta: SessionMeta): Promise<boolean> {
-    const ok = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
-    if (!ok || !meta.worktree || !existsSync(meta.worktree)) return false;
+    const isFinished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
+    if (!isFinished || !meta.worktree || !existsSync(meta.worktree)) return false;
     if (!(await isWorktreeClean(meta.worktree))) return false;
+
     await removeWorktree(meta.repo, meta.worktree).catch(() => {});
     if (existsSync(meta.worktree)) throw new Error(`worktree cleanup failed: ${meta.worktree}`);
     return true;
   }
 
   /**
-   * Manual cleanup: stop+clean every finished, non-running worker and evict it from memory, then
-   * safely delete branches for finished workstreams (including historical ones whose worktree is
-   * already gone) whose tip is an ancestor of the repo's current HEAD. Branches are deduplicated
-   * per repo+branch and retained when any session for them is unfinished, active, or has a dirty
+   * Manual cleanup: stop+clean every finished, non-running worker and evict it
+   * from memory, then safely delete branches for finished workstreams (including
+   * historical ones whose worktree is already gone) whose tip is an ancestor of
+   * the repo's current HEAD. Branches are deduplicated per repo+branch and
+   * retained when any session for them is unfinished, active, or has a dirty
    * worktree. Nothing here depends on the legacy `deleteBranches` force setting.
    */
   async gc(): Promise<Record<string, unknown>> {
     let cleaned = 0;
     let evicted = 0;
     const cleanupErrors: { session_id: string; reason: string }[] = [];
+
     for (const [id, rt] of [...this.runtimes]) {
       if (!rt.meta.outcome || rt.meta.status === "working" || rt.meta.status === "starting") continue;
+
       const hadWorktree = !!rt.meta.worktree && existsSync(rt.meta.worktree);
       try {
         if (rt.meta.status !== "stopped") await this.stop(id);
@@ -204,10 +240,12 @@ export class Coordinator {
         cleanupErrors.push({ session_id: id, reason: error instanceof Error ? error.message : String(error) });
         if (rt.meta.status !== "stopped") continue;
       }
+
       if (hadWorktree && !existsSync(rt.meta.worktree)) cleaned++;
       this.runtimes.delete(id);
       evicted++;
     }
+
     let branches: {
       deleted: string[];
       retained: { repo: string; branch: string; reason: string }[];
@@ -218,8 +256,10 @@ export class Coordinator {
     } catch (error) {
       branches = { deleted: [], retained: [], failure: error instanceof Error ? error.message : String(error) };
     }
+
     this.notifyWaiters();
     this.scheduleSave();
+
     return {
       worktrees_cleaned: cleaned,
       branches_deleted: branches.deleted.length,
@@ -240,14 +280,17 @@ export class Coordinator {
       branch: string;
       blocked?: string;
     }
+
     const byRepoBranch = new Map<string, Candidate>();
     const identities = new Map<string, string>();
     const metas: { meta: SessionMeta; live: boolean }[] = [
       ...this.history.map((meta) => ({ meta, live: false })),
       ...[...this.runtimes.values()].map((rt) => ({ meta: rt.meta, live: true })),
     ];
+
     for (const { meta, live } of metas) {
       if (!meta.repo || !meta.branch) continue;
+
       let identity = identities.get(meta.repo);
       let identityError: string | undefined;
       if (!identity) {
@@ -260,6 +303,7 @@ export class Coordinator {
           identityError = error instanceof Error ? error.message : String(error);
         }
       }
+
       const key = JSON.stringify([identity, meta.branch]);
       let candidate = byRepoBranch.get(key);
       if (!candidate) {
@@ -267,6 +311,7 @@ export class Coordinator {
         byRepoBranch.set(key, candidate);
       }
       if (candidate.blocked) continue;
+
       if (!meta.outcome || !FINISHED_OUTCOMES.has(meta.outcome)) {
         candidate.blocked = `outcome ${meta.outcome ?? "unrecorded"}`;
         continue;
@@ -280,13 +325,16 @@ export class Coordinator {
         candidate.blocked = "dirty worktree";
       }
     }
+
     const deleted: string[] = [];
     const retained: { repo: string; branch: string; reason: string }[] = [];
+
     for (const candidate of byRepoBranch.values()) {
       if (candidate.blocked) {
         retained.push({ repo: candidate.repo, branch: candidate.branch, reason: candidate.blocked });
         continue;
       }
+
       const result = await deleteMergedBranch(candidate.repo, candidate.branch).catch((error) => ({
         branch: candidate.branch,
         deleted: false,
@@ -295,25 +343,29 @@ export class Coordinator {
       if (result.deleted) deleted.push(result.branch);
       else retained.push({ repo: candidate.repo, branch: candidate.branch, reason: result.reason });
     }
+
     return { deleted, retained };
   }
 
-  // --- persistence ----------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Persistence
+  // -------------------------------------------------------------------------
 
   private async load(): Promise<void> {
     const { state } = await this.store.load();
     this.counter = state.counter;
-    // Locks are held by live sessions, and sessions never survive a daemon restart. Drop any
-    // persisted locks instead of resurrecting orphaned locks that would block new spawns.
+    // Locks are held by live sessions, and sessions never survive a daemon
+    // restart. Drop any persisted locks instead of resurrecting orphaned locks
+    // that would block new spawns.
     this.locks = new LockManager();
     this.mailbox.import(state.mailbox);
     this.board.import(state.board);
-    // Any snapshot that was live when the daemon died is now stopped history; completed
-    // outcomes and tests-ownership metadata on it are preserved as-is.
-    this.history = state.history.map((h) =>
-      h.status === "starting" || h.status === "idle" || h.status === "working"
-        ? { ...h, status: "stopped", pendingQuestions: [] }
-        : h,
+    // Any snapshot that was live when the daemon died is now stopped history;
+    // completed outcomes and tests-ownership metadata on it are preserved as-is.
+    this.history = state.history.map((entry) =>
+      entry.status === "starting" || entry.status === "idle" || entry.status === "working"
+        ? { ...entry, status: "stopped", pendingQuestions: [] }
+        : entry,
     );
   }
 
@@ -321,8 +373,9 @@ export class Coordinator {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      // Background failures are caught only here: log context, never the payload, and never an
-      // unhandled rejection. An explicit flush()/stopAll() still rejects on a failed newest save.
+      // Background failures are caught only here: log context, never the payload,
+      // and never an unhandled rejection. An explicit flush()/stopAll() still
+      // rejects on a failed newest save.
       void this.save().catch((error) => this.reportSaveError("background save", error));
     }, 500);
   }
@@ -344,8 +397,8 @@ export class Coordinator {
       locks: this.locks.export(),
       mailbox: this.mailbox.export(),
       board: this.board.export(),
-      // Include live snapshots so a crash/restart can report in-flight work as stopped history
-      // while preserving completed outcomes and tests-ownership metadata.
+      // Include live snapshots so a crash/restart can report in-flight work as
+      // stopped history while preserving completed outcomes and tests-ownership metadata.
       history: this.mergedHistory(),
     };
     await this.store.write(data);
@@ -361,10 +414,11 @@ export class Coordinator {
   /** Persisted history overlaid with the live sessions (live wins on id collisions). */
   private mergedHistory(): SessionMeta[] {
     const byId = new Map<string, SessionMeta>();
-    for (const h of this.history) byId.set(h.id, h);
+    for (const entry of this.history) byId.set(entry.id, entry);
     for (const rt of this.runtimes.values()) {
       byId.set(rt.meta.id, { ...rt.meta, pendingQuestions: [] });
     }
+
     let all = [...byId.values()];
     if (all.length > 500) all = all.slice(-500);
     return all;
@@ -385,7 +439,9 @@ export class Coordinator {
     }
   }
 
-  // --- sessions -------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Sessions: lifecycle
+  // -------------------------------------------------------------------------
 
   private nextId(): string {
     if (this.counter >= Number.MAX_SAFE_INTEGER) {
@@ -395,13 +451,14 @@ export class Coordinator {
   }
 
   private notifyWaiters(): void {
-    for (const w of [...this.waiters]) w();
+    for (const waiter of [...this.waiters]) waiter();
   }
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
-    // Reserve a concurrency slot synchronously, before the first await, so two concurrent spawns
-    // cannot both pass the cap check and oversubscribe the daemon. The slot is transferred to the
-    // runtime once it is registered; until then, every failure path releases it here.
+    // Reserve a concurrency slot synchronously, before the first await, so two
+    // concurrent spawns cannot both pass the cap check and oversubscribe the
+    // daemon. The slot is transferred to the runtime once it is registered;
+    // until then, every failure path releases it here.
     this.reserveSlot();
     const slot = { transferred: false };
     try {
@@ -419,8 +476,10 @@ export class Coordinator {
     if (!existsSync(repo)) {
       throw new Error(`repo path does not exist: ${repo}`);
     }
-    // Resolve the canonical repository identity before reserving any lock. Symlinks, subdirectories
-    // and linked worktrees of the same repo collapse to one namespace; separate repos never share.
+
+    // Resolve the canonical repository identity before reserving any lock.
+    // Symlinks, subdirectories and linked worktrees of the same repo collapse to
+    // one namespace; separate repos never share.
     let repoIdentity: string;
     try {
       repoIdentity = resolveRepoIdentity(repo);
@@ -429,6 +488,7 @@ export class Coordinator {
         `repo is not a usable git repository: ${repo} (${e instanceof Error ? e.message : String(e)})`,
       );
     }
+
     const id = this.nextId();
     const name = opts.name ?? `${id}-${(opts.task ?? "task").slice(0, 40)}`;
     const branch = opts.branch ?? `pi/${id}`;
@@ -437,8 +497,9 @@ export class Coordinator {
     const acceptancePaths = (opts.acceptanceFiles ?? []).map((f) => acceptancePath(f.path));
     let acceptanceReserved = false;
 
-    // Scope pre-claim & overlap pre-check: reserve the declared scope before creating anything, so
-    // two workstreams with overlapping files are rejected at dispatch instead of mid-flight.
+    // Scope pre-claim & overlap pre-check: reserve the declared scope before
+    // creating anything, so two workstreams with overlapping files are rejected
+    // at dispatch instead of mid-flight.
     const scope = opts.spec?.scope ?? [];
     if (scope.length) {
       const pre = this.locks.claim(id, scope, "rw", repoIdentity);
@@ -449,10 +510,12 @@ export class Coordinator {
         );
       }
     }
-    // Reserve Codex-owned acceptance files before creating anything. LockManager skips same-owner
-    // collisions, so precheck under a temporary distinct owner first: that surfaces overlaps with
-    // any existing lock (including another Codex-held acceptance reservation), then re-claim under
-    // the shared "codex" owner so the worker never owns its own tests.
+
+    // Reserve Codex-owned acceptance files before creating anything. LockManager
+    // skips same-owner collisions, so precheck under a temporary distinct owner
+    // first: that surfaces overlaps with any existing lock (including another
+    // Codex-held acceptance reservation), then re-claim under the shared "codex"
+    // owner so the worker never owns its own tests.
     if (acceptancePaths.length) {
       const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw", repoIdentity);
       if (!pre.ok) {
@@ -463,6 +526,7 @@ export class Coordinator {
         );
       }
       this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, repoIdentity);
+
       const acc = this.locks.claim("codex", acceptancePaths, "rw", repoIdentity);
       if (!acc.ok) {
         // Not expected (no await between precheck and claim), but never leak partial reservations.
@@ -475,8 +539,9 @@ export class Coordinator {
       acceptanceReserved = true;
     }
 
-    // Resolve the requested base to a concrete SHA and create the worktree on that same SHA in one
-    // guarded block. A failed resolve must propagate (no symbolic-ref fallback) and release locks.
+    // Resolve the requested base to a concrete SHA and create the worktree on
+    // that same SHA in one guarded block. A failed resolve must propagate (no
+    // symbolic-ref fallback) and release locks.
     let baseSha!: string;
     let wt!: WorktreeInfo;
     try {
@@ -532,13 +597,12 @@ export class Coordinator {
 
     const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
     this.runtimes.set(id, rt);
-    // The runtime now occupies the slot: stop counting it in `reserved` so it is not double-counted
-    // by activeCount() while the child is starting.
+    // The runtime now occupies the slot: stop counting it in `reserved` so it is
+    // not double-counted by activeCount() while the child is starting.
     slot.transferred = true;
     this.releaseReservation();
     this.wireEvents(rt);
 
-    // Acceptance files were already reserved for Codex before the worktree was created.
     try {
       await client.start();
       meta.status = "idle";
@@ -557,6 +621,7 @@ export class Coordinator {
     this.scheduleSave();
     this.notifyWaiters();
 
+    // Compose the first instruction from the prompt, the spec and the acceptance note.
     const parts: string[] = [];
     if (opts.prompt) parts.push(opts.prompt);
     const specBlock = renderSpec(opts.spec);
@@ -568,15 +633,16 @@ export class Coordinator {
       if (opts.acceptanceCommand) note += ` Verification command: ${opts.acceptanceCommand}`;
       parts.push(note);
     }
+
     const first = parts.join("\n\n");
     if (first) await this.send(id, first, "prompt");
     return meta;
   }
 
   private wireEvents(rt: Runtime): void {
-    rt.client.on("event", (ev: PiEvent) => {
+    rt.client.on("event", (event: PiEvent) => {
       rt.meta.lastActivity = Date.now();
-      switch (ev.type) {
+      switch (event.type) {
         case "agent_start":
           rt.meta.status = "working";
           break;
@@ -585,7 +651,7 @@ export class Coordinator {
           void this.refreshStats(rt, true);
           break;
         case "message_end": {
-          const msg = ev.message;
+          const msg = event.message;
           if (msg?.role === "assistant") {
             const text = textOf(msg);
             if (text) rt.meta.lastText = text;
@@ -593,7 +659,7 @@ export class Coordinator {
           break;
         }
         case "entry_appended":
-          if (ev.entry?.id) rt.meta.lastEntryId = ev.entry.id;
+          if (event.entry?.id) rt.meta.lastEntryId = event.entry.id;
           break;
         default:
           break;
@@ -601,12 +667,19 @@ export class Coordinator {
       this.notifyWaiters();
     });
 
-    rt.client.on("ui_request", (req: UiRequest) => {
-      if (req.method === "notify" || req.method === "setStatus" || req.method === "setWidget" || req.method === "setTitle" || req.method === "set_editor_text") {
-        return; // fire-and-forget
+    rt.client.on("ui_request", (request: UiRequest) => {
+      // Fire-and-forget UI updates never block the conversation.
+      if (
+        request.method === "notify" ||
+        request.method === "setStatus" ||
+        request.method === "setWidget" ||
+        request.method === "setTitle" ||
+        request.method === "set_editor_text"
+      ) {
+        return;
       }
-      if (!rt.meta.pendingQuestions.some((q) => q.id === req.id)) {
-        rt.meta.pendingQuestions.push(req);
+      if (!rt.meta.pendingQuestions.some((q) => q.id === request.id)) {
+        rt.meta.pendingQuestions.push(request);
       }
       this.notifyWaiters();
     });
@@ -624,10 +697,11 @@ export class Coordinator {
 
   private async refreshStats(rt: Runtime, includeCost = false): Promise<void> {
     try {
-      const st = await rt.client.getState();
-      rt.meta.provider = st.model?.provider;
-      rt.meta.model = st.model?.id;
-      if (typeof st.sessionName === "string") rt.meta.name = st.sessionName;
+      const state = await rt.client.getState();
+      rt.meta.provider = state.model?.provider;
+      rt.meta.model = state.model?.id;
+      if (typeof state.sessionName === "string") rt.meta.name = state.sessionName;
+
       if (includeCost) {
         const stats = await rt.client.getSessionStats();
         rt.meta.cost = stats.cost;
@@ -693,7 +767,7 @@ export class Coordinator {
   }
 
   list(): SessionMeta[] {
-    return [...this.runtimes.values()].map((r) => this.snapshotOf(r));
+    return [...this.runtimes.values()].map((rt) => this.snapshotOf(rt));
   }
 
   snapshot(id: string): SessionMeta {
@@ -715,14 +789,17 @@ export class Coordinator {
     if (rt.meta.status === "error" || rt.meta.status === "stopped") {
       throw new Error(`session ${id} is ${rt.meta.status}`);
     }
+
     if (opts.model) {
       const provider = opts.provider ?? rt.meta.provider ?? this.config.provider;
       await rt.client.setModel(provider, opts.model).catch(() => undefined);
     }
+
     if (mode === "steer") await rt.client.steer(message);
     else if (mode === "followup") await rt.client.followUp(message);
     else if (rt.client.isStreaming) await rt.client.prompt(message, "followUp");
     else await rt.client.prompt(message);
+
     if (countInstruction) {
       rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + message.length;
       rt.meta.instructionsSent = (rt.meta.instructionsSent ?? 0) + 1;
@@ -740,6 +817,7 @@ export class Coordinator {
           ? sessions.some((s) => s.pendingQuestions.length > 0)
           : sessions.every((s) => s.status !== "working" && s.status !== "starting");
       const terminal = sessions.some((s) => s.status === "error" || s.status === "stopped");
+
       if (done || terminal) {
         // Make sure fresh cost/context is reflected in the returned snapshot.
         await Promise.all(sessions.map((s) => this.refreshStats(this.get(s.id), true)));
@@ -766,6 +844,10 @@ export class Coordinator {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Sessions: operations
+  // -------------------------------------------------------------------------
+
   async tail(id: string, since?: string, max = 40): Promise<{ entries: any[]; leafId: string | null }> {
     const rt = this.get(id);
     const { entries, leafId } = await rt.client.getEntries(since);
@@ -788,11 +870,13 @@ export class Coordinator {
   async merge(id: string, into?: string, noFf = true): Promise<MergeResult> {
     const rt = this.get(id);
     const target = into ?? (await currentBranch(rt.meta.repo));
-    const res = await mergeBranch(rt.meta.repo, rt.meta.branch, target, { noFf });
-    if (res.ok && !rt.meta.outcome) {
+    const result = await mergeBranch(rt.meta.repo, rt.meta.branch, target, { noFf });
+
+    // A successful merge auto-records the outcome unless one was set explicitly.
+    if (result.ok && !rt.meta.outcome) {
       this.setOutcome(id, (rt.meta.instructionsSent ?? 1) <= 1 ? "success_first" : "success_second");
     }
-    return res;
+    return result;
   }
 
   async push(id: string, remote = "origin", branch?: string): Promise<string> {
@@ -812,12 +896,14 @@ export class Coordinator {
 
   async answer(sessionId: string, requestId: string, response: Partial<UiResponse>): Promise<void> {
     const rt = this.get(sessionId);
-    const idx = rt.meta.pendingQuestions.findIndex((q) => q.id === requestId);
-    if (idx === -1) throw new Error(`no pending question ${requestId} for session ${sessionId}`);
-    const req = rt.meta.pendingQuestions[idx];
-    rt.meta.pendingQuestions.splice(idx, 1);
+    const index = rt.meta.pendingQuestions.findIndex((q) => q.id === requestId);
+    if (index === -1) throw new Error(`no pending question ${requestId} for session ${sessionId}`);
+
+    const request = rt.meta.pendingQuestions[index];
+    rt.meta.pendingQuestions.splice(index, 1);
+
     const payload: UiResponse = { type: "extension_ui_response", id: requestId, ...response };
-    if (req.method === "confirm" && payload.confirmed === undefined && payload.cancelled === undefined) {
+    if (request.method === "confirm" && payload.confirmed === undefined && payload.cancelled === undefined) {
       payload.confirmed = false;
     }
     rt.client.respondUi(payload);
@@ -831,23 +917,28 @@ export class Coordinator {
     rt.meta.status = "stopped";
     rt.meta.lastActivity = Date.now();
     this.locks.releaseAll(id, rt.repoIdentity);
-    // Also drop the Codex-held locks on this worker's acceptance files, or they leak forever.
-    // Scoped to this worker's repository namespace so stopping A never releases B's codex locks.
-    // Only release once: a failed startup already released them, and a newer worker may have since
-    // re-acquired the same path under "codex".
+
+    // Also drop the Codex-held locks on this worker's acceptance files, or they
+    // leak forever. Scoped to this worker's repository namespace so stopping A
+    // never releases B's codex locks. Only release once: a failed startup already
+    // released them, and a newer worker may have since re-acquired the same path
+    // under "codex".
     if (rt.acceptanceReserved && rt.meta.acceptance?.files?.length) {
       this.locks.release("codex", rt.meta.acceptance.files, rt.repoIdentity);
       rt.acceptanceReserved = false;
     }
+
     this.archive(rt.meta);
+
     if (opts.removeWorktree) {
       // Explicit request: remove even if dirty.
-      const delBranch = opts.deleteBranch ?? this.config.deleteBranches;
-      await removeWorktree(rt.meta.repo, rt.meta.worktree, delBranch ? rt.meta.branch : undefined).catch(() => {});
+      const deleteBranch = opts.deleteBranch ?? this.config.deleteBranches;
+      await removeWorktree(rt.meta.repo, rt.meta.worktree, deleteBranch ? rt.meta.branch : undefined).catch(() => {});
     } else if (this.config.autoClean) {
       // Safe auto-clean: only finished + clean worktrees, branch kept.
       await this.cleanMeta(rt.meta).catch(() => {});
     }
+
     this.notifyWaiters();
     this.scheduleSave();
   }
@@ -864,35 +955,39 @@ export class Coordinator {
     await this.flush();
   }
 
-  // --- locks ----------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Locks
+  // -------------------------------------------------------------------------
 
   claim(sessionId: string, paths: string[], mode: LockMode, repo?: string): ClaimResult {
     const namespace = this.namespaceFor(sessionId, repo);
-    const res = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode, namespace);
-    if (res.ok) this.scheduleSave();
-    return res;
+    const result = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode, namespace);
+    if (result.ok) this.scheduleSave();
+    return result;
   }
 
   releaseLocks(sessionId: string, paths?: string[], repo?: string): number {
     const namespace = this.namespaceFor(sessionId, repo);
-    const n = this.locks.release(
+    const released = this.locks.release(
       sessionId,
       paths ? this.normalizeLockPaths(sessionId, paths) : undefined,
       namespace,
     );
     this.scheduleSave();
-    return n;
+    return released;
   }
 
   /**
-   * Lock namespace for a claim/release. A known worker always derives its own repository identity
-   * and cannot override it. A manual claimant (e.g. "codex") may select an explicit repo, else the
-   * configured default applies; an unknown claimant with no resolvable repo is an error rather
-   * than silently falling into a global namespace.
+   * Lock namespace for a claim/release. A known worker always derives its own
+   * repository identity and cannot override it. A manual claimant (e.g. "codex")
+   * may select an explicit repo, else the configured default applies; an unknown
+   * claimant with no resolvable repo is an error rather than silently falling
+   * into a global namespace.
    */
   private namespaceFor(sessionId: string, repo?: string): string {
     const rt = this.runtimes.get(sessionId);
     if (rt) return rt.repoIdentity;
+
     const target = repo ?? this.config.defaultRepo;
     if (!target) {
       throw new Error(
@@ -909,17 +1004,19 @@ export class Coordinator {
   }
 
   /**
-   * Locks use a repo-relative key space (the extension sends relative paths). If a caller passes an
-   * absolute path inside the session's worktree, strip the prefix so it maps to the same key.
+   * Locks use a repo-relative key space (the extension sends relative paths). If
+   * a caller passes an absolute path inside the session's worktree, strip the
+   * prefix so it maps to the same key.
    */
   private normalizeLockPaths(sessionId: string, paths: string[]): string[] {
     const root = this.runtimes.get(sessionId)?.meta.worktree;
     if (!root) return paths;
-    return paths.map((p) => {
-      if (isAbsolute(p) && (p === root || p.startsWith(root + "/"))) {
-        return relative(root, p).split("\\").join("/");
+
+    return paths.map((path) => {
+      if (isAbsolute(path) && (path === root || path.startsWith(root + "/"))) {
+        return relative(root, path).split("\\").join("/");
       }
-      return p;
+      return path;
     });
   }
 
@@ -927,26 +1024,33 @@ export class Coordinator {
     return this.locks.list();
   }
 
-  // --- mailbox / board ------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Mailbox and board
+  // -------------------------------------------------------------------------
 
   postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): { id: string; delivered: boolean } {
-    const m = this.mailbox.post(from, to, text, kind);
+    const message = this.mailbox.post(from, to, text, kind);
     this.scheduleSave();
+
     let delivered = false;
     if (deliver) {
       const targets = to === "*" ? [...this.runtimes.keys()] : [to];
       for (const sid of targets) {
         const rt = this.runtimes.get(sid);
         if (!rt || rt.meta.status === "error" || rt.meta.status === "stopped") continue;
+
         const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
         if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
+
+        // Deliver immediately, then ack only on success so a failed injection is
+        // retried by polling instead of being silently dropped.
         void this.send(sid, body, rt.client.isStreaming ? "steer" : "followup", false)
-          .then(() => this.markRead([m.id], sid))
+          .then(() => this.markRead([message.id], sid))
           .catch(() => {});
         delivered = true;
       }
     }
-    return { id: m.id, delivered };
+    return { id: message.id, delivered };
   }
 
   inbox(sessionId: string, unreadOnly = false) {
@@ -959,9 +1063,9 @@ export class Coordinator {
   }
 
   boardPost(board: string, key: string, value: string, from: string) {
-    const e = this.board.post(board, key, value, from);
+    const entry = this.board.post(board, key, value, from);
     this.scheduleSave();
-    return e;
+    return entry;
   }
 
   boardRead(board?: string, key?: string) {
@@ -976,11 +1080,13 @@ export class Coordinator {
     const rt = this.get(id);
     rt.meta.outcome = outcome;
     if (note !== undefined) rt.meta.outcomeNote = note;
-    const h = this.history.find((x) => x.id === id);
-    if (h) {
-      h.outcome = outcome;
-      if (note !== undefined) h.outcomeNote = note;
+
+    const historic = this.history.find((entry) => entry.id === id);
+    if (historic) {
+      historic.outcome = outcome;
+      if (note !== undefined) historic.outcomeNote = note;
     }
+
     this.scheduleSave();
     this.notifyWaiters();
   }
@@ -988,8 +1094,8 @@ export class Coordinator {
   /** Persist a finished/settled session snapshot so the scoreboard survives daemon restarts. */
   private archive(meta: SessionMeta): void {
     const snapshot: SessionMeta = { ...meta, pendingQuestions: [] };
-    const idx = this.history.findIndex((h) => h.id === meta.id);
-    if (idx >= 0) this.history[idx] = snapshot;
+    const index = this.history.findIndex((entry) => entry.id === meta.id);
+    if (index >= 0) this.history[index] = snapshot;
     else this.history.push(snapshot);
     if (this.history.length > 500) this.history = this.history.slice(-500);
   }
@@ -997,15 +1103,20 @@ export class Coordinator {
   setTestsOwned(id: string, owned: boolean): void {
     const rt = this.get(id);
     rt.meta.testsOwnedByCodex = owned;
-    const h = this.history.find((x) => x.id === id);
-    if (h) h.testsOwnedByCodex = owned;
+    const historic = this.history.find((entry) => entry.id === id);
+    if (historic) historic.testsOwnedByCodex = owned;
     this.scheduleSave();
     this.notifyWaiters();
   }
 
+  // -------------------------------------------------------------------------
+  // Reporting
+  // -------------------------------------------------------------------------
+
   /**
-   * Delegation scoreboard: how many delegated workstreams succeeded on the first or second
-   * attempt, how many Codex took over after the two-strikes gate, and the percentages.
+   * Delegation scoreboard: how many delegated workstreams succeeded on the first
+   * or second attempt, how many Codex took over after the two-strikes gate, and
+   * the percentages.
    */
   async report(): Promise<Record<string, unknown>> {
     const ids = [...this.runtimes.keys()];
@@ -1015,13 +1126,18 @@ export class Coordinator {
         return rt ? this.refreshStats(rt, true).catch(() => {}) : Promise.resolve();
       }),
     );
+
     const sessions = this.list();
-    const activeTasks = sessions.filter((s) => s.status === "starting" || s.status === "idle" || s.status === "working").length;
+    const activeTasks = sessions.filter(
+      (s) => s.status === "starting" || s.status === "idle" || s.status === "working",
+    ).length;
+
     // Merge live sessions with the persisted history (live wins on id collisions).
     const byId = new Map<string, SessionMeta>();
-    for (const h of this.history) byId.set(h.id, h);
-    for (const s of sessions) byId.set(s.id, s);
+    for (const entry of this.history) byId.set(entry.id, entry);
+    for (const session of sessions) byId.set(session.id, session);
     const all = [...byId.values()];
+
     const counts: Record<Outcome | "unrecorded", number> = {
       success_first: 0,
       success_second: 0,
@@ -1031,25 +1147,28 @@ export class Coordinator {
     };
     let workerCost = 0;
     let workerOutput = 0;
-    const tasks = all.map((s) => {
-      counts[(s.outcome ?? "unrecorded") as Outcome | "unrecorded"]++;
-      workerCost += s.cost ?? 0;
-      workerOutput += s.tokens?.output ?? 0;
+
+    const tasks = all.map((session) => {
+      counts[(session.outcome ?? "unrecorded") as Outcome | "unrecorded"]++;
+      workerCost += session.cost ?? 0;
+      workerOutput += session.tokens?.output ?? 0;
       return {
-        id: s.id,
-        name: s.name,
-        status: s.status,
-        outcome: s.outcome ?? "unrecorded",
-        instructions_sent: s.instructionsSent ?? 0,
-        note: s.outcomeNote,
-        tests_owned_by_codex: s.testsOwnedByCodex ?? null,
-        cost: s.cost,
-        output_tokens: s.tokens?.output ?? 0,
+        id: session.id,
+        name: session.name,
+        status: session.status,
+        outcome: session.outcome ?? "unrecorded",
+        instructions_sent: session.instructionsSent ?? 0,
+        note: session.outcomeNote,
+        tests_owned_by_codex: session.testsOwnedByCodex ?? null,
+        cost: session.cost,
+        output_tokens: session.tokens?.output ?? 0,
       };
     });
+
     const total = all.length;
     const pct = (n: number) => (total > 0 ? Number(((100 * n) / total).toFixed(1)) : 0);
-    const percentages = Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, pct(v)]));
+    const percentages = Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, pct(value)]));
+
     return {
       total_tasks: total,
       active_tasks: activeTasks,
@@ -1069,9 +1188,10 @@ export class Coordinator {
   /**
    * Aggregate output-discipline metrics.
    *
-   * We can measure worker output exactly (pi session stats). Codex's own output tokens are NOT
-   * observable here, so orchestrator_instruction_* is a lower bound computed from the instruction
-   * text Codex sent through the daemon. Higher worker_output_per_orchestrator_token is better.
+   * We can measure worker output exactly (pi session stats). Codex's own output
+   * tokens are NOT observable here, so orchestrator_instruction_* is a lower
+   * bound computed from the instruction text Codex sent through the daemon.
+   * Higher worker_output_per_orchestrator_token is better.
    */
   async metrics(): Promise<Record<string, unknown>> {
     const ids = [...this.runtimes.keys()];
@@ -1081,28 +1201,31 @@ export class Coordinator {
         return rt ? this.refreshStats(rt, true) : Promise.resolve();
       }),
     );
+
     const workers = ids
       .filter((id) => this.runtimes.has(id))
       .map((id) => {
-        const m = this.snapshot(id);
-      return {
-        id,
-        status: m.status,
-        provider: m.provider,
-        model: m.model,
-        output_tokens: m.tokens?.output ?? 0,
-        input_tokens: m.tokens?.input ?? 0,
-        cache_read_tokens: m.tokens?.cacheRead ?? 0,
-        cost: m.cost ?? 0,
-        turns: m.turns ?? 0,
-        orchestrator_instruction_chars: m.orchestratorChars ?? 0,
-        instructions_sent: m.instructionsSent ?? 0,
-      };
-    });
-    const sum = (k: string) => workers.reduce((a: number, w: any) => a + (w[k] as number), 0);
+        const meta = this.snapshot(id);
+        return {
+          id,
+          status: meta.status,
+          provider: meta.provider,
+          model: meta.model,
+          output_tokens: meta.tokens?.output ?? 0,
+          input_tokens: meta.tokens?.input ?? 0,
+          cache_read_tokens: meta.tokens?.cacheRead ?? 0,
+          cost: meta.cost ?? 0,
+          turns: meta.turns ?? 0,
+          orchestrator_instruction_chars: meta.orchestratorChars ?? 0,
+          instructions_sent: meta.instructionsSent ?? 0,
+        };
+      });
+
+    const sum = (key: string) => workers.reduce((acc: number, worker: any) => acc + (worker[key] as number), 0);
     const workerOutput = sum("output_tokens");
-    const orchChars = sum("orchestrator_instruction_chars");
-    const orchTokensEst = Math.round(orchChars / 4);
+    const orchestratorChars = sum("orchestrator_instruction_chars");
+    const orchestratorTokensEst = Math.round(orchestratorChars / 4);
+
     return {
       workers,
       totals: {
@@ -1111,14 +1234,14 @@ export class Coordinator {
         worker_cache_read_tokens: sum("cache_read_tokens"),
         worker_cost: sum("cost"),
         worker_turns: sum("turns"),
-        orchestrator_instruction_chars: orchChars,
-        orchestrator_instruction_tokens_est: orchTokensEst,
+        orchestrator_instruction_chars: orchestratorChars,
+        orchestrator_instruction_tokens_est: orchestratorTokensEst,
       },
       discipline: {
         worker_output_tokens: workerOutput,
-        orchestrator_instruction_tokens_est: orchTokensEst,
+        orchestrator_instruction_tokens_est: orchestratorTokensEst,
         worker_output_per_orchestrator_token:
-          orchTokensEst > 0 ? Number((workerOutput / orchTokensEst).toFixed(2)) : null,
+          orchestratorTokensEst > 0 ? Number((workerOutput / orchestratorTokensEst).toFixed(2)) : null,
         note:
           "Codex's own output tokens are not observable from the daemon; orchestrator_instruction_* is a lower bound. Codex should keep its output to judgment and let workers emit code: a high worker_output_per_orchestrator_token ratio is healthy, and a rising Codex-side cost means it is writing code it should have delegated.",
       },
@@ -1126,6 +1249,11 @@ export class Coordinator {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Module helpers
+// ---------------------------------------------------------------------------
+
+/** Render a structured delegation spec into the binding block sent to a worker. */
 function renderSpec(spec?: DelegationSpec): string {
   if (!spec) return "";
   const lines = [
@@ -1140,6 +1268,10 @@ function renderSpec(spec?: DelegationSpec): string {
   return lines.join("\n");
 }
 
+/**
+ * Run a shell command with a hard timeout. On POSIX the command runs in its own
+ * process group so a timeout can kill the whole tree, not just the shell.
+ */
 function runCommand(
   command: string,
   cwd: string,
@@ -1148,24 +1280,31 @@ function runCommand(
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
     const proc = spawn("bash", ["-lc", command], { cwd, env: process.env, detached: grouped });
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+
     const timer = setTimeout(() => {
       timedOut = true;
       try {
         if (grouped && proc.pid) process.kill(-proc.pid, "SIGKILL");
         else proc.kill("SIGKILL");
-      } catch { /* process already exited */ }
+      } catch {
+        /* process already exited */
+      }
       // Descendants that detached themselves must not keep this request's pipes open forever.
       proc.stdout?.destroy();
       proc.stderr?.destroy();
     }, timeoutMs);
+
+    // Cap retained output so a chatty command cannot exhaust memory.
     proc.stdout?.on("data", (d: Buffer) => (stdout = (stdout + d.toString("utf8")).slice(-200_000)));
     proc.stderr?.on("data", (d: Buffer) => (stderr = (stderr + d.toString("utf8")).slice(-50_000)));
-    proc.on("error", (e) => {
+
+    proc.on("error", (error) => {
       clearTimeout(timer);
-      resolve({ code: null, stdout, stderr: stderr + String(e), timedOut });
+      resolve({ code: null, stdout, stderr: stderr + String(error), timedOut });
     });
     proc.on("close", (code) => {
       clearTimeout(timer);
@@ -1174,13 +1313,14 @@ function runCommand(
   });
 }
 
+/** Extract the text portion of a pi message content block. */
 function textOf(msg: any): string {
   const content = msg?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((c) => c?.type === "text" && typeof c.text === "string")
-      .map((c) => c.text)
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
       .join("");
   }
   return "";

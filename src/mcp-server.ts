@@ -19,6 +19,7 @@ const MAX_DELEGATED_ATTEMPTS = 2;
 const TASK_TYPES = ["mechanical", "feature", "refactor", "debug", "design", "security"] as const;
 const JUDGMENT_TYPES = new Set(["design", "security"]);
 
+/** Trim a session snapshot to the fields Codex actually needs over MCP. */
 function compactMeta(m: SessionMeta) {
   return {
     id: m.id,
@@ -69,6 +70,10 @@ export function buildServer(coord: Coordinator): McpServer {
     }),
   );
 
+  // -------------------------------------------------------------------------
+  // Delegation lifecycle
+  // -------------------------------------------------------------------------
+
   server.registerTool(
     "pi_spawn",
     {
@@ -115,7 +120,9 @@ export function buildServer(coord: Coordinator): McpServer {
     },
     async (args) => {
       const spec = args.spec as DelegationSpec | undefined;
-      // Spec linter: a structured spec must carry goal + scope, and a delegation must carry a spec or a prompt.
+
+      // Spec linter: a structured spec must carry goal + scope, and a delegation
+      // must carry either a spec or a prompt.
       if (spec) {
         const missing: string[] = [];
         if (!spec.goal || !spec.goal.trim()) missing.push("goal");
@@ -142,6 +149,8 @@ export function buildServer(coord: Coordinator): McpServer {
           hint: "Prefer spec{goal,scope,acceptance_files,...}; a bare prompt is the simplified path for trivial work.",
         });
       }
+
+      // Judgment work stays with Codex unless explicitly overridden with a reason.
       const taskType = spec?.task_type;
       if (taskType && JUDGMENT_TYPES.has(taskType) && !args.spec_override) {
         return errorJson({
@@ -163,6 +172,7 @@ export function buildServer(coord: Coordinator): McpServer {
           "codex",
         );
       }
+
       const warnings: string[] = [];
       if (!args.acceptance_files?.length) {
         warnings.push("no acceptance_files provided: test-first delegation is strongly recommended");
@@ -173,6 +183,7 @@ export function buildServer(coord: Coordinator): McpServer {
           `high parallelism: ${activeWorkers} workers already active (guideline <= ${coord.config.parallelWarnThreshold}). Integrate/merge before spawning more; over-parallelizing raises integration cost and lowers review quality.`,
         );
       }
+
       const meta = await coord.spawn({
         task: args.task,
         repo: args.repo,
@@ -187,8 +198,10 @@ export function buildServer(coord: Coordinator): McpServer {
         acceptanceFiles: args.acceptance_files,
         acceptanceCommand: args.acceptance_command,
       });
+
       const out: Record<string, unknown> = { ...compactMeta(meta) };
       if (warnings.length) out.warnings = warnings;
+
       // Advisory: small, single-file, no-acceptance work usually costs more to delegate than to do.
       const scopeLen = spec?.scope?.length ?? 0;
       if (scopeLen <= 1 && !args.acceptance_files?.length && (args.prompt?.length ?? 0) < 400) {
@@ -221,6 +234,7 @@ export function buildServer(coord: Coordinator): McpServer {
     async ({ session_id, message, mode, model, provider, override, override_reason }) => {
       const snap = coord.snapshot(session_id);
       const sent = snap.instructionsSent ?? 0;
+
       if (sent >= MAX_DELEGATED_ATTEMPTS && !override) {
         return errorJson({
           blocked: true,
@@ -238,6 +252,7 @@ export function buildServer(coord: Coordinator): McpServer {
           ],
         });
       }
+
       if (sent >= MAX_DELEGATED_ATTEMPTS && override) {
         coord.boardPost(
           "pi-mcp",
@@ -246,10 +261,13 @@ export function buildServer(coord: Coordinator): McpServer {
           "codex",
         );
       }
-      // Model routing: the worker stays on its spawn model unless Codex explicitly passes `model`.
-      // Automatic escalation is DISABLED (owner decision): never silently switch to a costlier model.
+
+      // Model routing: the worker stays on its spawn model unless Codex explicitly
+      // passes `model`. Automatic escalation is DISABLED (owner decision): never
+      // silently switch to a costlier model.
       const useModel = model ?? undefined;
       await coord.send(session_id, message, mode ?? "prompt", true, { provider, model: useModel });
+
       return json({
         ok: true,
         session_id,
@@ -278,6 +296,64 @@ export function buildServer(coord: Coordinator): McpServer {
       return json({ timedOut: res.timedOut, sessions: res.sessions.map(compactMeta) });
     },
   );
+
+  server.registerTool(
+    "pi_stop",
+    {
+      title: "Stop a worker",
+      description: "Stop a worker session. Optionally record its final outcome and remove its git worktree/branch.",
+      inputSchema: {
+        session_id: z.string(),
+        remove_worktree: z.boolean().optional(),
+        delete_branch: z.boolean().optional().describe("Also delete the worker branch (default false: keep it)"),
+        outcome: z
+          .enum(["success_first", "success_second", "taken_over", "abandoned"])
+          .optional()
+          .describe("Final disposition for the delegation scoreboard"),
+        note: z.string().optional(),
+      },
+    },
+    async ({ session_id, remove_worktree, delete_branch, outcome, note }) => {
+      if (outcome) coord.setOutcome(session_id, outcome, note);
+      await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
+      return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
+    },
+  );
+
+  server.registerTool(
+    "pi_finish",
+    {
+      title: "Close a workstream with an outcome",
+      description:
+        "Record the final disposition of a worker workstream for the delegation scoreboard: success_first (done on the initial task), success_second (done after one correction), taken_over (you finished it yourself after two failed attempts), or abandoned. Call this for EVERY workstream when the task completes.",
+      inputSchema: {
+        session_id: z.string(),
+        outcome: z.enum(["success_first", "success_second", "taken_over", "abandoned"]),
+        note: z.string().optional(),
+        stop: z.boolean().optional().describe("Also stop the worker (default false; keep it alive through integration)"),
+        tests_owned_by_codex: z
+          .boolean()
+          .optional()
+          .describe("True if the acceptance test was authored from the spec and owned by you, not the worker"),
+      },
+    },
+    async ({ session_id, outcome, note, stop, tests_owned_by_codex }) => {
+      coord.setOutcome(session_id, outcome, note);
+      if (tests_owned_by_codex !== undefined) coord.setTestsOwned(session_id, tests_owned_by_codex);
+      if (stop) await coord.stop(session_id);
+      return json({
+        ok: true,
+        session_id,
+        outcome,
+        tests_owned_by_codex: tests_owned_by_codex ?? null,
+        instructions_sent: coord.snapshot(session_id).instructionsSent ?? 0,
+      });
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Inspection
+  // -------------------------------------------------------------------------
 
   server.registerTool(
     "pi_status",
@@ -330,6 +406,27 @@ export function buildServer(coord: Coordinator): McpServer {
     },
     async ({ session_id }) => json(await coord.diff(session_id)),
   );
+
+  server.registerTool(
+    "pi_list",
+    { title: "List workers", description: "List all known worker sessions.", inputSchema: {} },
+    async () => json({ sessions: coord.list().map(compactMeta) }),
+  );
+
+  server.registerTool(
+    "pi_report",
+    {
+      title: "Delegation scoreboard",
+      description:
+        "At task completion, report to the user: how many workstreams were delegated, how many succeeded on the first try / second try, how many you took over yourself, and the percentages. Call this and summarize it to the user.",
+      inputSchema: {},
+    },
+    async () => json(await coord.report()),
+  );
+
+  // -------------------------------------------------------------------------
+  // Integration
+  // -------------------------------------------------------------------------
 
   server.registerTool(
     "pi_commit",
@@ -401,70 +498,9 @@ export function buildServer(coord: Coordinator): McpServer {
     },
   );
 
-  server.registerTool(
-    "pi_stop",
-    {
-      title: "Stop a worker",
-      description: "Stop a worker session. Optionally record its final outcome and remove its git worktree/branch.",
-      inputSchema: {
-        session_id: z.string(),
-        remove_worktree: z.boolean().optional(),
-        delete_branch: z.boolean().optional().describe("Also delete the worker branch (default false: keep it)"),
-        outcome: z
-          .enum(["success_first", "success_second", "taken_over", "abandoned"])
-          .optional()
-          .describe("Final disposition for the delegation scoreboard"),
-        note: z.string().optional(),
-      },
-    },
-    async ({ session_id, remove_worktree, delete_branch, outcome, note }) => {
-      if (outcome) coord.setOutcome(session_id, outcome, note);
-      await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
-      return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
-    },
-  );
-
-  server.registerTool(
-    "pi_finish",
-    {
-      title: "Close a workstream with an outcome",
-      description:
-        "Record the final disposition of a worker workstream for the delegation scoreboard: success_first (done on the initial task), success_second (done after one correction), taken_over (you finished it yourself after two failed attempts), or abandoned. Call this for EVERY workstream when the task completes.",
-      inputSchema: {
-        session_id: z.string(),
-        outcome: z.enum(["success_first", "success_second", "taken_over", "abandoned"]),
-        note: z.string().optional(),
-        stop: z.boolean().optional().describe("Also stop the worker (default false; keep it alive through integration)"),
-        tests_owned_by_codex: z
-          .boolean()
-          .optional()
-          .describe("True if the acceptance test was authored from the spec and owned by you, not the worker"),
-      },
-    },
-    async ({ session_id, outcome, note, stop, tests_owned_by_codex }) => {
-      coord.setOutcome(session_id, outcome, note);
-      if (tests_owned_by_codex !== undefined) coord.setTestsOwned(session_id, tests_owned_by_codex);
-      if (stop) await coord.stop(session_id);
-      return json({
-        ok: true,
-        session_id,
-        outcome,
-        tests_owned_by_codex: tests_owned_by_codex ?? null,
-        instructions_sent: coord.snapshot(session_id).instructionsSent ?? 0,
-      });
-    },
-  );
-
-  server.registerTool(
-    "pi_report",
-    {
-      title: "Delegation scoreboard",
-      description:
-        "At task completion, report to the user: how many workstreams were delegated, how many succeeded on the first try / second try, how many you took over yourself, and the percentages. Call this and summarize it to the user.",
-      inputSchema: {},
-    },
-    async () => json(await coord.report()),
-  );
+  // -------------------------------------------------------------------------
+  // Cleanup
+  // -------------------------------------------------------------------------
 
   server.registerTool(
     "pi_gc",
@@ -477,11 +513,9 @@ export function buildServer(coord: Coordinator): McpServer {
     async () => json(await coord.gc()),
   );
 
-  server.registerTool(
-    "pi_list",
-    { title: "List workers", description: "List all known worker sessions.", inputSchema: {} },
-    async () => json({ sessions: coord.list().map(compactMeta) }),
-  );
+  // -------------------------------------------------------------------------
+  // File claims
+  // -------------------------------------------------------------------------
 
   server.registerTool(
     "pi_claim",
@@ -525,6 +559,10 @@ export function buildServer(coord: Coordinator): McpServer {
     async () => json({ locks: coord.locksList() }),
   );
 
+  // -------------------------------------------------------------------------
+  // Messaging and shared board
+  // -------------------------------------------------------------------------
+
   server.registerTool(
     "pi_message",
     {
@@ -547,7 +585,11 @@ export function buildServer(coord: Coordinator): McpServer {
 
   server.registerTool(
     "pi_inbox",
-    { title: "Read a worker's mailbox", description: "Read messages addressed to a worker.", inputSchema: { session_id: z.string(), unread_only: z.boolean().optional() } },
+    {
+      title: "Read a worker's mailbox",
+      description: "Read messages addressed to a worker.",
+      inputSchema: { session_id: z.string(), unread_only: z.boolean().optional() },
+    },
     async ({ session_id, unread_only }) => json({ messages: coord.inbox(session_id, unread_only ?? false) }),
   );
 

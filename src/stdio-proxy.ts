@@ -2,9 +2,10 @@
 /**
  * stdio -> HTTP bridge for pi-mcp.
  *
- * Codex starts this as a stdio MCP server. It forwards every JSON-RPC message to the
- * pi-mcp HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint is stateless,
- * a daemon restart never breaks the Codex session: the next request just reconnects.
+ * Codex starts this as a stdio MCP server. It forwards every JSON-RPC message to
+ * the pi-mcp HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint
+ * is stateless, a daemon restart never breaks the Codex session: the next request
+ * simply reconnects.
  *
  * Env:
  *   PI_MCP_URL    full MCP URL (default http://127.0.0.1:8787/mcp)
@@ -14,11 +15,11 @@
 const URL = process.env.PI_MCP_URL || `http://127.0.0.1:${process.env.PI_MCP_PORT || 8787}/mcp`;
 const TOKEN = process.env.PI_MCP_TOKEN || "";
 
-function log(...a: unknown[]): void {
-  console.error("[pi-mcp-proxy]", ...a);
+function log(...args: unknown[]): void {
+  console.error("[pi-mcp-proxy]", ...args);
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function headers(): Record<string, string> {
   const h: Record<string, string> = {
@@ -29,22 +30,24 @@ function headers(): Record<string, string> {
   return h;
 }
 
-/** Parse either a plain JSON body or an SSE body (data: {...}). */
+/** Parse either a plain JSON body or an SSE body (`data: {...}`). */
 function parseBody(text: string): unknown {
-  const t = text.trim();
-  if (!t) return undefined;
-  if (t.startsWith("{") || t.startsWith("[")) {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     try {
-      return JSON.parse(t);
+      return JSON.parse(trimmed);
     } catch {
-      /* fall through */
+      /* fall through to SSE parsing */
     }
   }
-  for (const line of t.split("\n")) {
-    const s = line.startsWith("data:") ? line.slice(5).trim() : "";
-    if (s) {
+
+  for (const line of trimmed.split("\n")) {
+    const payload = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (payload) {
       try {
-        return JSON.parse(s);
+        return JSON.parse(payload);
       } catch {
         /* keep looking */
       }
@@ -54,10 +57,10 @@ function parseBody(text: string): unknown {
 }
 
 /**
- * Codes that can only be observed before a request reaches the daemon.
- * Retrying these is safe because no handler could have run. Anything else
- * (HTTP error responses, resets, body/read failures, invalid JSON, ambiguous
- * transport errors) might have executed a mutation and must never be replayed.
+ * Codes that can only be observed before a request reaches the daemon. Retrying
+ * these is safe because no handler could have run. Anything else (HTTP error
+ * responses, resets, body/read failures, invalid JSON, ambiguous transport
+ * errors) might have executed a mutation and must never be replayed.
  */
 const RETRYABLE_CODES = new Set([
   "ECONNREFUSED",
@@ -68,17 +71,20 @@ const RETRYABLE_CODES = new Set([
 ]);
 
 /**
- * Validate that a parsed daemon body is a well-formed JSON-RPC 2.0 response that
- * is correlated to `id` before forwarding it to the caller. Anything else means the
+ * Validate that a parsed daemon body is a well-formed JSON-RPC 2.0 response
+ * correlated to `id` before forwarding it to the caller. Anything else means the
  * caller would be left waiting on an unresolved request, so it is rejected.
  */
 function isValidJsonRpcResponse(resp: unknown, id: unknown): boolean {
   if (resp === null || typeof resp !== "object" || Array.isArray(resp)) return false;
   const o = resp as Record<string, unknown>;
+
   if (o.jsonrpc !== "2.0" || o.id !== id) return false;
+
   const hasResult = Object.prototype.hasOwnProperty.call(o, "result");
   const hasError = Object.prototype.hasOwnProperty.call(o, "error");
   if (hasResult === hasError) return false; // must have exactly one of result/error
+
   if (hasError) {
     const err = o.error;
     if (err === null || typeof err !== "object" || Array.isArray(err)) return false;
@@ -90,13 +96,14 @@ function isValidJsonRpcResponse(resp: unknown, id: unknown): boolean {
 }
 
 /** Walk a fetch error's nested `cause`/`errors` chain looking for a pre-connection code. */
-function isPreConnectionFailure(e: unknown): boolean {
+function isPreConnectionFailure(error: unknown): boolean {
   const seen = new Set<unknown>();
-  const stack: unknown[] = [e];
+  const stack: unknown[] = [error];
   while (stack.length) {
     const cur = stack.pop();
     if (cur === null || typeof cur !== "object" || seen.has(cur)) continue;
     seen.add(cur);
+
     const obj = cur as { code?: unknown; cause?: unknown; errors?: unknown };
     if (typeof obj.code === "string" && RETRYABLE_CODES.has(obj.code)) return true;
     if (Array.isArray(obj.errors)) stack.push(...obj.errors);
@@ -124,12 +131,18 @@ async function post(body: unknown): Promise<unknown> {
   throw new Error("pi-mcp proxy: retry loop exhausted");
 }
 
+// ---------------------------------------------------------------------------
+// stdin framing
+// ---------------------------------------------------------------------------
+
 let buf = "";
 let pending = 0;
 let ended = false;
+
 function maybeExit(): void {
   if (ended && pending === 0) process.exit(0);
 }
+
 function enqueueLine(line: string): void {
   if (!line.trim()) return;
   pending++;
@@ -165,11 +178,14 @@ async function handleLine(line: string): Promise<void> {
   } catch {
     return;
   }
+
   const id = msg?.id;
   const isRequest = id !== undefined && id !== null;
+
   try {
     const resp = await post(msg);
     if (!isRequest) return; // notifications are allowed to have no response
+
     if (!isValidJsonRpcResponse(resp, id)) {
       // Empty/invalid body or an unparseable/unmatched/ill-formed response:
       // still give the caller exactly one correlated reply instead of dropping it.
@@ -182,6 +198,7 @@ async function handleLine(line: string): Promise<void> {
       );
       return;
     }
+
     process.stdout.write(JSON.stringify(resp) + "\n");
   } catch (e) {
     log("forward failed:", String(e));

@@ -20,11 +20,14 @@ const MESSAGE_KINDS = new Set<MessageKind>(["note", "question", "answer", "broad
 const STATUSES = new Set<SessionStatus>(["starting", "idle", "working", "error", "stopped"]);
 const OUTCOMES = new Set<Outcome>(["success_first", "success_second", "taken_over", "abandoned"]);
 
+type ReadResult = { kind: "ok"; raw: string } | { kind: "missing" } | { kind: "error"; error: unknown };
+type ValidateResult = { ok: true; state: StateSnapshot } | { ok: false; reason: string };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Throw a path-scoped validation error. Callers prefix the file name, so messages stay contextual. */
+/** Throw a path-scoped validation error. Callers prefix the file, so messages stay contextual. */
 function fail(file: string, detail: string): never {
   throw new Error(`invalid state in ${file}: ${detail}`);
 }
@@ -38,9 +41,10 @@ function emptyState(): StateSnapshot {
 }
 
 /**
- * Validate a whole persisted snapshot before any of it is applied to live coordinator objects.
- * Missing optional collections default to empty. Locks are intentionally not validated: session
- * locks never survive a restart, so the loader drops them unconditionally.
+ * Validate a whole persisted snapshot before any of it is applied to live
+ * coordinator objects. Missing optional collections default to empty. Locks are
+ * intentionally not validated: session locks never survive a restart, so the
+ * loader drops them unconditionally.
  */
 export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
   if (!isRecord(raw)) fail(file, "expected a JSON object");
@@ -57,11 +61,12 @@ export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
   const board = optionalArray(raw.board, file, "board", validateBoardEntry);
   const history = optionalArray(raw.history, file, "history", validateHistoryEntry);
 
-  // Session ids are allocated as s<N>; restoring the counter to at least the highest one seen
-  // prevents a restart from reusing an id that history already records. An out-of-range numeric
-  // suffix is a shape error, so a hostile/broken snapshot cannot derail future allocations.
-  history.forEach((h, index) => {
-    const match = /^s(\d+)$/.exec(h.id);
+  // Session ids are allocated as s<N>. Bumping the counter to at least the
+  // highest id seen in history prevents a restart from reusing an id that
+  // history already records. An out-of-range numeric suffix is a shape error, so
+  // a hostile/broken snapshot cannot derail future allocations.
+  history.forEach((entry, index) => {
+    const match = /^s(\d+)$/.exec(entry.id);
     if (!match) return;
     const n = Number(match[1]);
     if (!Number.isSafeInteger(n)) {
@@ -88,6 +93,7 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
   const at = `mailbox[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
   const { id, from, to, kind, text, ts, read, readBy } = entry;
+
   if (typeof id !== "string") fail(file, `${at}.id must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
   if (typeof to !== "string") fail(file, `${at}.to must be a string`);
@@ -97,6 +103,7 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
   }
   if (typeof ts !== "number" || !Number.isFinite(ts)) fail(file, `${at}.ts must be a finite number`);
   if (typeof read !== "boolean") fail(file, `${at}.read must be a boolean`);
+
   let normalizedReadBy: string[] | undefined;
   if (readBy !== undefined) {
     if (!Array.isArray(readBy) || !readBy.every((v) => typeof v === "string")) {
@@ -104,6 +111,7 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
     }
     normalizedReadBy = [...readBy];
   }
+
   return {
     id,
     from,
@@ -120,26 +128,32 @@ function validateBoardEntry(entry: unknown, index: number, file: string): BoardE
   const at = `board[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
   const { board, key, value, from, ts } = entry;
+
   if (typeof board !== "string") fail(file, `${at}.board must be a string`);
   if (typeof key !== "string") fail(file, `${at}.key must be a string`);
   if (typeof value !== "string") fail(file, `${at}.value must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
   if (typeof ts !== "number" || !Number.isFinite(ts)) fail(file, `${at}.ts must be a finite number`);
+
   return { board, key, value, from, ts };
 }
 
 function validateHistoryEntry(entry: unknown, index: number, file: string): SessionMeta {
   const at = `history[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
+
   const id = entry.id;
   if (typeof id !== "string" || id.length === 0) fail(file, `${at}.id must be a nonempty string`);
+
   for (const field of ["repo", "worktree", "branch", "cwd", "baseRef", "name"] as const) {
     if (typeof entry[field] !== "string") fail(file, `${at}.${field} must be a string`);
   }
+
   const status = entry.status;
   if (typeof status !== "string" || !STATUSES.has(status as SessionStatus)) {
     fail(file, `${at}.status is not a known status`);
   }
+
   if (typeof entry.createdAt !== "number" || !Number.isFinite(entry.createdAt)) {
     fail(file, `${at}.createdAt must be a finite number`);
   }
@@ -147,19 +161,19 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
     fail(file, `${at}.lastActivity must be a finite number`);
   }
   if (!Array.isArray(entry.pendingQuestions)) fail(file, `${at}.pendingQuestions must be an array`);
+
   const outcome = entry.outcome;
   if (outcome !== undefined && (typeof outcome !== "string" || !OUTCOMES.has(outcome as Outcome))) {
     fail(file, `${at}.outcome is not a known outcome`);
   }
+
   return { ...(entry as unknown as SessionMeta) };
 }
 
-type ReadResult = { kind: "ok"; raw: string } | { kind: "missing" } | { kind: "error"; error: unknown };
-type ValidateResult = { ok: true; state: StateSnapshot } | { ok: false; reason: string };
-
 /**
- * Owns the primary state file and its atomic backup. Reads validate the entire snapshot; writes
- * back up only a previously validated primary, then swap a uniquely named temp file into place.
+ * Owns the primary state file and its atomic backup. Every read validates the
+ * whole snapshot; every write backs up a previously validated primary, then
+ * swaps a uniquely named temp file into place.
  */
 export class StateStore {
   private seq = 0;
@@ -176,6 +190,7 @@ export class StateStore {
 
     if (primary.kind === "ok") {
       const parsed = this.tryValidate(primary.raw, this.path);
+      // Happy path: a valid primary is authoritative.
       if (parsed.ok) return { state: parsed.state, recoveredFromBackup: false };
 
       const backup = await this.readIfExists(this.backupPath);
@@ -184,6 +199,7 @@ export class StateStore {
         this.logLoadFailure(this.path, parsed.reason, "no usable backup present");
         throw new Error(`cannot load state: ${this.path} is invalid (${parsed.reason}) and no backup exists`);
       }
+
       const recovered = this.tryValidate(backup.raw, this.backupPath);
       if (!recovered.ok) {
         this.logLoadFailure(this.path, parsed.reason, `backup ${this.backupPath} is invalid: ${recovered.reason}`);
@@ -193,10 +209,12 @@ export class StateStore {
       return { state: recovered.state, recoveredFromBackup: true };
     }
 
-    // Primary is missing: a valid backup still recovers; both missing is a quiet fresh boot.
+    // Primary is missing: a valid backup still recovers; both missing is a
+    // quiet fresh boot.
     const backup = await this.readIfExists(this.backupPath);
     if (backup.kind === "error") this.readError(this.backupPath, backup.error);
     if (backup.kind === "missing") return { state: emptyState(), recoveredFromBackup: false };
+
     const recovered = this.tryValidate(backup.raw, this.backupPath);
     if (!recovered.ok) {
       this.logLoadFailure(this.backupPath, "primary state is missing", recovered.reason);
@@ -244,8 +262,9 @@ export class StateStore {
   }
 
   /**
-   * Snapshot a valid primary to the backup before overwriting it. A corrupt or missing primary
-   * never replaces an existing good backup: the previous write already captured that state.
+   * Snapshot a valid primary to the backup before overwriting it. A corrupt or
+   * missing primary never replaces an existing good backup: the previous write
+   * already captured that state.
    */
   private async backupValidPrimary(): Promise<void> {
     let raw: string;
@@ -255,17 +274,20 @@ export class StateStore {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
       throw error;
     }
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
       return;
     }
+
     try {
       validateSnapshot(parsed, this.path);
     } catch {
       return;
     }
+
     await this.atomicWrite(this.backupPath, JSON.stringify(parsed, null, 2));
   }
 

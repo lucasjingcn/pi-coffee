@@ -6,9 +6,10 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 
 /**
- * The daemon may run as a different Unix user than the repository owner (e.g. daemon as root,
- * repo owned by the Codex user), which makes git refuse with "dubious ownership". Disable that
- * check for the daemon's own git subprocesses only, via environment config (scoped, not global).
+ * The daemon may run as a different Unix user than the repository owner (e.g.
+ * daemon as root, repo owned by the Codex user), which makes git refuse with
+ * "dubious ownership". Disable that check for the daemon's own git subprocesses
+ * only, via environment config, so it never touches the user's global config.
  */
 function gitEnv(): NodeJS.ProcessEnv {
   return {
@@ -19,6 +20,7 @@ function gitEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/** Run git and return trimmed stdout. Throws on failure. */
 async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const { stdout } = await run("git", ["-C", cwd, ...args], {
     timeout,
@@ -71,6 +73,10 @@ function nulPaths(out: string): string[] {
   return out.split("\0").filter((p) => p.length > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Repository queries
+// ---------------------------------------------------------------------------
+
 export async function isGitRepo(dir: string): Promise<boolean> {
   try {
     await git(dir, ["rev-parse", "--is-inside-work-tree"]);
@@ -93,6 +99,14 @@ export async function resolveRef(repo: string, ref: string): Promise<string> {
   return git(repo, ["rev-parse", ref]);
 }
 
+export async function currentBranch(repo: string): Promise<string> {
+  return git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+}
+
+// ---------------------------------------------------------------------------
+// Worktree lifecycle
+// ---------------------------------------------------------------------------
+
 export interface WorktreeInfo {
   repo: string;
   dir: string;
@@ -100,7 +114,7 @@ export interface WorktreeInfo {
   baseRef: string;
 }
 
-/** Create an isolated git worktree on a fresh branch. */
+/** Create an isolated git worktree on a fresh branch (or attach to an existing one). */
 export async function createWorktree(opts: {
   repo: string;
   dir: string;
@@ -109,10 +123,12 @@ export async function createWorktree(opts: {
 }): Promise<WorktreeInfo> {
   const baseRef = opts.baseRef ?? "HEAD";
   await mkdir(dirname(opts.dir), { recursive: true });
+  // Prune stale registrations first; a prior crashed run can leave them behind.
   await git(opts.repo, ["worktree", "prune"]).catch(() => {});
-  const branches = await git(opts.repo, ["branch", "--list", opts.branch]).catch(() => "");
-  if (branches.trim()) {
-    // Branch already exists: attach to it.
+
+  const existing = await git(opts.repo, ["branch", "--list", opts.branch]).catch(() => "");
+  if (existing.trim()) {
+    // Branch already exists: attach the new worktree to it.
     await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]).catch(async () => {
       await git(opts.repo, ["worktree", "prune"]).catch(() => {});
       await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]);
@@ -123,6 +139,7 @@ export async function createWorktree(opts: {
       await git(opts.repo, ["worktree", "add", "-f", "-b", opts.branch, opts.dir, baseRef]);
     });
   }
+
   return { repo: opts.repo, dir: opts.dir, branch: opts.branch, baseRef };
 }
 
@@ -147,6 +164,10 @@ export async function isWorktreeClean(dir: string): Promise<boolean> {
 export async function pruneWorktrees(repo: string): Promise<void> {
   await git(repo, ["worktree", "prune"]).catch(() => {});
 }
+
+// ---------------------------------------------------------------------------
+// Branch cleanup
+// ---------------------------------------------------------------------------
 
 export interface BranchDeleteResult {
   branch: string;
@@ -185,44 +206,56 @@ async function remoteDefaultBranch(repo: string): Promise<string | null> {
 }
 
 /**
- * Delete a worker branch once its work is proven integrated into the repository's current HEAD.
+ * Delete a worker branch once its work is proven integrated into the repo's
+ * current HEAD.
  *
  * Safety rails (all required):
  *  - the full ref must resolve; invalid/empty metadata is refused, never guessed;
- *  - the branch must not be checked out in any worktree and must not be the current or default branch;
- *  - the branch tip must be an ancestor of HEAD (`merge-base --is-ancestor`), so squashed or rebased
- *    work is retained for manual inspection instead of being mistaken for integrated work;
- *  - deletion uses non-force `git branch -d`, so git's own merged/checked-out checks still apply on top.
+ *  - the branch must not be checked out in any worktree and must not be the
+ *    current or default branch;
+ *  - the branch tip must be an ancestor of HEAD (`merge-base --is-ancestor`), so
+ *    squashed or rebased work is retained for manual inspection instead of being
+ *    mistaken for integrated work;
+ *  - deletion uses non-force `git branch -d`, so git's own merged/checked-out
+ *    checks still apply on top.
  *
- * Any git failure or safety refusal returns `deleted:false` with the reason: callers must never report
- * a deletion that did not happen.
+ * Any git failure or safety refusal returns `deleted:false` with the reason:
+ * callers must never report a deletion that did not happen.
  */
 export async function deleteMergedBranch(repo: string, branch: string): Promise<BranchDeleteResult> {
   const name = branch;
   if (!name || name !== name.trim()) return { branch, deleted: false, reason: "invalid branch name" };
+
   const fullRef = `refs/heads/${name}`;
+
   const valid = await gitOutcome(repo, ["check-ref-format", fullRef]);
   if (!valid.ok) return { branch, deleted: false, reason: "invalid branch name" };
+
   const rev = await gitOutcome(repo, ["rev-parse", "--verify", "--quiet", fullRef]);
   if (!rev.ok || !rev.stdout.trim()) {
     // Missing/invalid refs exit quietly; repo-level errors land on stderr and are surfaced as-is.
     return { branch: name, deleted: false, reason: rev.stderr.trim() ? gitErrorText(rev) : "branch not found" };
   }
+
   if (name === "main" || name === "master") {
     return { branch: name, deleted: false, reason: "default branch" };
   }
+
   const checkedOut = await checkedOutBranches(repo);
   if (checkedOut.has(name)) {
     return { branch: name, deleted: false, reason: "checked out in a worktree" };
   }
+
   const current = await gitOutcome(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (!current.ok) return { branch, deleted: false, reason: gitErrorText(current) };
-  if (current.ok && current.stdout.trim() === name) {
+  if (current.stdout.trim() === name) {
     return { branch: name, deleted: false, reason: "current branch" };
   }
+
   if ((await remoteDefaultBranch(repo)) === name) {
     return { branch: name, deleted: false, reason: "default branch" };
   }
+
   const ancestor = await gitOutcome(repo, ["merge-base", "--is-ancestor", fullRef, "HEAD"]);
   if (!ancestor.ok) {
     return {
@@ -231,11 +264,16 @@ export async function deleteMergedBranch(repo: string, branch: string): Promise<
       reason: ancestor.stderr.trim() ? gitErrorText(ancestor) : "not an ancestor of HEAD",
     };
   }
+
   // Non-force: git still refuses if its own merged/checked-out checks disagree with ours.
   const del = await gitOutcome(repo, ["branch", "-d", "--", name]);
   if (!del.ok) return { branch: name, deleted: false, reason: gitErrorText(del) };
   return { branch: name, deleted: true, reason: "merged into HEAD" };
 }
+
+// ---------------------------------------------------------------------------
+// Diff / commit / merge / push
+// ---------------------------------------------------------------------------
 
 export interface DiffSummary {
   base: string;
@@ -260,10 +298,12 @@ export async function worktreeDiff(dir: string, base = "HEAD"): Promise<DiffSumm
     gitRaw(dir, ["diff", "--name-only", "-z", "HEAD"]),
     gitRaw(dir, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
+
   const untracked = nulPaths(untrackedRaw);
   const files = [
     ...new Set([...nulPaths(committedNames), ...nulPaths(changedNames), ...untracked]),
   ];
+
   return { base, stat, committed, uncommitted, untracked, status, files };
 }
 
@@ -275,10 +315,6 @@ export async function commitAll(dir: string, message: string): Promise<string> {
   }
   await git(dir, ["commit", "-m", message]);
   return git(dir, ["rev-parse", "--short", "HEAD"]);
-}
-
-export async function currentBranch(repo: string): Promise<string> {
-  return git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 
 export interface MergeResult {
@@ -300,18 +336,28 @@ export async function mergeBranch(
   opts: { noFf?: boolean; message?: string } = {},
 ): Promise<MergeResult> {
   await git(repo, ["rev-parse", "--verify", branch]); // throws if missing
+
   const current = await currentBranch(repo);
   if (current !== into) await git(repo, ["checkout", into]);
-  const args = ["merge", ...(opts.noFf === false ? [] : ["--no-ff"]), branch, "-m", opts.message ?? `Merge ${branch} into ${into}`];
+
+  const args = [
+    "merge",
+    ...(opts.noFf === false ? [] : ["--no-ff"]),
+    branch,
+    "-m",
+    opts.message ?? `Merge ${branch} into ${into}`,
+  ];
   const outcome = await gitOutcome(repo, args);
   const output = [outcome.stdout, outcome.stderr, outcome.ok ? "" : outcome.message]
     .filter(Boolean)
     .join("\n")
     .trim();
+
   // `-z` gives literal (unquoted, untrimmed) paths, so filenames containing
   // spaces, Unicode or newlines survive exactly. A git failure here must
   // surface rather than be reported as "no conflicts".
   const conflicts = nulPaths(await gitRaw(repo, ["diff", "--name-only", "--diff-filter=U", "-z"]));
+
   return { ok: outcome.ok, branch, into, conflicts, output };
 }
 

@@ -12,19 +12,26 @@ function log(...args: unknown[]): void {
   console.error("[pi-mcp]", ...args);
 }
 
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+/** Read and JSON-parse a request body, rejecting anything over 32 MiB. */
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    req.on("data", (c: Buffer) => {
-      size += c.length;
+
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
       if (size > 32 * 1024 * 1024) {
         reject(new Error("body too large"));
         req.destroy();
         return;
       }
-      chunks.push(c);
+      chunks.push(chunk);
     });
+
     req.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf8");
       if (!raw) return resolve(undefined);
@@ -34,6 +41,7 @@ function readBody(req: IncomingMessage): Promise<unknown> {
         reject(new Error("invalid JSON body"));
       }
     });
+
     req.on("error", reject);
   });
 }
@@ -44,13 +52,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
+/** Accept either the custom header or a standard bearer token. */
 function authorized(req: IncomingMessage): boolean {
   if (!config.token) return true;
   if (req.headers["x-pi-coord-token"] === config.token) return true;
+
   const auth = req.headers["authorization"];
   if (typeof auth === "string" && auth === `Bearer ${config.token}`) return true;
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// MCP endpoint
+// ---------------------------------------------------------------------------
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: unknown): Promise<void> {
   if (req.method === "GET" || req.method === "DELETE") {
@@ -59,21 +73,29 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
     res.end();
     return;
   }
+
   const server = buildServer(coord);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
+
   res.on("close", () => {
     void transport.close();
     void server.close();
   });
+
   await server.connect(transport);
   await transport.handleRequest(req, res, parsedBody);
 }
 
+// ---------------------------------------------------------------------------
+// Internal API (used by the worker extension and stdio proxy)
+// ---------------------------------------------------------------------------
+
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
+
   let body: any = {};
   try {
     if (req.method === "POST" || req.method === "PATCH") body = (await readBody(req)) ?? {};
@@ -108,7 +130,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
           mode?: LockMode;
           repo?: string;
         };
-        if (!sessionId || !Array.isArray(paths)) return sendJson(res, 400, { error: "sessionId and paths required" });
+        if (!sessionId || !Array.isArray(paths)) {
+          return sendJson(res, 400, { error: "sessionId and paths required" });
+        }
         return sendJson(res, 200, coord.claim(sessionId, paths, mode ?? "rw", repo));
       }
 
@@ -147,7 +171,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 
       case "/internal/board/post": {
         const { board, key, value, from } = body as any;
-        if (!board || !key || value === undefined) return sendJson(res, 400, { error: "board, key, value required" });
+        if (!board || !key || value === undefined) {
+          return sendJson(res, 400, { error: "board, key, value required" });
+        }
         return sendJson(res, 200, coord.boardPost(board, key, String(value), from ?? "unknown"));
       }
 
@@ -159,16 +185,23 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
   }
 }
 
+// ---------------------------------------------------------------------------
+// Request routing
+// ---------------------------------------------------------------------------
+
 const server = createServer((req, res) => {
   let url: URL;
   try {
+    // Fixed base: never trust the Host header.
     url = new URL(req.url ?? "/", "http://localhost");
   } catch {
     return sendJson(res, 400, { error: "invalid request URL" });
   }
+
   if (url.pathname === "/mcp") {
     void (async () => {
       if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
+
       let parsedBody: unknown;
       if (req.method === "POST") {
         try {
@@ -181,6 +214,7 @@ const server = createServer((req, res) => {
           });
         }
       }
+
       try {
         await handleMcp(req, res, parsedBody);
       } catch (e) {
@@ -190,6 +224,7 @@ const server = createServer((req, res) => {
     })();
     return;
   }
+
   if (url.pathname.startsWith("/internal/")) {
     void handleInternal(req, res, url).catch((e) => {
       log("internal error:", e);
@@ -197,8 +232,13 @@ const server = createServer((req, res) => {
     });
     return;
   }
+
   sendJson(res, 404, { error: "not found" });
 });
+
+// ---------------------------------------------------------------------------
+// Startup / shutdown
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   await coord.init();

@@ -1,5 +1,5 @@
 /**
- * pi-coordinator.ts — worker-side thin client for the pi-mcp coordinator daemon.
+ * Worker-side thin client for the pi-mcp coordinator daemon.
  *
  * Loaded only into daemon-spawned pi sessions (via `--extension`). It is inert
  * unless PI_COORD_URL / PI_COORD_SESSION_ID are present in the environment.
@@ -18,6 +18,7 @@ export default function (pi: ExtensionAPI) {
   const base = process.env.PI_COORD_URL;
   const sessionIdEnv = process.env.PI_COORD_SESSION_ID;
   if (!base || !sessionIdEnv) return; // not a coordinated session
+
   const sessionId: string = sessionIdEnv;
   const token = process.env.PI_COORD_TOKEN || "";
 
@@ -32,16 +33,22 @@ export default function (pi: ExtensionAPI) {
     return Number.isFinite(raw) && raw > 0 ? raw : 10_000;
   })();
 
+  // -------------------------------------------------------------------------
+  // Coordinator HTTP client
+  // -------------------------------------------------------------------------
+
   async function call(path: string, body?: unknown, method: "GET" | "POST" = "POST"): Promise<any> {
     const url = new URL(path, base);
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (token) headers["x-pi-coord-token"] = token;
+
     const res = await fetch(url, {
       method,
       headers,
       body: method === "POST" && body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(coordTimeoutMs),
     });
+
     const text = await res.text();
     let parsed: any = undefined;
     try {
@@ -49,14 +56,18 @@ export default function (pi: ExtensionAPI) {
     } catch {
       parsed = { raw: text };
     }
+
     if (!res.ok) throw new Error(`coordinator ${path} -> ${res.status}: ${text}`);
     return parsed;
   }
 
+  /** Convert a possibly-absolute path to worktree-relative form, or undefined if outside. */
   function relInRepo(ctx: ExtensionContext, p: string): string | undefined {
     if (typeof p !== "string" || p.length === 0) return undefined;
+
     const abs = isAbsolute(p) ? p : `${ctx.cwd}/${p}`;
     const rel = relative(ctx.cwd, abs).split("\\").join("/");
+
     // Reject only real parent traversal, not legitimate names like "..notes.txt".
     if (rel === ".." || rel.startsWith("../")) return undefined;
     return rel; // outside the worktree: not ours to lock
@@ -66,7 +77,9 @@ export default function (pi: ExtensionAPI) {
     return { content: [{ type: "text" as const, text }], details: undefined as unknown };
   }
 
-  // --- peer tools -----------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Peer tools
+  // -------------------------------------------------------------------------
 
   pi.registerTool({
     name: "coord_send",
@@ -176,11 +189,11 @@ export default function (pi: ExtensionAPI) {
         return ok(yes ? "yes" : "no");
       }
       if (params.kind === "select" && params.options && params.options.length > 0) {
-        const v = await ctx.ui.select(params.question, params.options.map(String));
-        return ok(v ?? "(cancelled)");
+        const value = await ctx.ui.select(params.question, params.options.map(String));
+        return ok(value ?? "(cancelled)");
       }
-      const v = await ctx.ui.input(title, params.question);
-      return ok(v ?? "(no answer)");
+      const value = await ctx.ui.input(title, params.question);
+      return ok(value ?? "(no answer)");
     },
   });
 
@@ -194,16 +207,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- lock enforcement -----------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Lock enforcement
+  // -------------------------------------------------------------------------
 
+  /** Claim any not-yet-held paths, returning the conflicting holders on failure. */
   async function ensureClaims(rels: string[]): Promise<{ blocked?: string }> {
     const need = rels.filter((r) => !held.has(r));
     if (need.length === 0) return {};
+
     const res = await call("/internal/claim", { sessionId, paths: need, mode: "rw" });
     if (res.ok) {
       for (const r of need) held.add(r);
       return {};
     }
+
     const holders = (res.conflicts ?? []).map((c: any) => `${c.path} @ ${c.sessionId}`).join(", ");
     return {
       blocked: `File is claimed by another worker: ${holders}. Coordinate with coord_send, choose different files, or ask the coordinator to reassign.`,
@@ -212,6 +230,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     let rels: string[] = [];
+
     if (event.toolName === "edit" || event.toolName === "write") {
       const rel = relInRepo(ctx, (event.input as any)?.path);
       if (rel) rels = [rel];
@@ -225,10 +244,12 @@ export default function (pi: ExtensionAPI) {
     } else {
       return undefined;
     }
+
     if (rels.length === 0) return undefined;
+
     try {
-      const r = await ensureClaims([...new Set(rels)]);
-      if (r.blocked) return { block: true, reason: r.blocked };
+      const result = await ensureClaims([...new Set(rels)]);
+      if (result.blocked) return { block: true, reason: result.blocked };
       return undefined;
     } catch {
       // Coordinator unreachable: fail open so a daemon outage doesn't freeze work.
@@ -236,18 +257,23 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // --- mailbox polling ------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Mailbox polling
+  // -------------------------------------------------------------------------
 
   async function pollInbox(): Promise<void> {
     if (pollInFlight) return; // serialize polling: never overlap deliveries
     pollInFlight = true;
+
     try {
       const res = await call(`/internal/inbox?sessionId=${encodeURIComponent(sessionId)}&unread=1`, undefined, "GET");
       const msgs: any[] = res?.messages ?? [];
       if (msgs.length === 0) return;
+
       const text = msgs
         .map((m) => `[coordinator] from ${m.from} (${m.kind}):\n${m.text}`)
         .join("\n\n");
+
       // Inject first, then mark read: at-least-once delivery beats silently
       // dropping a message. Only ack after injection succeeds so a failed
       // delivery is retried instead of being lost.

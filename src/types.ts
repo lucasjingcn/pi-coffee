@@ -1,5 +1,6 @@
-/** Minimal subset of the pi RPC protocol used by the daemon. */
+/** Minimal subset of the pi RPC protocol that the daemon relies on. */
 
+/** JSONL reply to a command sent over the pi RPC stdin pipe. */
 export interface RpcResponse {
   id?: string;
   type: "response";
@@ -36,6 +37,7 @@ export interface PiSessionStats {
   contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 }
 
+/** Any event emitted by a pi session. `type` decides how it is handled. */
 export interface PiEvent {
   type: string;
   [key: string]: any;
@@ -43,6 +45,7 @@ export interface PiEvent {
 
 export type UiMethod = "select" | "confirm" | "input" | "editor" | "notify" | string;
 
+/** A pi extension asking a human to answer. The daemon forwards these to Codex. */
 export interface UiRequest {
   type: "extension_ui_request";
   id: string;
@@ -69,7 +72,7 @@ export type SendMode = "prompt" | "steer" | "followup";
 /** Classification Codex must give a delegated task; design/security must not be delegated. */
 export type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design" | "security";
 
-/** Structured delegation spec: a machine-checkable task contract from the coordinator. */
+/** Structured delegation contract the coordinator hands to a worker. */
 export interface DelegationSpec {
   /** One unambiguous sentence: what must be true when done. */
   goal: string;

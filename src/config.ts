@@ -16,7 +16,7 @@ export interface Config {
   /** Default provider/model for spawned pi sessions. */
   provider: string;
   model: string;
-  /** Stronger model for an explicit manual upgrade (NO automatic escalation). Empty = disabled. */
+  /** Stronger model for an explicit manual upgrade (no automatic escalation). Empty = disabled. */
   strongModel: string;
   /** pi thinking level for workers (off|minimal|low|medium|high|xhigh|max). */
   thinking: string;
@@ -40,14 +40,15 @@ export interface Config {
   deleteBranches: boolean;
 }
 
+/** Empty env vars count as unset so an exported "" doesn't shadow the default. */
 function env(name: string): string | undefined {
-  const v = process.env[name];
-  return v && v.length > 0 ? v : undefined;
+  const value = process.env[name];
+  return value && value.length > 0 ? value : undefined;
 }
 
-/** Strict decimal integer: optional sign then digits only (no whitespace/exponent). */
+/** Strict decimal integer: optional sign then digits (no whitespace/exponent). */
 const INTEGER_RE = /^[+-]?\d+$/;
-/** Strict decimal number: optional sign, digits, optional fraction, no whitespace/exponent. */
+/** Strict decimal number: optional sign, digits, optional fraction (no whitespace/exponent). */
 const NUMBER_RE = /^[+-]?\d+(?:\.\d+)?$/;
 
 function invalid(field: string, key: string, detail: string): never {
@@ -72,8 +73,8 @@ function validateNumber(field: string, key: string, value: number, rules: Number
 }
 
 /**
- * Validate the effective numeric value, treating an explicit override as
- * authoritative so a valid override bypasses a broken corresponding env var.
+ * Resolve a numeric setting, preferring an explicit override over its env var.
+ * That way a valid override still wins when the env var is broken.
  */
 function resolveNumber(
   overrides: Partial<Config>,
@@ -87,16 +88,16 @@ function resolveNumber(
     if (typeof override !== "number") invalid(field, key, `expected ${rules.description}`);
     return validateNumber(field, key, override, rules);
   }
+
   const raw = env(key);
   if (raw === undefined) return fallback;
+
   const pattern = rules.integer ? INTEGER_RE : NUMBER_RE;
   if (!pattern.test(raw)) invalid(field, key, `expected ${rules.description}`);
   return validateNumber(field, key, Number(raw), rules);
 }
 
-/**
- * Boolean env vars accept only "0"/"1"; overrides must be real booleans.
- */
+/** Boolean env vars accept only "0"/"1"; overrides must be real booleans. */
 function resolveBoolean(
   overrides: Partial<Config>,
   field: "autoClean" | "deleteBranches",
@@ -108,6 +109,7 @@ function resolveBoolean(
     if (typeof override !== "boolean") invalid(field, key, "expected a boolean");
     return override;
   }
+
   const raw = env(key);
   if (raw === undefined) return fallback;
   if (raw === "0") return false;
@@ -116,11 +118,15 @@ function resolveBoolean(
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
+  // dataDir is resolved first because workspaceRoot defaults to a subdirectory of it.
   const dataDir =
     overrides.dataDir !== undefined
       ? overrides.dataDir
       : env("PI_MCP_DATA_DIR") ?? join(homedir(), ".pi-mcp");
-  const here = dirname(fileURLToPath(import.meta.url)); // dist/ or src/ at runtime
+
+  // dist/ or src/ at runtime; the worker extension ships next to the compiled output.
+  const here = dirname(fileURLToPath(import.meta.url));
+
   const base: Config = {
     host: env("PI_MCP_HOST") ?? "127.0.0.1",
     port: resolveNumber(overrides, "port", "PI_MCP_PORT", 8787, {
@@ -168,5 +174,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_MCP_DELETE_BRANCHES", false),
   };
-  return { ...base, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) };
+
+  // Apply caller overrides last; undefined means "keep the default".
+  const defined = Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined));
+  return { ...base, ...defined };
 }

@@ -15,19 +15,25 @@ export interface PiRpcClientOptions {
   env?: Record<string, string>;
 }
 
+interface PendingCommand {
+  resolve: (r: RpcResponse) => void;
+  reject: (e: Error) => void;
+}
+
 /**
  * Long-lived `pi --mode rpc` child controlled via JSONL on stdin/stdout.
  *
- * We deliberately do NOT reuse pi's internal RpcClient: spawning the `pi`
- * binary keeps us decoupled from pi's on-disk package layout (which `pi update`
+ * We deliberately do NOT reuse pi's internal RpcClient: spawning the `pi` binary
+ * keeps us decoupled from pi's on-disk package layout (which `pi update`
  * rewrites) and from internal module paths.
  */
 export class PiRpcClient extends EventEmitter {
   readonly opts: PiRpcClientOptions;
+
   private proc: ChildProcessWithoutNullStreams | null = null;
   private stdoutBuf = Buffer.alloc(0);
   private seq = 0;
-  private pending = new Map<string, { resolve: (r: RpcResponse) => void; reject: (e: Error) => void }>();
+  private pending = new Map<string, PendingCommand>();
   private waiters = new Set<{ reject: (e: Error) => void }>();
   private stderr = "";
   private disposed = false;
@@ -56,9 +62,14 @@ export class PiRpcClient extends EventEmitter {
     return this.stderr;
   }
 
+  // -------------------------------------------------------------------------
+  // Lifecycle
+  // -------------------------------------------------------------------------
+
   async start(): Promise<void> {
     if (this.disposed) throw new Error("pi rpc client has been disposed");
     if (this.proc) throw new Error("pi rpc client already started");
+
     const args = ["--mode", "rpc"];
     if (this.opts.name) args.push("--name", this.opts.name);
     if (this.opts.provider) args.push("--provider", this.opts.provider);
@@ -80,12 +91,13 @@ export class PiRpcClient extends EventEmitter {
       this.stderr += chunk.toString("utf8");
       if (this.stderr.length > 200_000) this.stderr = this.stderr.slice(-200_000);
     });
+    proc.stderr.on("error", () => {});
+
     // A broken pipe on stdin/stdout is terminal: outstanding work can never be
     // completed, so reject it and notify exit consumers instead of swallowing
     // the error. stderr is diagnostics-only, so a failure there is not fatal.
     proc.stdin.on("error", (err: Error) => this.terminate(err));
     proc.stdout.on("error", (err: Error) => this.terminate(err));
-    proc.stderr.on("error", () => {});
     proc.on("error", (err) => {
       // A spawn/pipe error is terminal: the child will not accept work.
       this.terminate(err);
@@ -112,54 +124,101 @@ export class PiRpcClient extends EventEmitter {
     throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")}`);
   }
 
+  async stop(): Promise<void> {
+    this.disposed = true;
+    const proc = this.proc;
+
+    // Reject any outstanding work immediately, even before the child exits.
+    this.failAll(new Error("pi rpc stopped"));
+    if (!proc || this.exited) return;
+
+    try {
+      proc.stdin.end();
+    } catch {
+      /* ignore */
+    }
+
+    await new Promise<void>((resolve) => {
+      if (this.exited) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        resolve();
+      }, 5000);
+      proc.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Output parsing and dispatch
+  // -------------------------------------------------------------------------
+
   private onStdout(chunk: Buffer): void {
     this.stdoutBuf = Buffer.concat([this.stdoutBuf, chunk]);
     // Split strictly on LF; U+2028/U+2029 are valid inside JSON strings.
     for (;;) {
       const nl = this.stdoutBuf.indexOf(0x0a);
       if (nl === -1) break;
+
       let line = this.stdoutBuf.subarray(0, nl);
       this.stdoutBuf = this.stdoutBuf.subarray(nl + 1);
       if (line.length > 0 && line[line.length - 1] === 0x0d) line = line.subarray(0, line.length - 1);
       if (line.length === 0) continue;
-      let rec: any;
+
+      let record: any;
       try {
-        rec = JSON.parse(line.toString("utf8"));
+        record = JSON.parse(line.toString("utf8"));
       } catch {
         continue; // ignore non-JSON noise defensively
       }
-      this.dispatch(rec);
+      this.dispatch(record);
     }
   }
 
-  private dispatch(rec: any): void {
+  private dispatch(record: any): void {
     // UI request sub-protocol
-    if (rec?.type === "extension_ui_request") {
-      this.emit("ui_request", rec as UiRequest);
+    if (record?.type === "extension_ui_request") {
+      this.emit("ui_request", record as UiRequest);
       return;
     }
+
     // Command response
-    if (rec?.type === "response") {
-      const r = rec as RpcResponse;
-      if (r.id && this.pending.has(r.id)) {
-        const p = this.pending.get(r.id)!;
-        this.pending.delete(r.id);
-        p.resolve(r);
+    if (record?.type === "response") {
+      const response = record as RpcResponse;
+      if (response.id && this.pending.has(response.id)) {
+        const pending = this.pending.get(response.id)!;
+        this.pending.delete(response.id);
+        pending.resolve(response);
       }
-      this.emit("response", r);
+      this.emit("response", response);
       return;
     }
+
     // Session event
-    const ev = rec as PiEvent;
-    if (ev.type === "agent_start") this.streaming = true;
-    if (ev.type === "agent_settled") this.streaming = false;
-    this.emit("event", ev);
+    const event = record as PiEvent;
+    if (event.type === "agent_start") this.streaming = true;
+    if (event.type === "agent_settled") this.streaming = false;
+    this.emit("event", event);
   }
+
+  // -------------------------------------------------------------------------
+  // Failure handling
+  // -------------------------------------------------------------------------
 
   private failAll(err: Error): void {
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const p of pending) p.reject(err);
+
     this.streaming = false;
     this.rejectWaiters(err);
   }
@@ -171,8 +230,10 @@ export class PiRpcClient extends EventEmitter {
   private terminate(err: Error, code: number | null = null, signal: NodeJS.Signals | null = null): void {
     if (this.exited) return;
     this.exited = true;
+
     // A pipe failure is terminal for RPC even if the child is still alive.
     if (this.proc?.exitCode === null && this.proc.signalCode === null) this.proc.kill("SIGKILL");
+
     this.failAll(err);
     this.emit("exit", { code, signal });
   }
@@ -180,29 +241,36 @@ export class PiRpcClient extends EventEmitter {
   private rejectWaiters(err: Error): void {
     const waiters = [...this.waiters];
     this.waiters.clear();
-    for (const w of waiters) w.reject(err);
+    for (const waiter of waiters) waiter.reject(err);
   }
+
+  // -------------------------------------------------------------------------
+  // Commands and events
+  // -------------------------------------------------------------------------
 
   /** Send a raw command and await the correlated response. */
   command<T = any>(cmd: Record<string, any>, timeoutMs = 120_000): Promise<RpcResponse & { data: T }> {
     if (!this.proc || this.disposed || this.exited) return Promise.reject(new Error("pi rpc not running"));
+
     const id = cmd.id ?? `c${++this.seq}`;
     // Never let a duplicate id overwrite (and thereby orphan) an in-flight command.
     if (this.pending.has(id)) {
       return Promise.reject(new Error(`duplicate in-flight command id '${id}'`));
     }
+
     const payload = { ...cmd, id };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`command '${cmd.type}' timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      const entry = {
-        resolve: (r: RpcResponse) => {
+
+      const entry: PendingCommand = {
+        resolve: (response: RpcResponse) => {
           clearTimeout(timer);
           this.pending.delete(id);
-          if (!r.success) reject(new Error(r.error || `command '${cmd.type}' failed`));
-          else resolve(r as any);
+          if (!response.success) reject(new Error(response.error || `command '${cmd.type}' failed`));
+          else resolve(response as any);
         },
         reject: (e: Error) => {
           clearTimeout(timer);
@@ -211,6 +279,7 @@ export class PiRpcClient extends EventEmitter {
         },
       };
       this.pending.set(id, entry);
+
       try {
         this.proc!.stdin.write(JSON.stringify(payload) + "\n", (err) => {
           if (err) entry.reject(err);
@@ -221,10 +290,10 @@ export class PiRpcClient extends EventEmitter {
     });
   }
 
-  private write(rec: Record<string, any>): void {
+  private write(record: Record<string, any>): void {
     if (!this.proc || this.disposed || this.exited) return;
     try {
-      this.proc.stdin.write(JSON.stringify(rec) + "\n");
+      this.proc.stdin.write(JSON.stringify(record) + "\n");
     } catch (e) {
       this.terminate(e as Error);
     }
@@ -233,6 +302,7 @@ export class PiRpcClient extends EventEmitter {
   /** Resolve when an event of `type` arrives. */
   waitForEvent(type: string, timeoutMs = 120_000): Promise<PiEvent> {
     if (!this.proc || this.disposed || this.exited) return Promise.reject(new Error("pi rpc not running"));
+
     return new Promise((resolve, reject) => {
       let done = false;
       const cleanup = () => {
@@ -240,18 +310,21 @@ export class PiRpcClient extends EventEmitter {
         this.off("event", onEvent);
         this.waiters.delete(waiter);
       };
+
       const timer = setTimeout(() => {
         if (done) return;
         done = true;
         cleanup();
         reject(new Error(`timed out waiting for event '${type}'`));
       }, timeoutMs);
-      const onEvent = (ev: PiEvent) => {
-        if (done || ev.type !== type) return;
+
+      const onEvent = (event: PiEvent) => {
+        if (done || event.type !== type) return;
         done = true;
         cleanup();
-        resolve(ev);
+        resolve(event);
       };
+
       const waiter = {
         reject: (e: Error) => {
           if (done) return;
@@ -260,12 +333,15 @@ export class PiRpcClient extends EventEmitter {
           reject(e);
         },
       };
+
       this.waiters.add(waiter);
       this.on("event", onEvent);
     });
   }
 
-  // --- typed commands -------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Typed commands
+  // -------------------------------------------------------------------------
 
   prompt(message: string, streamingBehavior?: "steer" | "followUp"): Promise<RpcResponse> {
     return this.command({ type: "prompt", message, ...(streamingBehavior ? { streamingBehavior } : {}) }, 60_000);
@@ -314,7 +390,7 @@ export class PiRpcClient extends EventEmitter {
    * Wait until the agent is idle. Resolves immediately if already idle.
    *
    * The `agent_settled` listener is installed *before* probing authoritative
-   * state so an event that lands while `get_state` is in flight is never lost.
+   * state, so an event that lands while `get_state` is in flight is never lost.
    * The listener, timer and waiter entry are always torn down, including when
    * state already reports idle.
    */
@@ -325,24 +401,27 @@ export class PiRpcClient extends EventEmitter {
     let timer: NodeJS.Timeout | undefined;
     let resolveSettled!: () => void;
     let rejectSettled!: (e: Error) => void;
-    const settledPromise = new Promise<void>((resolve, reject) => {
+
+    const settled = new Promise<void>((resolve, reject) => {
       resolveSettled = resolve;
       rejectSettled = reject;
     });
     // The state probe may still be awaiting a response when termination rejects this wait.
-    void settledPromise.catch(() => {});
+    void settled.catch(() => {});
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       this.off("event", onEvent);
       this.waiters.delete(waiter);
     };
-    const onEvent = (ev: PiEvent) => {
-      if (finished || ev.type !== "agent_settled") return;
+
+    const onEvent = (event: PiEvent) => {
+      if (finished || event.type !== "agent_settled") return;
       finished = true;
       cleanup();
       resolveSettled();
     };
+
     const waiter = {
       reject: (e: Error) => {
         if (finished) return;
@@ -365,9 +444,10 @@ export class PiRpcClient extends EventEmitter {
         } catch {
           state = null;
         }
+
         if (finished) {
           // Settled (or terminated) while the probe was in flight.
-          await settledPromise;
+          await settled;
           return;
         }
         if (!this.exited && !this.disposed && state && !state.isStreaming) {
@@ -377,6 +457,7 @@ export class PiRpcClient extends EventEmitter {
           return;
         }
       }
+
       // Arm the timeout only once we are actually waiting for the event; the
       // probe has its own command timeout.
       timer = setTimeout(() => {
@@ -385,7 +466,8 @@ export class PiRpcClient extends EventEmitter {
         cleanup();
         rejectSettled(new Error(`timed out waiting for event 'agent_settled'`));
       }, timeoutMs);
-      await settledPromise;
+
+      await settled;
     } finally {
       if (!finished) {
         finished = true;
@@ -397,39 +479,8 @@ export class PiRpcClient extends EventEmitter {
   respondUi(response: UiResponse): void {
     this.write(response);
   }
-
-  async stop(): Promise<void> {
-    this.disposed = true;
-    const proc = this.proc;
-    // Reject any outstanding work immediately, even before the child exits.
-    this.failAll(new Error("pi rpc stopped"));
-    if (!proc || this.exited) return;
-    try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
-    }
-    await new Promise<void>((resolve) => {
-      if (this.exited) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          /* ignore */
-        }
-        resolve();
-      }, 5000);
-      proc.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  }
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

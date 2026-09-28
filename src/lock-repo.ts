@@ -1,14 +1,17 @@
+/**
+ * Git repository identity, used to namespace file locks.
+ *
+ * The daemon may run as a different Unix user than the repo owner (e.g. daemon as
+ * root, repo owned by the Codex user), which makes git refuse with "dubious
+ * ownership". We disable that check for the daemon's own git subprocesses only,
+ * via environment config, so it never touches the user's global git config.
+ */
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 
-/** Upper bound for the synchronous Git identity lookup so a hung git can never wedge a claim. */
+/** Cap the synchronous Git identity lookup so a hung git can't wedge a claim. */
 const GIT_IDENTITY_TIMEOUT_MS = 10_000;
 
-/**
- * The daemon may run as a different Unix user than the repository owner (e.g. daemon as root,
- * repo owned by the Codex user), which makes git refuse with "dubious ownership". Disable that
- * check for the daemon's own git subprocesses only, via environment config (scoped, not global).
- */
 function gitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -19,9 +22,8 @@ function gitEnv(): NodeJS.ProcessEnv {
 }
 
 /**
- * Remove exactly one trailing line-ending (LF or CRLF), preserving every other character in the
- * path. Git paths may legitimately contain or end in whitespace or newlines, so `.trim()` is not
- * safe here.
+ * Strip exactly one trailing line ending (LF or CRLF). Git paths may legitimately
+ * contain or end in whitespace/newlines, so `.trim()` would corrupt them.
  */
 function stripOneLineEnding(s: string): string {
   if (s.endsWith("\r\n")) return s.slice(0, -2);
@@ -37,16 +39,16 @@ function errorDetail(error: any): string {
 }
 
 /**
- * Canonical repository identity for lock namespacing: the realpath of the absolute Git
- * `--git-common-dir`. Symlinks, subdirectories and linked worktrees of the same repository all
- * resolve to the same identity; separate repositories never share one even when they contain the
- * same filenames.
+ * Canonical identity of a repository: the realpath of its absolute Git
+ * `--git-common-dir`. Symlinks, subdirectories and linked worktrees of the same
+ * repo all resolve to the same identity; separate repos never share one.
  *
- * Synchronous on purpose: scope/acceptance/manual claims must resolve the namespace before
- * reserving any lock, and `Coordinator.claim` is a synchronous API.
+ * Synchronous on purpose: scope/acceptance/manual claims must resolve the
+ * namespace before reserving a lock, and `Coordinator.claim` is synchronous.
  *
- * Failure is fatal: if the common dir cannot be resolved or canonicalized, this throws instead of
- * falling back to a noncanonical path, so no lock is ever reserved under an unreliable identity.
+ * Failure is fatal. If the common dir can't be resolved or canonicalized we throw
+ * rather than fall back to a non-canonical path, so no lock is ever reserved under
+ * an unreliable identity.
  */
 export function resolveRepoIdentity(repo: string): string {
   let commonDir: string;
@@ -64,8 +66,10 @@ export function resolveRepoIdentity(repo: string): string {
   } catch (error: any) {
     throw new Error(`cannot resolve git common dir for ${repo}: ${errorDetail(error)}`);
   }
+
   const absolute = stripOneLineEnding(commonDir);
   if (!absolute) throw new Error(`cannot resolve git common dir for ${repo}`);
+
   try {
     return realpathSync(absolute);
   } catch (error: any) {

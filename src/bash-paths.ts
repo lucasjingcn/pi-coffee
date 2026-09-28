@@ -1,6 +1,6 @@
 /**
- * bash-paths.ts — best-effort extraction of literal file paths a bash command
- * will write to (redirections, `tee`, and `sed -i`).
+ * Best-effort extraction of the literal file paths a bash command will write to
+ * (redirections, `tee`, and `sed -i`).
  *
  * This is deliberately NOT a shell interpreter. It is a small quote-, comment-
  * and heredoc-aware lexical scanner: it understands just enough shell syntax to
@@ -18,13 +18,17 @@ const OP_CHARS = new Set([">", "<", "&", "|", ";", "(", ")"]);
 const SEPARATORS = new Set(["|", "||", "&&", ";", ";;", ";&", "&", "\n", "(", ")"]);
 const REDIRECT_OPS = new Set([">", ">>", ">|", "&>", "&>>", ">&", "<&", "<", "<>", "<<<", "<<", "<<-"]);
 
-/** Skip a single-quoted span starting at `start` (the opening quote). */
+// ---------------------------------------------------------------------------
+// Skipping quoted / nested spans
+// ---------------------------------------------------------------------------
+
+/** Skip a single-quoted span; `start` points at the opening quote. */
 function skipSingle(s: string, start: number): number {
   const end = s.indexOf("'", start + 1);
   return end === -1 ? s.length : end + 1;
 }
 
-/** Skip a double-quoted span starting at `start` (the opening quote). */
+/** Skip a double-quoted span; `start` points at the opening quote. */
 function skipDouble(s: string, start: number): number {
   const n = s.length;
   let i = start + 1;
@@ -75,6 +79,27 @@ function skipBalancedParens(s: string, start: number): number {
   return n;
 }
 
+/** Advance past a heredoc body, stopping after the delimiter line. */
+function skipHeredocBody(s: string, start: number, delim: string, stripTabs: boolean): number {
+  const n = s.length;
+  let i = start;
+  while (i <= n) {
+    const nl = s.indexOf("\n", i);
+    const lineEnd = nl === -1 ? n : nl;
+    let line = s.slice(i, lineEnd);
+    if (stripTabs) line = line.replace(/^\t+/, "");
+    if (line === delim) return nl === -1 ? n : nl + 1;
+    if (nl === -1) return n;
+    i = nl + 1;
+  }
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer
+// ---------------------------------------------------------------------------
+
+/** Recognize the shell operator starting at `i`, if any. */
 function matchOperator(s: string, i: number): string | undefined {
   const c = s[i];
   const c2 = s[i + 1] ?? "";
@@ -108,15 +133,17 @@ function matchOperator(s: string, i: number): string | undefined {
   }
 }
 
-/** Read a shell word (quote removal + backslash unescaping) starting at `start`. */
+/** Read a shell word starting at `start`, doing quote removal and unescaping. */
 function readWord(s: string, start: number): { value: string; end: number; quoted: boolean } {
   const n = s.length;
   let i = start;
   let value = "";
   let quoted = false;
+
   while (i < n) {
     const c = s[i];
     if (c === " " || c === "\t" || c === "\n") break;
+
     if (c === "'") {
       quoted = true;
       const end = s.indexOf("'", i + 1);
@@ -129,6 +156,7 @@ function readWord(s: string, start: number): { value: string; end: number; quote
       }
       continue;
     }
+
     if (c === '"') {
       quoted = true;
       i++;
@@ -151,6 +179,7 @@ function readWord(s: string, start: number): { value: string; end: number; quote
       if (i < n) i++;
       continue;
     }
+
     if (c === "\\") {
       quoted = true;
       if (i + 1 < n) {
@@ -161,6 +190,7 @@ function readWord(s: string, start: number): { value: string; end: number; quote
       }
       continue;
     }
+
     if (c === "$") {
       quoted = true;
       if (s[i + 1] === "(") {
@@ -180,53 +210,43 @@ function readWord(s: string, start: number): { value: string; end: number; quote
       i++;
       continue;
     }
+
     if (OP_CHARS.has(c)) break;
     value += c;
     i++;
   }
-  return { value, end: i, quoted };
-}
 
-/** Advance past a heredoc body ending at the delimiter line. */
-function skipHeredocBody(s: string, start: number, delim: string, stripTabs: boolean): number {
-  const n = s.length;
-  let i = start;
-  while (i <= n) {
-    const nl = s.indexOf("\n", i);
-    const lineEnd = nl === -1 ? n : nl;
-    let line = s.slice(i, lineEnd);
-    if (stripTabs) line = line.replace(/^\t+/, "");
-    if (line === delim) return nl === -1 ? n : nl + 1;
-    if (nl === -1) return n;
-    i = nl + 1;
-  }
-  return n;
+  return { value, end: i, quoted };
 }
 
 function tokenize(cmd: string): Token[] {
   const tokens: Token[] = [];
   const n = cmd.length;
   let i = 0;
-  const pending: { delim: string; stripTabs: boolean }[] = [];
+  const pendingHeredocs: { delim: string; stripTabs: boolean }[] = [];
 
   while (i < n) {
     const c = cmd[i];
+
     if (c === " " || c === "\t" || c === "\r") {
       i++;
       continue;
     }
+
     if (c === "\n") {
       tokens.push({ kind: "op", value: "\n" });
       i++;
-      for (const h of pending) i = skipHeredocBody(cmd, i, h.delim, h.stripTabs);
-      pending.length = 0;
+      for (const heredoc of pendingHeredocs) i = skipHeredocBody(cmd, i, heredoc.delim, heredoc.stripTabs);
+      pendingHeredocs.length = 0;
       continue;
     }
+
     if (c === "#") {
       // A '#' at the start of a word begins a comment to end of line.
       while (i < n && cmd[i] !== "\n") i++;
       continue;
     }
+
     if (c === "<" && cmd[i + 1] === "<") {
       if (cmd[i + 2] === "<") {
         // here-string `<<<`: not a heredoc, no body to skip
@@ -240,59 +260,73 @@ function tokenize(cmd: string): Token[] {
       while (i < n && (cmd[i] === " " || cmd[i] === "\t")) i++;
       const delim = readWord(cmd, i);
       i = delim.end;
-      pending.push({ delim: delim.value, stripTabs });
+      pendingHeredocs.push({ delim: delim.value, stripTabs });
       continue;
     }
+
     if ((c === ">" || c === "<") && cmd[i + 1] === "(") {
       // process substitution: not a filename
       i = skipBalancedParens(cmd, i + 1);
       continue;
     }
+
     const op = matchOperator(cmd, i);
     if (op) {
       tokens.push({ kind: "op", value: op });
       i += op.length;
       continue;
     }
-    const w = readWord(cmd, i);
-    i = w.end;
+
+    const word = readWord(cmd, i);
+    i = word.end;
     const kind: Token["kind"] =
-      !w.quoted && /^[0-9]+$/.test(w.value) && i < n && (cmd[i] === ">" || cmd[i] === "<") ? "io" : "word";
-    tokens.push({ kind, value: w.value });
+      !word.quoted && /^[0-9]+$/.test(word.value) && i < n && (cmd[i] === ">" || cmd[i] === "<")
+        ? "io"
+        : "word";
+    tokens.push({ kind, value: word.value });
   }
+
   return tokens;
 }
+
+// ---------------------------------------------------------------------------
+// Command-specific operand parsers
+// ---------------------------------------------------------------------------
 
 type Adder = (raw?: string) => void;
 
 /**
- * Consume a redirection operator (and its target word when present), adding
- * the target only when it is an output filename. Returns the index of the last
- * consumed token so callers continue just after it.
+ * Consume a redirection operator (and its target word when present), adding the
+ * target only when it is an output filename. Returns the index of the last
+ * consumed token.
  */
 function processRedirect(tokens: Token[], i: number, add: Adder): number {
-  const v = tokens[i].value;
+  const op = tokens[i].value;
   const next = tokens[i + 1];
-  if (v === ">" || v === ">>" || v === ">|" || v === "&>" || v === "&>>") {
+
+  if (op === ">" || op === ">>" || op === ">|" || op === "&>" || op === "&>>") {
     if (next && next.kind === "word") {
       add(next.value);
       return i + 1;
     }
     return i;
   }
-  if (v === ">&" || v === "<&") {
+
+  if (op === ">&" || op === "<&") {
     if (next && next.kind === "word") {
       // fd duplication (`2>&1`, `>&-`) is not a path
-      if (v === ">&" && !/^[0-9]*-?$/.test(next.value)) add(next.value);
+      if (op === ">&" && !/^[0-9]*-?$/.test(next.value)) add(next.value);
       return i + 1;
     }
     return i;
   }
+
   // Input targets (plain `<`, `<>`, here-string `<<<`) are not write targets.
-  if (v === "<" || v === "<>" || v === "<<<") {
+  if (op === "<" || op === "<>" || op === "<<<") {
     if (next && next.kind === "word") return i + 1;
     return i;
   }
+
   // Heredocs (`<<`, `<<-`) have no target word token; their body was already
   // skipped during tokenization.
   return i;
@@ -302,46 +336,53 @@ function processRedirect(tokens: Token[], i: number, add: Adder): number {
 function parseTee(tokens: Token[], start: number, add: Adder): number {
   let i = start;
   let endOfOptions = false;
+
   for (; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.kind === "io") continue; // fd number preceding a redirection
-    if (t.kind === "op") {
-      if (SEPARATORS.has(t.value)) return i - 1;
-      if (REDIRECT_OPS.has(t.value)) {
+    const token = tokens[i];
+    if (token.kind === "io") continue; // fd number preceding a redirection
+
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return i - 1;
+      if (REDIRECT_OPS.has(token.value)) {
         i = processRedirect(tokens, i, add);
         continue;
       }
       return i - 1;
     }
-    const v = t.value;
+
+    const value = token.value;
     if (!endOfOptions) {
-      if (v === "--") {
+      if (value === "--") {
         endOfOptions = true;
         continue;
       }
-      if (v.startsWith("-") && v !== "-") continue;
+      if (value.startsWith("-") && value !== "-") continue;
     }
-    add(v);
+    add(value);
   }
+
   return i - 1;
 }
 
-function parseSedShort(v: string): { inPlace: boolean; hasScript: boolean; consumesNext: boolean } {
+/** Decode a short `sed` flag cluster like `-i`, `-ne` or `-i.bak`. */
+function parseSedShort(flag: string): { inPlace: boolean; hasScript: boolean; consumesNext: boolean } {
   let inPlace = false;
   let hasScript = false;
   let consumesNext = false;
-  for (let k = 1; k < v.length; k++) {
-    const ch = v[k];
+
+  for (let k = 1; k < flag.length; k++) {
+    const ch = flag[k];
     if (ch === "i") {
       inPlace = true;
       break; // any trailing characters are the in-place backup suffix
     }
     if (ch === "e" || ch === "f") {
       hasScript = true;
-      consumesNext = k === v.length - 1; // attached argument otherwise
+      consumesNext = k === flag.length - 1; // attached argument otherwise
       break;
     }
   }
+
   return { inPlace, hasScript, consumesNext };
 }
 
@@ -351,46 +392,51 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
   let hasScript = false;
   let inPlace = false;
   let endOfOptions = false;
+
   for (; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.kind === "io") continue;
-    if (t.kind === "op") {
-      if (SEPARATORS.has(t.value)) return i - 1;
-      if (REDIRECT_OPS.has(t.value)) {
+    const token = tokens[i];
+    if (token.kind === "io") continue;
+
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return i - 1;
+      if (REDIRECT_OPS.has(token.value)) {
         i = processRedirect(tokens, i, add);
         continue;
       }
       return i - 1;
     }
-    const v = t.value;
 
-    if (!endOfOptions && v === "--") {
+    const value = token.value;
+
+    if (!endOfOptions && value === "--") {
       endOfOptions = true;
       continue;
     }
-    if (!endOfOptions && v.startsWith("--")) {
-      if (v === "--in-place" || v.startsWith("--in-place=")) {
+
+    if (!endOfOptions && value.startsWith("--")) {
+      if (value === "--in-place" || value.startsWith("--in-place=")) {
         inPlace = true;
         continue;
       }
-      if (v === "--expression" || v === "--file") {
+      if (value === "--expression" || value === "--file") {
         hasScript = true;
         i++; // consume the script operand
         continue;
       }
-      if (v.startsWith("--expression=") || v.startsWith("--file=")) {
+      if (value.startsWith("--expression=") || value.startsWith("--file=")) {
         hasScript = true;
         continue;
       }
       continue;
     }
-    if (!endOfOptions && v.startsWith("-") && v !== "-") {
-      const r = parseSedShort(v);
-      if (r.inPlace) inPlace = true;
-      if (r.hasScript) hasScript = true;
-      if (r.consumesNext) i++;
+
+    if (!endOfOptions && value.startsWith("-") && value !== "-") {
+      const parsed = parseSedShort(value);
+      if (parsed.inPlace) inPlace = true;
+      if (parsed.hasScript) hasScript = true;
+      if (parsed.consumesNext) i++;
       // macOS/BSD `sed -i ''`: a separate empty argument is the backup suffix.
-      if (r.inPlace && v === "-i") {
+      if (parsed.inPlace && value === "-i") {
         const next = tokens[i + 1];
         if (next && next.kind === "word" && next.value === "") i++;
       }
@@ -399,10 +445,15 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
 
     // Operand: the first one is the script unless -e/-f supplied it.
     if (!hasScript) hasScript = true;
-    else if (inPlace) add(v);
+    else if (inPlace) add(value);
   }
+
   return i - 1;
 }
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 /**
  * Extract repo paths a bash command is expected to write. Only literal targets
@@ -411,6 +462,7 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
 export function bashPaths(cmd: string): string[] {
   const tokens = tokenize(cmd);
   const out = new Set<string>();
+
   const add: Adder = (raw) => {
     if (!raw) return;
     if (raw === "-" || raw.startsWith("-") || raw.startsWith("&")) return;
@@ -420,33 +472,34 @@ export function bashPaths(cmd: string): string[] {
 
   let expectCommand = true;
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.kind === "io") continue; // fd number: never consumes command position
-    if (t.kind === "op") {
-      const v = t.value;
-      if (REDIRECT_OPS.has(v)) {
+    const token = tokens[i];
+    if (token.kind === "io") continue; // fd number: never consumes command position
+
+    if (token.kind === "op") {
+      const op = token.value;
+      if (REDIRECT_OPS.has(op)) {
         i = processRedirect(tokens, i, add); // redirections never consume command position
         continue;
       }
-      if (SEPARATORS.has(v)) {
+      if (SEPARATORS.has(op)) {
         expectCommand = true;
         continue;
       }
       continue;
     }
 
-    // word
     if (expectCommand) {
       expectCommand = false;
-      if (t.value === "tee") {
+      if (token.value === "tee") {
         i = parseTee(tokens, i + 1, add);
         continue;
       }
-      if (t.value === "sed") {
+      if (token.value === "sed") {
         i = parseSed(tokens, i + 1, add);
         continue;
       }
     }
   }
+
   return [...out];
 }
