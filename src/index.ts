@@ -74,7 +74,12 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
 
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
-  const body = req.method === "POST" || req.method === "PATCH" ? ((await readBody(req)) as any) ?? {} : {};
+  let body: any = {};
+  try {
+    if (req.method === "POST" || req.method === "PATCH") body = (await readBody(req)) ?? {};
+  } catch (error) {
+    return sendJson(res, 400, { error: String(error instanceof Error ? error.message : error) });
+  }
 
   try {
     switch (url.pathname) {
@@ -150,9 +155,15 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 }
 
 const server = createServer((req, res) => {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  let url: URL;
+  try {
+    url = new URL(req.url ?? "/", "http://localhost");
+  } catch {
+    return sendJson(res, 400, { error: "invalid request URL" });
+  }
   if (url.pathname === "/mcp") {
     void (async () => {
+      if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
       let parsedBody: unknown;
       if (req.method === "POST") {
         try {
@@ -165,7 +176,6 @@ const server = createServer((req, res) => {
           });
         }
       }
-      if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
       try {
         await handleMcp(req, res, parsedBody);
       } catch (e) {

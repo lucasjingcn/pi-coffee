@@ -169,6 +169,8 @@ export class PiRpcClient extends EventEmitter {
   private terminate(err: Error, code: number | null = null, signal: NodeJS.Signals | null = null): void {
     if (this.exited) return;
     this.exited = true;
+    // A pipe failure is terminal for RPC even if the child is still alive.
+    if (this.proc?.exitCode === null && this.proc.signalCode === null) this.proc.kill("SIGKILL");
     this.failAll(err);
     this.emit("exit", { code, signal });
   }
@@ -325,6 +327,8 @@ export class PiRpcClient extends EventEmitter {
       resolveSettled = resolve;
       rejectSettled = reject;
     });
+    // The state probe may still be awaiting a response when termination rejects this wait.
+    void settledPromise.catch(() => {});
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);

@@ -121,12 +121,14 @@ test('waitForSettled timeout tears down listener/timer/waiter', async () => {
 
 test('stdin error rejects pending commands and notifies exit consumers', {timeout: 8000}, async () => {
   await withFake(async (c) => {
+    const childClosed = new Promise((resolve) => c.proc.once('close', resolve));
     const exited = new Promise((resolve) => c.once('exit', resolve));
     const pending = c.command({type: 'ignored'}, 5000);
     c.proc.stdin.emit('error', new Error('EPIPE'));
     await assert.rejects(bound(pending, 500), /EPIPE/);
     await bound(exited, 500);
     assert.equal(c.hasExited, true);
+    await bound(childClosed, 1000);
   });
 });
 
