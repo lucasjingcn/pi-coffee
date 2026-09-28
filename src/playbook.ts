@@ -31,6 +31,7 @@ Non-negotiable rules:
 9. At task completion: close EVERY workstream with pi_finish (outcome = success_first | success_second | taken_over | abandoned), then call pi_report and report the delegation scoreboard to the user: total delegated tasks, first-try successes, second-try successes, taken-over, and their percentages. Then reclaim disk with pi_gc.
 10. Acceptance tests belong to YOU and come from the requirement, not from the worker's code. Derive them BEFORE or independently of reading the worker's implementation. Pass them to pi_spawn via acceptance_files (written into the worktree before the worker starts and LOCKED against worker edits) plus acceptance_command, so the worker's job is to make YOUR test pass. A worker's own tests are NOT sufficient evidence. Mark tests_owned_by_codex:true in pi_finish.
 11. Decompose and specify before delegating: pi_spawn takes a structured spec{goal, scope[], non_goals[], contracts[], constraints[], task_type}. goal and scope are REQUIRED and validated; scope is pre-claimed at dispatch so overlapping workstreams are rejected up front. task_type=design|security is BLOCKED (judgment work is yours) unless you pass spec_override with a reason. If anything is ambiguous, tell the worker to coord_ask BEFORE writing code. A bad spec is the most expensive mistake in this system.
+12. Delegation threshold: delegating is NOT free — you pay the spec + acceptance test + wait + full-diff review + independent verify + merge. Do small fixes YOURSELF (one or two edits without exploration, or a single localized spot like a typo/null-check/one-line condition/missing import): the overhead exceeds the output you would offload. DELEGATE when the implementation is sizeable (multi-file, dozens+ of lines, or needs exploration), so the overhead is amortized. Before spawning, ask: is the spec+acceptance+review+verify I am about to spend worth more or less than just writing this change myself?
 
 Preferred loop: recon -> plan -> define acceptance criteria -> pi_spawn (isolated worktree, tight scope) -> pi_send -> pi_wait -> read pi_diff and review -> verify yourself -> fix or pi_answer -> integrate -> verify -> commit/push.`;
 
@@ -135,6 +136,16 @@ does not just cost tokens — it lowers quality.
 - Tricky but still delegable -> stronger worker model (deepseek-v4-pro).
 - On a retry, pi_send auto-escalates the worker to deepseek-v4-pro unless you pass an explicit model.
 - Judgment calls / design / debugging -> you, the general manager.
+
+## Delegation threshold (when to do it yourself)
+Delegating is not free: YOU pay the spec, the acceptance test, the wait, the full-diff review, the
+independent verification, and the merge. For a small, localized fix that overhead usually exceeds the
+output you offload, so delegation loses both money and time.
+- Do it yourself: you can make the change in 1-2 edits without exploration, or it is a single
+  localized spot (typo, missing null check, one-line condition, missing import, small rename).
+- Delegate: multi-file, dozens+ lines, needs exploration to understand, or mechanical/repetitive volume.
+- Sanity check before spawning: "is the spec + acceptance test + review + verify I am about to spend
+  worth more or less than just writing this change myself?" If more, write it yourself.
 
 ## Output discipline: you produce judgment, workers produce code
 The most expensive thing you emit is output tokens (writing code). Keep your output to decisions,

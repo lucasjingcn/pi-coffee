@@ -178,6 +178,12 @@ export function buildServer(coord: Coordinator): McpServer {
       });
       const out: Record<string, unknown> = { ...compactMeta(meta) };
       if (warnings.length) out.warnings = warnings;
+      // Advisory: small, single-file, no-acceptance work usually costs more to delegate than to do.
+      const scopeLen = spec?.scope?.length ?? 0;
+      if (scopeLen <= 1 && !args.acceptance_files?.length && (args.prompt?.length ?? 0) < 400) {
+        out.hint =
+          "This looks small/localized. Delegation overhead (spec + acceptance + review + verify) may exceed the work you offloaded - next time consider doing small fixes yourself.";
+      }
       return json(out);
     },
   );

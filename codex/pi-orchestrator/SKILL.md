@@ -103,6 +103,16 @@ Each worker is a separate context with duplicated repo reading and its own integ
 - Tricky but still delegable -> stronger worker model (`deepseek-v4-pro`).
 - Judgment calls / design / debugging -> you, the general manager.
 
+## Delegation threshold (when to do it yourself)
+Delegating is not free: YOU pay the spec, the acceptance test, the wait, the full-diff review, the
+independent verification, and the merge. For a small, localized fix that overhead usually exceeds the
+output you offload — losing both money and time.
+- Do it yourself: you can make the change in 1-2 edits without exploration, or it is a single
+  localized spot (typo, missing null check, one-line condition, missing import, small rename).
+- Delegate: multi-file, dozens+ lines, needs exploration, or mechanical/repetitive volume.
+- Sanity check before spawning: "is the spec + acceptance test + review + verify I'm about to spend
+  worth more or less than just writing this change myself?" If more, write it yourself.
+
 ## Output discipline: you produce judgment, workers produce code
 The most expensive thing you emit is output tokens (writing code). Keep your output to decisions,
 review findings, and tiny surgical fixes; let workers emit the bulk code.
