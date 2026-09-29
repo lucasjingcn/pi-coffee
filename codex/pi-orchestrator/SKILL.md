@@ -32,6 +32,14 @@ Follow the target project's size gate. For ai-gen specifically, small changes ar
 parallel sub-agents are considered only when the plan contains at least three independent tasks.
 That threshold is an ai-gen project rule, not a universal requirement for other repositories.
 
+Before substantial implementation, assess which independent implementation workstreams can be
+delegated under that size gate. When a workstream has clear scope, fixed acceptance and worthwhile
+expected benefit, delegate its implementation before writing the patch yourself. State the split
+briefly in the normal progress update; no separate plan or delegation quota is required. If you keep
+all implementation direct or delegate only read-only review, explain why (for example coupled files,
+unresolved contracts, overlapping dirty work, or a specific tool/credential blocker). A late review
+after most code is written is review assistance, not evidence of implementation delegation.
+
 If pi tools, model credentials, or paid-call authorization are missing, report the dependent blocker
 and continue independently authorized local implementation and checks. Do not stall all work merely
 because a skill mentions a tool.
@@ -39,6 +47,10 @@ because a skill mentions a tool.
 Keep architecture, ambiguous product decisions, security, permissions, billing, difficult debugging,
 final review, and final acceptance with the orchestrator. Workers may gather evidence for these
 areas; their reports do not replace the orchestrator's judgment.
+Ownership of those decisions and final responsibility does not require personally writing every patch.
+Once the responsible orchestrator has resolved a contract or decision, independent implementation
+can be delegated within the approved boundaries. Do not infer that a sensitive project requires all
+of its unrelated implementation to remain direct.
 
 ## Specify a workstream
 
@@ -49,6 +61,8 @@ Before `pi_spawn`, provide a structured `spec`:
 - `non_goals`, `contracts`, and `constraints`: interfaces, invariants, quality and authorization bounds.
 - `task_type`: mechanical, feature, refactor, or debug. Design and security tasks require an explicit
   `spec_override` with a reason; this override does not supply missing user authorization.
+- `purpose`: implementation, review, or investigation. This declares the assigned work, separately
+  from its technical `task_type`; review and investigation do not count as implementation delegation.
 - `acceptance_command`: fixed at dispatch for code integration; do not change it to match the patch.
 
 Derive acceptance from the requirement before, or independently of, reading the implementation.
@@ -96,6 +110,9 @@ A workstream receives the initial task and at most one correction. `pi_send` ref
 instruction without `override:true` and `override_reason`. After two failed attempts, reassess the
 cause and take over directly when appropriate. A further worker or stronger model needs explicit
 justification and applicable user approval; do not loop retries or reduce quality.
+When you take over a delegated implementation, state the reason, supporting evidence and remaining scope
+before editing. Stop or settle the worker and release conflicting claims first; avoid concurrent writes
+to its assigned files. Record the reason in the `taken_over` outcome's required `note`.
 
 Prefer a small number of workers with distinct file sets. `PI_COFFEE_PARALLEL_WARN` (default 4) is a
 capacity warning, not a mandate to fill slots. Review may gather evidence in parallel; final judgment
@@ -111,6 +128,13 @@ push. A tool being available does not authorize its side effects.
 Close each workstream with `pi_finish`: `success_first`, `success_second`, `taken_over`, or `abandoned`.
 Successful outcomes require passing candidate evidence; a successful workstream with code changes
 also requires integration. An abandoned task may be closed without claiming acceptance.
+
+Report implementation, review and investigation separately using `pi_report.workstreams_by_purpose`.
+A read-only review must not be reported as delegated implementation. Missing historical purposes remain
+`unspecified`; never infer them from names, token volume or successful outcomes. Describe the actual
+worker changes and the orchestrator's direct implementation, review, integration and takeovers with
+their reasons. Assigned purpose is not proof of code contribution: use the full diff and integration
+evidence. Workstream counts do not measure the proportion of code written or establish savings.
 
 Use `pi_report` for outcomes and `pi_metrics` for usage and cost coverage. Include active and historical
 work, failures, and corrections. Missing costs are unknown, not zero. Distinguish provider-reported,

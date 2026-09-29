@@ -72,6 +72,10 @@ export type SendMode = "prompt" | "steer" | "followup";
 /** Classification Codex must give a delegated task; design/security must not be delegated. */
 export type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design" | "security";
 
+/** Assigned work, not a measure of actual code contribution. */
+export const WORKSTREAM_PURPOSES = ["implementation", "review", "investigation"] as const;
+export type WorkstreamPurpose = typeof WORKSTREAM_PURPOSES[number];
+
 /** Structured delegation contract the coordinator hands to a worker. */
 export interface DelegationSpec {
   /** One unambiguous sentence: what must be true when done. */
@@ -86,4 +90,6 @@ export interface DelegationSpec {
   constraints?: string[];
   /** Task classification. */
   task_type?: TaskType;
+  /** Distinguish writing code from reviewing it or gathering evidence. Omitted history is unknown. */
+  purpose?: WorkstreamPurpose;
 }

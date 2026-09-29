@@ -280,12 +280,13 @@ async function main() {
   // --- spec + acceptance test-first --------------------------------------------------------
   r = await mcpCall("pi_spawn", {
     task: "A",
-    spec: { goal: "make the acceptance test pass", scope: ["src/a.ts", "y.txt"], task_type: "mechanical" },
+    spec: { goal: "make the acceptance test pass", scope: ["src/a.ts", "y.txt"], task_type: "mechanical", purpose: "implementation" },
     acceptance_files: [{ path: "tests/acc.txt", content: "PASS" }],
     acceptance_command: "cat tests/acc.txt",
   });
   const s1 = r.data;
   check("D1 structured spec spawn succeeds", !!s1?.id && s1?.spec?.goal === "make the acceptance test pass", s1);
+  check("D1a implementation purpose survives MCP dispatch", s1?.purpose === "implementation" && s1?.spec?.purpose === "implementation", s1);
   check("D2 acceptance file written into worktree", s1?.id && existsSync(join(WORKTREES, s1.id, "tests/acc.txt")));
 
   r = await mcpCall("pi_claim", { session_id: s1.id, paths: ["tests/acc.txt"], mode: "rw" });
@@ -295,7 +296,7 @@ async function main() {
   r = await mcpCall("pi_spawn", { task: "B", spec: { goal: "overlap", scope: ["src/a.ts"], task_type: "mechanical" } });
   check("E  overlapping scope rejected at dispatch", r.isError, r.data);
 
-  r = await mcpCall("pi_spawn", { task: "C", spec: { goal: "Reply with exactly READY and stop; do not modify any files.", scope: ["src/other.ts"], task_type: "feature" } });
+  r = await mcpCall("pi_spawn", { task: "C", spec: { goal: "Reply with exactly READY and stop; do not modify any files.", scope: ["src/other.ts"], task_type: "feature", purpose: "review" } });
   const s3 = r.data;
   check("F  non-overlapping spawn succeeds", !!s3?.id, s3);
   check("F2 the spec became the first instruction (attempt 1)", s3?.instructions_sent === 1, s3?.instructions_sent);
@@ -315,6 +316,9 @@ async function main() {
   await mcpCall("pi_finish", { session_id: s1.id, outcome: "success_first", tests_owned_by_codex: true });
   r = await mcpCall("pi_report", {});
   check("H  report counts the closed workstream", (r.data?.counts?.success_first || 0) >= 1, r.data?.counts);
+  check("H5 report separates implementation and review", r.data?.workstreams_by_purpose?.implementation?.total === 1
+    && r.data?.workstreams_by_purpose?.review?.total === 1
+    && r.data?.tasks?.find((task) => task.id === s3.id)?.purpose === "review", r.data);
   r = await mcpCall("pi_record_cost", { id: "smoke-orchestrator", amount: 0.25, currency: "USD", source: "manual", reference: "offline test fixture, not a provider charge", session_ids: [s1.id] });
   check("H3 sourced cost registration", !r.isError && r.data?.id === "smoke-orchestrator", r.data);
   r = await mcpCall("pi_metrics", { session_ids: [s1.id] });

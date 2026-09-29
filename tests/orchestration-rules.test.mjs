@@ -21,6 +21,17 @@ test("small fixes stay direct and three-task size gate stays project-specific", 
   assert.doesNotMatch(source + MCP_INSTRUCTIONS, /DEFAULT TO DELEGATING|Do NOT write application code|worker_output_tokens should dominate/);
 });
 
+test("implementation delegation is considered before edits and review is reported separately", () => {
+  assert.match(PLAYBOOK, /Before substantial implementation[\s\S]*assess[\s\S]*implementation workstreams/);
+  assert.match(PLAYBOOK, /final responsibility does not require personally writing every patch/);
+  assert.match(PLAYBOOK, /only read-only review[\s\S]*explain why/);
+  assert.match(PLAYBOOK, /take over[\s\S]*reason[\s\S]*remaining scope/);
+  assert.match(PLAYBOOK, /purpose[\s\S]*implementation[\s\S]*review[\s\S]*investigation/);
+  assert.match(PLAYBOOK, /read-only review must not be reported as delegated implementation/);
+  assert.match(MCP_INSTRUCTIONS, /Assess implementation delegation before substantial edits/);
+  assert.match(MCP_INSTRUCTIONS, /Report implementation, review and investigation separately/);
+});
+
 test("judgment, credentials and authorization boundaries are explicit", () => {
   assert.match(PLAYBOOK, /permissions, billing, difficult debugging,[\s\S]*with the orchestrator/);
   assert.match(PLAYBOOK, /credentials[\s\S]*continue independently authorized local implementation/);

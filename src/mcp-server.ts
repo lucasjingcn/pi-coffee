@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Coordinator, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
+import { WORKSTREAM_PURPOSES } from "./types.js";
 import { MCP_INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
 
 function json(value: unknown) {
@@ -34,6 +35,7 @@ function compactMeta(m: SessionMeta) {
     turns: m.turns ?? 0,
     instructions_sent: m.instructionsSent ?? 0,
     outcome: m.outcome ?? "unrecorded",
+    purpose: m.spec?.purpose ?? "unspecified",
     tests_owned_by_codex: m.testsOwnedByCodex ?? null,
     output_tokens: m.tokens?.output ?? 0,
     lastEntryId: m.lastEntryId,
@@ -81,7 +83,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Spawn a pi worker session",
       description:
-        "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Returns the session id used by all other pi_* tools.",
+        "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Set spec.purpose to distinguish implementation from review or investigation. Returns the session id used by all other pi_* tools.",
       inputSchema: {
         task: z.string().optional().describe("Short task label (used in the session/branch name)"),
         repo: z.string().optional().describe("Repository path (defaults to daemon config)"),
@@ -103,6 +105,7 @@ export function buildServer(coord: Coordinator): McpServer {
             contracts: z.array(z.string()).optional(),
             constraints: z.array(z.string()).optional(),
             task_type: z.enum(TASK_TYPES).optional(),
+            purpose: z.enum(WORKSTREAM_PURPOSES).optional().describe("Assigned work: implementation, read-only review, or investigation. Missing purpose is reported as unspecified, never inferred."),
           })
           .optional()
           .describe("Structured task contract. Required: goal, scope. Rendered into the worker prompt."),
@@ -176,6 +179,9 @@ export function buildServer(coord: Coordinator): McpServer {
       }
 
       const warnings: string[] = [];
+      if (!spec?.purpose) {
+        warnings.push("no spec.purpose provided: this workstream will be reported as unspecified, not implementation");
+      }
       if (!args.acceptance_files?.length) {
         warnings.push("no acceptance_files provided: test-first delegation is strongly recommended");
       }
@@ -327,7 +333,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Close a workstream with an outcome",
       description:
-        "Record the final disposition of a worker workstream for the delegation scoreboard: success_first (done on the initial task), success_second (done after one correction), taken_over (you finished it yourself after two failed attempts), or abandoned. Call this for EVERY workstream when the task completes.",
+        "Record the final disposition of a worker workstream: success_first, success_second, taken_over, or abandoned. A takeover requires a nonempty note explaining the reason; success and takeover retain verification/integration gates. Call this for EVERY workstream when the task completes.",
       inputSchema: {
         session_id: z.string(),
         outcome: z.enum(["success_first", "success_second", "taken_over", "abandoned"]),
@@ -429,7 +435,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Delegation scoreboard",
       description:
-        "At task completion, report to the user: how many workstreams were delegated, how many succeeded on the first try / second try, how many you took over yourself, and the percentages. Call this and summarize it to the user.",
+        "Report assigned implementation, review and investigation separately, including outcomes and takeover reasons. Missing historical purposes stay unspecified. Overall success rates include all purposes and are not implementation contribution or savings. Describe actual worker changes and direct orchestrator work alongside the report.",
       inputSchema: {},
     },
     async () => json(await coord.report()),

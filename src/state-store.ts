@@ -2,6 +2,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { BoardEntry, MailMessage, MessageKind } from "./mailbox.js";
 import type { Outcome, SessionMeta, SessionStatus } from "./manager.js";
 import { validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
+import { WORKSTREAM_PURPOSES } from "./types.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
 export interface StateSnapshot {
@@ -176,6 +177,15 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
   const outcome = entry.outcome;
   if (outcome !== undefined && (typeof outcome !== "string" || !OUTCOMES.has(outcome as Outcome))) {
     fail(file, `${at}.outcome is not a known outcome`);
+  }
+
+  if (entry.spec !== undefined) {
+    const spec = entry.spec;
+    if (!isRecord(spec)) fail(file, `${at}.spec must be an object`);
+    if (spec.purpose !== undefined
+      && !WORKSTREAM_PURPOSES.some((purpose) => purpose === spec.purpose)) {
+      fail(file, `${at}.spec.purpose is not a known workstream purpose`);
+    }
   }
 
   if (entry.acceptance !== undefined) {

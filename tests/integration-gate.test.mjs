@@ -43,6 +43,22 @@ test('integration and successful finish require daemon-executed verification',()
   await c.exec('s1','true');await assert.rejects(c.merge('s1'),/pi_verify/);
 }));
 
+test('takeover requires a reason and preserves verification and integration gates',()=>fixture(async({c,meta})=>{
+  for (const note of [undefined, '', '   ']) {
+    await assert.rejects(c.setOutcome('s1','taken_over',note),/nonempty note/);
+    assert.equal(meta.outcome,undefined);
+  }
+  const reason='Worker failed the fixed acceptance twice; orchestrator repaired the scoped item.';
+  await assert.rejects(c.setOutcome('s1','taken_over',reason),/pi_verify/);
+  assert.equal((await c.verify('s1')).passed,true);
+  await assert.rejects(c.setOutcome('s1','taken_over',reason),/target changed|integration/);
+  assert.equal((await c.merge('s1')).ok,true);
+  await c.setOutcome('s1','taken_over',reason);
+  const report=await c.report();
+  assert.equal(report.counts.taken_over,1);
+  assert.equal(report.tasks[0].note,reason);
+}));
+
 test('passing merged candidate can integrate and close, and evidence survives as audit data',()=>fixture(async({c,meta,git,repo,worker})=>{
   // Target-side work must participate in verification too.
   await writeFile(join(repo,'src/target.txt'),'target');git(repo,'add','src/target.txt');git(repo,'commit','-qm','target');

@@ -12,6 +12,7 @@ import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, type 
 import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
+import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import {
   commitAll,
   createWorktree,
@@ -1167,6 +1168,9 @@ export class Coordinator {
 
   async setOutcome(id: string, outcome: Outcome, note?: string): Promise<void> {
     const rt = this.get(id);
+    if (outcome === "taken_over" && !note?.trim()) {
+      throw new Error("taken_over requires a nonempty note explaining the takeover reason");
+    }
     return this.withRepoGuard(rt, async () => {
       if (FINISHED_OUTCOMES.has(outcome)) {
         const proof = rt.meta.verification;
@@ -1241,15 +1245,23 @@ export class Coordinator {
       unrecorded: 0,
     };
     let workerOutput = 0;
+    const byPurpose = Object.fromEntries(
+      [...WORKSTREAM_PURPOSES, "unspecified"].map((purpose) => [purpose, { total: 0, counts: { ...counts } }]),
+    ) as Record<WorkstreamPurpose | "unspecified", { total: number; counts: typeof counts }>;
 
     const tasks = all.map((session) => {
-      counts[(session.outcome ?? "unrecorded") as Outcome | "unrecorded"]++;
+      const outcome = session.outcome ?? "unrecorded";
+      const purpose = session.spec?.purpose ?? "unspecified";
+      counts[outcome]++;
+      byPurpose[purpose].total++;
+      byPurpose[purpose].counts[outcome]++;
       workerOutput += session.tokens?.output ?? 0;
       return {
         id: session.id,
         name: session.name,
         status: session.status,
         outcome: session.outcome ?? "unrecorded",
+        purpose,
         instructions_sent: session.instructionsSent ?? 0,
         note: session.outcomeNote,
         tests_owned_by_codex: session.testsOwnedByCodex ?? null,
@@ -1267,6 +1279,7 @@ export class Coordinator {
       active_tasks: activeTasks,
       archived_tasks: this.history.length,
       counts,
+      workstreams_by_purpose: byPurpose,
       percentages,
       delegated_success_rate: pct(counts.success_first + counts.success_second),
       first_try_rate: pct(counts.success_first),
@@ -1274,7 +1287,7 @@ export class Coordinator {
       cost_evidence: await this.metrics(),
       worker_output_tokens: workerOutput,
       tasks,
-      note: "One 'task' = one worker workstream/session. successful outcomes require verified evidence and integration for changed code. unrecorded means the workstream was never closed with an outcome.",
+      note: "One 'task' = one worker workstream/session. Overall counts and rates include all purposes, not implementation contribution. Purpose is assigned by spec, not inferred from names or outcomes; unspecified means it was not recorded. Actual code contribution requires diff and integration evidence; direct orchestrator work is not measured here. Successful outcomes require verified evidence and integration for changed code. unrecorded means the workstream was never closed with an outcome.",
     };
   }
 
@@ -1318,6 +1331,7 @@ function renderSpec(spec?: DelegationSpec): string {
   if (spec.contracts?.length) lines.push(`Contracts to honor: ${spec.contracts.join("; ")}`);
   if (spec.constraints?.length) lines.push(`Constraints: ${spec.constraints.join("; ")}`);
   if (spec.task_type) lines.push(`Task type: ${spec.task_type}`);
+  if (spec.purpose) lines.push(`Workstream purpose: ${spec.purpose}`);
   return lines.join("\n");
 }
 

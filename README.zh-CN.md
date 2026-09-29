@@ -95,6 +95,11 @@ flowchart LR
 非空证据引用与覆盖的 session ID。
 `pi_report` 在任务结局之外返回 `cost_evidence`；手动、估算和提供方报告的费用分别标注。
 
+`spec.purpose` 标明 `implementation`（实现）、`review`（评审）或 `investigation`（调查）；
+`pi_report.workstreams_by_purpose` 分开统计数量与结局。历史未分类任务显示 `unspecified`，不猜测。
+总体百分比包含所有用途，不能表示代码贡献比例；报告时还须说明 worker 实际改动和主会话直接完成的工作。
+开发前委派评估与接管规则统一维护在[编排规则](codex/pi-orchestrator/SKILL.md)。
+
 worker 输出量除以部分指令 token 只是输出分工指标，不能当节省率或质量评分。完整总费用需要 worker
 与主代理费用齐全、覆盖同一任务集合且币种兼容。证明省钱还需相同范围、验收、质量的对照基线，计入
 等待、审查、失败和返工。离线测试不证明真实模型质量或费用收益。
@@ -252,7 +257,7 @@ docker compose down -v                                # 停止并清掉 daemon �
 先遵守用户指令和目标仓库 `AGENTS.md`。预期收益明确才派发，一行修复直接完成。ai-gen 的体量闸门
 还要求至少三项独立任务才考虑并行子代理；其他仓库遵守各自规则。
 
-1. 从需求推导验收。`pi_spawn` 带 `spec`（`goal`、`scope`）和派发时固定的 `acceptance_command`。
+1. 从需求推导验收。`pi_spawn` 带 `spec`（`goal`、`scope`、`purpose`）和派发时固定的 `acceptance_command`。
    需要独立测试时通过 `acceptance_files` 写入；worker 启动前会锁定并记录内容摘要。
 2. worker 按范围修改、运行测试；决策问题走 `coord_ask`，冲突先协调。报告文件、命令、结果和未决问题。
 3. 等 worker 停止工作后读完整 `pi_diff`，按项目与用户授权提交已审查改动；验证要求 worker 分支干净。
@@ -319,7 +324,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 | 工具 | 作用 |
 |---|---|
-| `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`non_goals`、`contracts`、`constraints`、`task_type` 可选）。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
+| `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
 | `pi_wait` | 阻塞到所有会话 `settled`，或任一 worker 提出 `question`。超时控制在两分钟以内，然后重新轮询。 |
 | `pi_status` / `pi_list` | 当前状态：状态、模型、成本、上下文占用、待处理问题。 |
@@ -335,8 +340,8 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。 |
 | `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
-| `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；成功须有当前通过证据，代码改动还须已集成。 |
-| `pi_report` | 委派记分板：一次过、二次过、被接管的数量和占比。 |
+| `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
+| `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。 |
 | `pi_metrics` | 活跃与历史任务的使用量和费用证据，可用 `session_ids` 过滤；缺失费用为未知，部分比值不证明省钱。 |
 | `pi_record_cost` | 登记主代理费用：`id`、`amount`、`currency`、`source`、`reference`、覆盖的 `session_ids`；区分实报、手动和估算来源。 |

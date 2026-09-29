@@ -105,6 +105,12 @@ nonempty reference, and covered session IDs.
 `pi_report` includes `cost_evidence` alongside the delegation outcomes. Manual and estimated records
 are labeled separately from provider-reported costs.
 
+`spec.purpose` declares `implementation`, `review`, or `investigation`; `pi_report` returns separate
+`workstreams_by_purpose` counts and outcomes. Older or unclassified work stays `unspecified`.
+The overall percentages include every purpose; they do not measure code contribution. Describe
+actual worker changes and direct orchestrator work alongside them. See the authoritative
+[orchestration policy](codex/pi-orchestrator/SKILL.md) for pre-edit delegation assessment and takeover rules.
+
 A worker-output / partial-instruction token ratio measures output distribution, not a savings rate
 or quality. Complete cost totals require known worker and orchestrator costs covering the same task
 set in a compatible currency. A savings claim additionally needs an equivalent baseline with the
@@ -271,7 +277,7 @@ there is a clear expected benefit; a one-line repair is direct work. For ai-gen,
 also requires at least three independent tasks before considering parallel sub-agents; other
 repositories retain their own rules.
 
-1. Derive acceptance from the requirement. Call `pi_spawn` with a `spec` (`goal`, `scope`) and a
+1. Derive acceptance from the requirement. Call `pi_spawn` with a `spec` (`goal`, `scope`, `purpose`) and a
    fixed `acceptance_command`. Add independent tests through `acceptance_files` when needed;
    these are written before the worker starts and their digests are recorded.
 2. The worker edits within scope and runs tests. Questions go through `coord_ask`; conflicting
@@ -344,7 +350,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 
 | Tool | What it does |
 |---|---|
-| `pi_spawn` | Create a worktree and branch, then start a worker. Takes a structured `spec` (`goal`, `scope` required; `non_goals`, `contracts`, `constraints`, `task_type` optional). The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
+| `pi_spawn` | Create a worktree and branch, then start a worker. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
 | `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
 | `pi_wait` | Block until every listed session is `settled`, or until any worker asks a `question`. Keep timeouts at or under two minutes and poll again. |
 | `pi_status` / `pi_list` | Current state: status, model, cost, context usage, pending questions. |
@@ -360,8 +366,8 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
 | `pi_board_post` / `pi_board_read` | Post to the shared board and read it, with a `latest=true` view per key. |
 | `pi_stop` | Stop a worker, optionally removing its worktree and branch. |
-| `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned`. Success requires current passing acceptance evidence and integration when code changed. |
-| `pi_report` | The delegation scoreboard: first-try, second-try, and take-over counts with percentages. |
+| `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned`. Takeovers require a nonempty reason in `note`; success and takeover require current passing acceptance evidence and integration when code changed. |
+| `pi_report` | Outcome counts grouped by assigned purpose, per-task takeover notes, and overall percentages across all purposes. These are workstream outcomes, not implementation contribution. |
 | `pi_gc` | Reclaim finished work. Removes clean finished worktrees and deletes only branches proven merged. |
 | `pi_metrics` | Usage and cost evidence for active/historical sessions, optionally filtered by `session_ids`. Missing costs stay unknown; partial ratios do not prove savings. |
 | `pi_record_cost` | Register orchestrator cost evidence with `id`, `amount`, `currency`, `source`, `reference`, and covered `session_ids`; distinguish reported, manual and estimated evidence. |
