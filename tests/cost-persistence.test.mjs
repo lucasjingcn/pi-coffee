@@ -101,16 +101,16 @@ test("historical failures and rework count while unrecorded amounts remain unkno
   assert.deepEqual(metrics.orchestrator.missing_session_ids, ["s1", "s2", "s3"]);
 }));
 
-test("GC deleting a merged historical branch retains cost evidence across restart", async () => fixture(async ({ meta, seed, open, close, git }) => {
+test("GC deleting merged and empty abandoned historical branches retains cost evidence across restart", async () => fixture(async ({ meta, seed, open, close, git }) => {
   git("branch", "pi/s1");
   git("branch", "pi/s2");
   await seed([meta("s1", 2), meta("s2", 3, { outcome: "abandoned" })], [cost("all", 4, ["s1", "s2"])]);
   const coordinator = await open();
   const before = await coordinator.metrics();
   const gc = await coordinator.gc();
-  assert.equal(gc.branches_deleted, 1);
+  assert.equal(gc.branches_deleted, 2);
   assert.throws(() => git("rev-parse", "--verify", "refs/heads/pi/s1"));
-  assert.ok(git("rev-parse", "--verify", "refs/heads/pi/s2"));
+  assert.throws(() => git("rev-parse", "--verify", "refs/heads/pi/s2"));
   assert.deepEqual(await coordinator.metrics(), before);
   await close(coordinator);
   const restarted = await open();

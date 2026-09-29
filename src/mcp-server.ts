@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { Coordinator, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
@@ -35,6 +36,7 @@ function compactMeta(m: SessionMeta) {
     turns: m.turns ?? 0,
     instructions_sent: m.instructionsSent ?? 0,
     outcome: m.outcome ?? "unrecorded",
+    control_required: m.controlKeyHash !== undefined,
     purpose: m.spec?.purpose ?? "unspecified",
     tests_owned_by_codex: m.testsOwnedByCodex ?? null,
     output_tokens: m.tokens?.output ?? 0,
@@ -43,6 +45,7 @@ function compactMeta(m: SessionMeta) {
     extension: m.extension ?? false,
     acceptance: m.acceptance ?? null,
     verification: m.verification ?? null,
+    reviewAcceptance: m.reviewAcceptance ?? null,
     integration: m.integration ?? null,
     spec: m.spec ?? null,
     pendingQuestions: m.pendingQuestions.map((q) => ({
@@ -53,6 +56,72 @@ function compactMeta(m: SessionMeta) {
       options: q.options,
     })),
     error: m.error,
+  };
+}
+
+type Detail = "summary" | "full";
+
+/** Routine polling keeps actionable state without replaying contracts and transcripts. */
+export function summaryMeta(m: SessionMeta) {
+  return {
+    id: m.id,
+    name: m.name,
+    status: m.status,
+    purpose: m.spec?.purpose ?? "unspecified",
+    outcome: m.outcome ?? "unrecorded",
+    control_required: m.controlKeyHash !== undefined,
+    turns: m.turns ?? 0,
+    cost: m.cost,
+    output_tokens: m.tokens?.output ?? 0,
+    instructions_sent: m.instructionsSent ?? 0,
+    verified: m.verification?.passed ?? false,
+    review_accepted: m.reviewAcceptance !== undefined,
+    integrated: m.integration !== undefined,
+    pendingQuestions: m.pendingQuestions,
+    error: m.error,
+  };
+}
+
+function sessionView(m: SessionMeta, detail: Detail) {
+  return detail === "full" ? compactMeta(m) : summaryMeta(m);
+}
+
+function auditBoard(m: SessionMeta): string {
+  return m.scopeKeyHash ? `${m.scopeKeyHash}:pi-coffee` : "pi-coffee";
+}
+
+/** Full cost evidence belongs to pi_metrics; the scoreboard needs only coverage. */
+export function summaryReport(report: Record<string, unknown>, detail: Detail = "summary") {
+  if (detail === "full") return report;
+  const evidence = report.cost_evidence as Record<string, unknown> | undefined;
+  if (!evidence) return report;
+  const worker = evidence.worker as Record<string, unknown> | undefined;
+  const orchestrator = evidence.orchestrator as Record<string, unknown> | undefined;
+  const combined = evidence.combined as Record<string, unknown> | undefined;
+  return {
+    ...report,
+    cost_evidence: {
+      selected_session_ids: evidence.selected_session_ids,
+      unknown_session_ids: evidence.unknown_session_ids,
+      worker: worker && {
+        currency: worker.currency,
+        total: worker.total,
+        complete: worker.complete,
+        missing_session_ids: worker.missing_session_ids,
+      },
+      orchestrator: orchestrator && {
+        currency: orchestrator.currency,
+        total: orchestrator.total,
+        complete: orchestrator.complete,
+        missing_session_ids: orchestrator.missing_session_ids,
+      },
+      combined: combined && {
+        currency: combined.currency,
+        total: combined.total,
+        complete: combined.complete,
+        reasons: combined.reasons,
+      },
+    },
   };
 }
 
@@ -83,7 +152,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Spawn a pi worker session",
       description:
-        "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Set spec.purpose to distinguish implementation from review or investigation. Returns the session id used by all other pi_* tools.",
+        "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Returns a one-time control_key; retain it in this chat for later worker writes. It is never shown by list/status/report.",
       inputSchema: {
         task: z.string().optional().describe("Short task label (used in the session/branch name)"),
         repo: z.string().optional().describe("Repository path (defaults to daemon config)"),
@@ -97,6 +166,7 @@ export function buildServer(coord: Coordinator): McpServer {
           .optional()
           .describe("pi thinking level for this worker (default: PI_COFFEE_THINKING, xhigh). Lower it for purely mechanical work."),
         prompt: z.string().optional().describe("Optional first instruction to send immediately"),
+        scope_key: z.string().min(1).optional().describe("Pass a prior pi_spawn scope_key to let this chat's workers coordinate with one another"),
         spec: z
           .object({
             goal: z.string().describe("One unambiguous sentence: what must be true when done"),
@@ -155,6 +225,10 @@ export function buildServer(coord: Coordinator): McpServer {
         });
       }
 
+      const controlKey = randomBytes(32).toString("base64url");
+      const scopeKey = args.scope_key ?? controlKey;
+      const scopeHash = createHash("sha256").update(scopeKey).digest("hex");
+
       // Judgment work stays with Codex unless explicitly overridden with a reason.
       const taskType = spec?.task_type;
       if (taskType && JUDGMENT_TYPES.has(taskType) && !args.spec_override) {
@@ -171,7 +245,7 @@ export function buildServer(coord: Coordinator): McpServer {
       }
       if (taskType && JUDGMENT_TYPES.has(taskType) && args.spec_override) {
         coord.boardPost(
-          "pi-coffee",
+          `${scopeHash}:pi-coffee`,
           "judgment-override",
           `${args.task ?? spec?.goal}: ${args.spec_override_reason ?? "(no reason given)"}`,
           "codex",
@@ -205,9 +279,11 @@ export function buildServer(coord: Coordinator): McpServer {
         spec,
         acceptanceFiles: args.acceptance_files,
         acceptanceCommand: args.acceptance_command,
+        controlKeyHash: createHash("sha256").update(controlKey).digest("hex"),
+        scopeKeyHash: scopeHash,
       });
 
-      const out: Record<string, unknown> = { ...compactMeta(meta) };
+      const out: Record<string, unknown> = { ...compactMeta(meta), control_key: controlKey, scope_key: scopeKey };
       if (warnings.length) out.warnings = warnings;
 
       // Advisory: small, single-file, no-acceptance work usually costs more to delegate than to do.
@@ -228,6 +304,7 @@ export function buildServer(coord: Coordinator): McpServer {
         "Deliver a message to a running worker. mode=prompt starts a turn (auto-queued as follow-up if busy); mode=steer interrupts after the current tool batch; mode=followup waits until the worker is otherwise done. TWO-STRIKES GATE: after 2 instructions to the same session, further sends are blocked unless override:true — take the work over yourself instead.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         message: z.string(),
         mode: z.enum(["prompt", "steer", "followup"]).optional(),
         model: z.string().optional().describe("Override the worker model for this instruction"),
@@ -239,7 +316,8 @@ export function buildServer(coord: Coordinator): McpServer {
         override_reason: z.string().optional().describe("Why another delegated attempt is justified"),
       },
     },
-    async ({ session_id, message, mode, model, provider, override, override_reason }) => {
+    async ({ session_id, control_key, message, mode, model, provider, override, override_reason }) => {
+      coord.assertControl(session_id, control_key);
       const snap = coord.snapshot(session_id);
       const sent = snap.instructionsSent ?? 0;
 
@@ -263,7 +341,7 @@ export function buildServer(coord: Coordinator): McpServer {
 
       if (sent >= MAX_DELEGATED_ATTEMPTS && override) {
         coord.boardPost(
-          "pi-coffee",
+          auditBoard(snap),
           "delegation-override",
           `${session_id}: ${override_reason ?? "(no reason given)"}`,
           "codex",
@@ -292,16 +370,17 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Wait for workers",
       description:
-        "Block until all listed sessions settle (until=settled), or until any worker asks a question (until=question). Returns current snapshots. Prefer timeouts <= 120000ms and re-poll.",
+        "Block until all listed sessions settle (until=settled), or until any worker asks a question (until=question). Returns concise snapshots by default. Prefer timeouts <= 120000ms and re-poll.",
       inputSchema: {
         session_ids: z.array(z.string()).min(1),
         until: z.enum(["settled", "question"]).optional(),
         timeout_ms: z.number().int().min(0).max(120_000).optional(),
+        detail: z.enum(["summary", "full"]).optional(),
       },
     },
-    async ({ session_ids, until, timeout_ms }) => {
+    async ({ session_ids, until, timeout_ms, detail }) => {
       const res = await coord.wait(session_ids, until ?? "settled", Math.min(timeout_ms ?? 60_000, 120_000));
-      return json({ timedOut: res.timedOut, sessions: res.sessions.map(compactMeta) });
+      return json({ timedOut: res.timedOut, sessions: res.sessions.map((m) => sessionView(m, detail ?? "summary")) });
     },
   );
 
@@ -309,9 +388,10 @@ export function buildServer(coord: Coordinator): McpServer {
     "pi_stop",
     {
       title: "Stop a worker",
-      description: "Stop a worker session. Optionally record its final outcome and remove its git worktree/branch.",
+      description: "Stop an unfinished worker early, optionally recording an outcome and removing its git worktree/branch. pi_finish already stops completed workstreams.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         remove_worktree: z.boolean().optional(),
         delete_branch: z.boolean().optional().describe("Also delete the worker branch (default false: keep it)"),
         outcome: z
@@ -321,9 +401,12 @@ export function buildServer(coord: Coordinator): McpServer {
         note: z.string().optional(),
       },
     },
-    async ({ session_id, remove_worktree, delete_branch, outcome, note }) => {
+    async ({ session_id, control_key, remove_worktree, delete_branch, outcome, note }) => {
+      coord.assertControl(session_id, control_key);
       if (outcome) await coord.setOutcome(session_id, outcome, note);
-      await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
+      if (!outcome || remove_worktree) {
+        await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
+      }
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
     },
   );
@@ -333,22 +416,22 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Close a workstream with an outcome",
       description:
-        "Record the final disposition of a worker workstream: success_first, success_second, taken_over, or abandoned. A takeover requires a nonempty note explaining the reason; success and takeover retain verification/integration gates. Call this for EVERY workstream when the task completes.",
+        "Record the final disposition and stop the worker. Implementation success/takeover requires verification and integration; read-only review/investigation success requires a settled worker report, no worktree changes, and an acceptance note. Archived unfinished sessions may only be marked abandoned.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         outcome: z.enum(["success_first", "success_second", "taken_over", "abandoned"]),
         note: z.string().optional(),
-        stop: z.boolean().optional().describe("Also stop the worker (default false; keep it alive through integration)"),
         tests_owned_by_codex: z
           .boolean()
           .optional()
           .describe("True if the acceptance test was authored from the spec and owned by you, not the worker"),
       },
     },
-    async ({ session_id, outcome, note, stop, tests_owned_by_codex }) => {
+    async ({ session_id, control_key, outcome, note, tests_owned_by_codex }) => {
+      coord.assertControl(session_id, control_key);
       await coord.setOutcome(session_id, outcome, note);
       if (tests_owned_by_codex !== undefined) coord.setTestsOwned(session_id, tests_owned_by_codex);
-      if (stop) await coord.stop(session_id);
       return json({
         ok: true,
         session_id,
@@ -367,12 +450,14 @@ export function buildServer(coord: Coordinator): McpServer {
     "pi_status",
     {
       title: "Worker status",
-      description: "Get status/cost/pending-questions for one session, or all sessions when session_id is omitted.",
-      inputSchema: { session_id: z.string().optional() },
+      description: "Get concise status and pending questions for one or all sessions. Use detail=full for contracts, transcript excerpt, verification and integration records; pi_metrics provides full cost evidence.",
+      inputSchema: { session_id: z.string().optional(), detail: z.enum(["summary", "full"]).optional() },
     },
-    async ({ session_id }) => {
-      if (session_id) return json(compactMeta(coord.snapshot(session_id)));
-      return json({ sessions: coord.list().map(compactMeta), metrics: await coord.metrics() });
+    async ({ session_id, detail }) => {
+      const view = detail ?? "summary";
+      if (session_id) return json(sessionView(coord.snapshot(session_id), view));
+      return json({ sessions: coord.list().map((m) => sessionView(m, view)),
+        ...(view === "full" ? { metrics: await coord.metrics() } : {}) });
     },
   );
 
@@ -393,8 +478,12 @@ export function buildServer(coord: Coordinator): McpServer {
     description: "Register a sourced orchestrator cost for explicit sessions. Use a stable record id; identical repeats are idempotent and conflicting repeats fail. Never invent missing usage or savings.",
     annotations: { readOnlyHint: false, idempotentHint: true },
     inputSchema: { id: z.string().min(1), amount: z.number().finite().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/),
-      source: z.enum(["manual", "estimate", "provider"]), reference: z.string().min(1), session_ids: z.array(z.string()).min(1) },
-  }, async (record) => json(coord.recordCost(record)));
+      source: z.enum(["manual", "estimate", "provider"]), reference: z.string().min(1), session_ids: z.array(z.string()).min(1),
+      control_keys: z.record(z.string()).optional() },
+  }, async ({ control_keys, ...record }) => {
+    for (const id of record.session_ids) coord.assertControl(id, control_keys?.[id]);
+    return json(coord.recordCost(record));
+  });
 
   server.registerTool(
     "pi_tail",
@@ -426,8 +515,12 @@ export function buildServer(coord: Coordinator): McpServer {
 
   server.registerTool(
     "pi_list",
-    { title: "List workers", description: "List all known worker sessions.", inputSchema: {} },
-    async () => json({ sessions: coord.list().map(compactMeta) }),
+    { title: "List workers", description: "List concise worker states. Supply session_ids to inspect only your workstreams, including stopped history; use detail=full for complete records.",
+      inputSchema: { session_ids: z.array(z.string()).min(1).optional(), detail: z.enum(["summary", "full"]).optional() } },
+    async ({ session_ids, detail }) => {
+      const sessions = session_ids === undefined ? coord.list() : [...new Set(session_ids)].map((id) => coord.snapshot(id));
+      return json({ sessions: sessions.map((m) => sessionView(m, detail ?? "summary")) });
+    },
   );
 
   server.registerTool(
@@ -435,10 +528,10 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Delegation scoreboard",
       description:
-        "Report assigned implementation, review and investigation separately, including outcomes and takeover reasons. Missing historical purposes stay unspecified. Overall success rates include all purposes and are not implementation contribution or savings. Describe actual worker changes and direct orchestrator work alongside the report.",
-      inputSchema: {},
+        "Report concise outcomes by purpose, takeover reasons, cost coverage, and inconsistent recorded successes. Supply session_ids to scope a chat's workstreams; omit it only for global audit. Use detail=full for complete evidence; pi_metrics gives full per-session costs.",
+      inputSchema: { session_ids: z.array(z.string()).min(1).optional(), detail: z.enum(["summary", "full"]).optional() },
     },
-    async () => json(await coord.report()),
+    async ({ session_ids, detail }) => json(summaryReport(await coord.report(session_ids), detail ?? "summary")),
   );
 
   // -------------------------------------------------------------------------
@@ -450,9 +543,12 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Commit a worker's changes",
       description: "Stage and commit all changes in a worker's worktree. Use before merging.",
-      inputSchema: { session_id: z.string(), message: z.string() },
+      inputSchema: { session_id: z.string(), control_key: z.string().optional(), message: z.string() },
     },
-    async ({ session_id, message }) => json({ result: await coord.commit(session_id, message) }),
+    async ({ session_id, control_key, message }) => {
+      coord.assertControl(session_id, control_key);
+      return json({ result: await coord.commit(session_id, message) });
+    },
   );
 
   server.registerTool(
@@ -461,9 +557,10 @@ export function buildServer(coord: Coordinator): McpServer {
       title: "Verify the exact integration candidate",
       description: "Execute the registered acceptance command in an isolated merged candidate. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
       annotations: { readOnlyHint: false, idempotentHint: false },
-      inputSchema: { session_id: z.string(), into: z.string().optional(), timeout_ms: z.number().int().min(1000).max(1_800_000).optional() },
+      inputSchema: { session_id: z.string(), control_key: z.string().optional(), into: z.string().optional(), timeout_ms: z.number().int().min(1000).max(1_800_000).optional() },
     },
-    async ({ session_id, into, timeout_ms }) => {
+    async ({ session_id, control_key, into, timeout_ms }) => {
+      coord.assertControl(session_id, control_key);
       const proof = await coord.verify(session_id, into, timeout_ms);
       return proof.passed ? json(proof) : errorJson(proof);
     },
@@ -478,11 +575,15 @@ export function buildServer(coord: Coordinator): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         into: z.string().optional().describe("Target branch in the main repo (default: current)"),
         no_ff: z.boolean().optional(),
       },
     },
-    async ({ session_id, into, no_ff }) => json(await coord.merge(session_id, into, no_ff ?? true)),
+    async ({ session_id, control_key, into, no_ff }) => {
+      coord.assertControl(session_id, control_key);
+      return json(await coord.merge(session_id, into, no_ff ?? true));
+    },
   );
 
   server.registerTool(
@@ -490,9 +591,13 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Push a branch",
       description: "Push the main repo's current branch (or an explicit branch) to a remote.",
-      inputSchema: { session_id: z.string(), remote: z.string().optional(), branch: z.string().optional() },
+      inputSchema: { session_id: z.string(), control_key: z.string().optional(), control_keys: z.record(z.string()).optional(), remote: z.string().optional(), branch: z.string().optional() },
     },
-    async ({ session_id, remote, branch }) => json({ result: await coord.push(session_id, remote ?? "origin", branch) }),
+    async ({ session_id, control_key, control_keys, remote, branch }) => {
+      coord.assertControl(session_id, control_key);
+      coord.assertControlsForActiveRepo(session_id, { ...control_keys, [session_id]: control_key ?? "" });
+      return json({ result: await coord.push(session_id, remote ?? "origin", branch) });
+    },
   );
 
   server.registerTool(
@@ -503,12 +608,16 @@ export function buildServer(coord: Coordinator): McpServer {
         "Execute a shell command (e.g. the acceptance test/build) inside a worker's worktree and return exit code, stdout, stderr. Use this to verify a worker's work yourself before merging.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         command: z.string(),
         timeout_ms: z.number().int().min(1000).max(1_800_000).optional(),
         login: z.boolean().optional().describe("Explicitly opt in to a login shell; default false preserves daemon PATH without loading user shell initialization"),
       },
     },
-    async ({ session_id, command, timeout_ms, login }) => json(await coord.exec(session_id, command, timeout_ms ?? 600_000, login ?? false)),
+    async ({ session_id, control_key, command, timeout_ms, login }) => {
+      coord.assertControl(session_id, control_key);
+      return json(await coord.exec(session_id, command, timeout_ms ?? 600_000, login ?? false));
+    },
   );
 
   server.registerTool(
@@ -519,13 +628,15 @@ export function buildServer(coord: Coordinator): McpServer {
         "Respond to a pending question surfaced by pi_wait(until=question)/pi_status. For confirm use confirmed; for select/input/editor use value; use cancelled to dismiss.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
         request_id: z.string(),
         value: z.string().optional(),
         confirmed: z.boolean().optional(),
         cancelled: z.boolean().optional(),
       },
     },
-    async ({ session_id, request_id, value, confirmed, cancelled }) => {
+    async ({ session_id, control_key, request_id, value, confirmed, cancelled }) => {
+      coord.assertControl(session_id, control_key);
       await coord.answer(session_id, request_id, { value, confirmed, cancelled });
       return json({ ok: true });
     },
@@ -540,10 +651,17 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Clean up finished workers",
       description:
-        "Stop and evict finished workers, remove their clean worktrees, and delete branches of finished workstreams (including historical sessions whose worktree is already gone) only when the branch tip is an ancestor of that repo's current HEAD. Safe by construction: never deletes the current/default branch or any branch checked out in a worktree, never force-deletes, and retains abandoned/unfinished sessions, active sessions, dirty worktrees, and squash/rebase work that is not ancestry-proven. Returns actual `branches_deleted` plus per-branch retention reasons; run after pi_finish to reclaim disk.",
-      inputSchema: {},
+        "Clean selected stopped workers, including historical sessions: accepted work and abandoned work with no commit or dirty files. Branches are removed only when safely merged; dirty, unrecorded, and abandoned work with commits is retained. Supply session_ids and matching control_keys. Global cleanup requires keys for every protected session, including history.",
+      inputSchema: { session_ids: z.array(z.string()).min(1).optional(), control_keys: z.record(z.string()).optional() },
     },
-    async () => json(await coord.gc()),
+    async ({ session_ids, control_keys }) => {
+      if (session_ids) {
+        for (const id of session_ids) coord.assertControl(id, control_keys?.[id]);
+      } else {
+        coord.assertControlsForAll(control_keys);
+      }
+      return json(await coord.gc(session_ids));
+    },
   );
 
   // -------------------------------------------------------------------------
@@ -558,6 +676,8 @@ export function buildServer(coord: Coordinator): McpServer {
         "Claim repo-relative paths (files or directories) so other workers cannot write them. Workers auto-claim on edit/write; use this to reserve files up front.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
+        control_keys: z.record(z.string()).optional().describe("Required for manual codex claims across protected sessions"),
         paths: z.array(z.string()).min(1).describe("Repo-relative paths (POSIX separators)"),
         mode: z.enum(["rw", "ro"]).optional(),
         repo: z
@@ -566,7 +686,11 @@ export function buildServer(coord: Coordinator): McpServer {
           .describe("Repository path selecting the lock namespace for a manual claimant (e.g. codex); defaults to the daemon default repo"),
       },
     },
-    async ({ session_id, paths, mode, repo }) => json(coord.claim(session_id, paths, mode ?? "rw", repo)),
+    async ({ session_id, control_key, control_keys, paths, mode, repo }) => {
+      if (session_id === "codex") coord.assertControlsForAll(control_keys);
+      else coord.assertControl(session_id, control_key);
+      return json(coord.claim(session_id, paths, mode ?? "rw", repo));
+    },
   );
 
   server.registerTool(
@@ -576,6 +700,8 @@ export function buildServer(coord: Coordinator): McpServer {
       description: "Release claims for a session. Omit paths to release everything it holds in its repository namespace.",
       inputSchema: {
         session_id: z.string(),
+        control_key: z.string().optional(),
+        control_keys: z.record(z.string()).optional().describe("Required for manual codex releases across protected sessions"),
         paths: z.array(z.string()).optional(),
         repo: z
           .string()
@@ -583,7 +709,11 @@ export function buildServer(coord: Coordinator): McpServer {
           .describe("Repository path selecting the lock namespace for a manual claimant (e.g. codex); defaults to the daemon default repo"),
       },
     },
-    async ({ session_id, paths, repo }) => json({ released: coord.releaseLocks(session_id, paths, repo) }),
+    async ({ session_id, control_key, control_keys, paths, repo }) => {
+      if (session_id === "codex") coord.assertControlsForAll(control_keys);
+      else coord.assertControl(session_id, control_key);
+      return json({ released: coord.releaseLocks(session_id, paths, repo) });
+    },
   );
 
   server.registerTool(
@@ -604,13 +734,17 @@ export function buildServer(coord: Coordinator): McpServer {
         "Post a durable message to a worker's mailbox and (optionally) inject it into that worker's conversation. Use for coordination between Codex and workers or between workers.",
       inputSchema: {
         session_id: z.string().describe("Recipient session id, or '*' to broadcast"),
+        control_key: z.string().optional(),
+        control_keys: z.record(z.string()).optional().describe("Required to broadcast across protected sessions"),
         message: z.string(),
         kind: z.enum(["note", "question", "answer", "broadcast"]).optional(),
         from: z.string().optional(),
         deliver: z.boolean().optional().describe("Inject into the recipient's conversation (default true)"),
       },
     },
-    async ({ session_id, message, kind, from, deliver }) => {
+    async ({ session_id, control_key, control_keys, message, kind, from, deliver }) => {
+      if (session_id === "*") coord.assertControlsForAll(control_keys);
+      else coord.assertControl(session_id, control_key);
       const res = coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
       return json(res);
     },
@@ -631,9 +765,14 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Post to the shared board",
       description: "Append a fact/decision/interface to a shared blackboard that every worker can read (e.g. API contracts, ownership).",
-      inputSchema: { board: z.string(), key: z.string(), value: z.string(), from: z.string().optional() },
+      inputSchema: { board: z.string(), key: z.string(), value: z.string(), from: z.string().optional(), scope_key: z.string().optional(), control_keys: z.record(z.string()).optional() },
     },
-    async ({ board, key, value, from }) => json(coord.boardPost(board, key, value, from ?? "codex")),
+    async ({ board, key, value, from, scope_key, control_keys }) => {
+      if (!scope_key) coord.assertControlsForAll(control_keys);
+      const target = scope_key ? `${createHash("sha256").update(scope_key).digest("hex")}:${board}` : board;
+      const entry = coord.boardPost(target, key, value, from ?? "codex");
+      return json(scope_key ? { ...entry, board } : entry);
+    },
   );
 
   server.registerTool(
@@ -641,10 +780,13 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Read the shared board",
       description: "Read board entries. Pass latest=true to get only the newest entry per key.",
-      inputSchema: { board: z.string(), key: z.string().optional(), latest: z.boolean().optional() },
+      inputSchema: { board: z.string(), key: z.string().optional(), latest: z.boolean().optional(), scope_key: z.string().optional() },
     },
-    async ({ board, key, latest }) =>
-      json({ entries: latest ? coord.boardLatest(board) : coord.boardRead(board, key) }),
+    async ({ board, key, latest, scope_key }) => {
+      const target = scope_key ? `${createHash("sha256").update(scope_key).digest("hex")}:${board}` : board;
+      const entries = latest ? coord.boardLatest(target) : coord.boardRead(target, key);
+      return json({ entries: scope_key ? entries.map((entry) => ({ ...entry, board })) : entries });
+    },
   );
 
   return server;

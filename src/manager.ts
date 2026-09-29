@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
@@ -82,6 +83,8 @@ export interface SessionMeta {
   acceptance?: { files: string[]; command?: string; hashes?: Record<string, string> };
   verification?: Verification;
   integration?: IntegrationRecord;
+  /** Orchestrator acceptance of a settled, unchanged read-only review/investigation. */
+  reviewAcceptance?: { acceptedAt: number; workerSha: string; note: string };
   /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
@@ -89,6 +92,10 @@ export interface SessionMeta {
   /** Set once the worker-side coordinator extension checked in. */
   extension?: boolean;
   extensionAt?: number;
+  /** SHA-256 of the one-time control key returned by pi_spawn; absent for legacy sessions. */
+  controlKeyHash?: string;
+  /** Shared scope capability hash for workers intentionally grouped by one chat. */
+  scopeKeyHash?: string;
 }
 
 interface Runtime {
@@ -117,6 +124,8 @@ export interface SpawnOptions {
   acceptanceCommand?: string;
   /** Structured task spec (goal/scope/contracts/...). Rendered into the worker prompt. */
   spec?: DelegationSpec;
+  controlKeyHash?: string;
+  scopeKeyHash?: string;
 }
 
 export interface WaitResult {
@@ -137,6 +146,7 @@ export class Coordinator {
   private board = new Board();
   private counter = 0;
   private history: SessionMeta[] = [];
+  private workerTokens = new Map<string, string>();
   private saveTimer: NodeJS.Timeout | null = null;
   private sweeper: NodeJS.Timeout | null = null;
   private waiters = new Set<() => void>();
@@ -210,14 +220,24 @@ export class Coordinator {
     }
   }
 
+  /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
+  private async emptyAbandoned(meta: SessionMeta): Promise<boolean> {
+    if (meta.outcome !== "abandoned" || !/^[a-f0-9]{40,64}$/.test(meta.baseRef)) return false;
+    try {
+      return await resolveRef(meta.repo, `refs/heads/${meta.branch}`) === meta.baseRef;
+    } catch {
+      return false;
+    }
+  }
+
   /**
-   * Remove a finished worker's worktree if it exists and is clean. Never deletes
-   * branches (gc's merged-only branch cleanup is explicit), never touches dirty
-   * worktrees, and leaves unfinished/abandoned outcomes for inspection.
+   * Remove a stopped, clean worktree only after success or a proven empty abandonment.
+   * Dirty or unrecorded work remains available for recovery. Branch deletion is gc-only.
    */
   private async cleanMeta(meta: SessionMeta): Promise<boolean> {
     const isFinished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
-    if (!isFinished || !meta.worktree || !existsSync(meta.worktree)) return false;
+    if ((!isFinished && !(await this.emptyAbandoned(meta))) || meta.status !== "stopped"
+      || !meta.worktree || !existsSync(meta.worktree)) return false;
     if (!(await isWorktreeClean(meta.worktree))) return false;
 
     await removeWorktree(meta.repo, meta.worktree).catch(() => {});
@@ -233,12 +253,14 @@ export class Coordinator {
    * retained when any session for them is unfinished, active, or has a dirty
    * worktree. Nothing here depends on the legacy `deleteBranches` force setting.
    */
-  async gc(): Promise<Record<string, unknown>> {
+  async gc(sessionIds?: string[]): Promise<Record<string, unknown>> {
+    const selected = sessionIds === undefined ? undefined : new Set(sessionIds);
     let cleaned = 0;
     let evicted = 0;
     const cleanupErrors: { session_id: string; reason: string }[] = [];
 
     for (const [id, rt] of [...this.runtimes]) {
+      if (selected && !selected.has(id)) continue;
       if (!rt.meta.outcome || rt.meta.status === "working" || rt.meta.status === "starting") continue;
 
       const hadWorktree = !!rt.meta.worktree && existsSync(rt.meta.worktree);
@@ -255,13 +277,25 @@ export class Coordinator {
       evicted++;
     }
 
+    // Restarted workers are in history, not runtimes. They still need safe
+    // worktree cleanup; otherwise an empty abandoned review survives forever.
+    for (const meta of this.history) {
+      if (selected && !selected.has(meta.id)) continue;
+      if (this.runtimes.has(meta.id) || meta.status !== "stopped") continue;
+      try {
+        if (await this.cleanMeta(meta)) cleaned++;
+      } catch (error) {
+        cleanupErrors.push({ session_id: meta.id, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     let branches: {
       deleted: string[];
       retained: { repo: string; branch: string; reason: string }[];
       failure?: string;
     };
     try {
-      branches = await this.gcBranches();
+      branches = await this.gcBranches(selected);
     } catch (error) {
       branches = { deleted: [], retained: [], failure: error instanceof Error ? error.message : String(error) };
     }
@@ -280,7 +314,7 @@ export class Coordinator {
     };
   }
 
-  private async gcBranches(): Promise<{
+  private async gcBranches(selected?: Set<string>): Promise<{
     deleted: string[];
     retained: { repo: string; branch: string; reason: string }[];
   }> {
@@ -288,6 +322,9 @@ export class Coordinator {
       repo: string;
       branch: string;
       blocked?: string;
+      sessionIds: Set<string>;
+      emptyAbandoned: boolean;
+      selectedOwner: boolean;
     }
 
     const byRepoBranch = new Map<string, Candidate>();
@@ -316,12 +353,22 @@ export class Coordinator {
       const key = JSON.stringify([identity, meta.branch]);
       let candidate = byRepoBranch.get(key);
       if (!candidate) {
-        candidate = { repo: meta.repo, branch: meta.branch, blocked: identityError };
+        candidate = { repo: meta.repo, branch: meta.branch, blocked: identityError,
+          sessionIds: new Set(), emptyAbandoned: false, selectedOwner: false };
         byRepoBranch.set(key, candidate);
       }
+      candidate.sessionIds.add(meta.id);
+      if (!selected || selected.has(meta.id)) candidate.selectedOwner = true;
       if (candidate.blocked) continue;
 
-      if (!meta.outcome || !FINISHED_OUTCOMES.has(meta.outcome)) {
+      if (selected && !selected.has(meta.id)) {
+        candidate.blocked = "session not selected for cleanup";
+        continue;
+      }
+
+      if (meta.outcome === "abandoned" && await this.emptyAbandoned(meta)) {
+        candidate.emptyAbandoned = true;
+      } else if (!meta.outcome || !FINISHED_OUTCOMES.has(meta.outcome)) {
         candidate.blocked = `outcome ${meta.outcome ?? "unrecorded"}`;
         continue;
       }
@@ -339,6 +386,10 @@ export class Coordinator {
     const retained: { repo: string; branch: string; reason: string }[] = [];
 
     for (const candidate of byRepoBranch.values()) {
+      if (selected && !candidate.selectedOwner) continue;
+      if (!candidate.blocked && candidate.emptyAbandoned && candidate.sessionIds.size > 1) {
+        candidate.blocked = "outcome abandoned on shared branch";
+      }
       if (candidate.blocked) {
         retained.push({ repo: candidate.repo, branch: candidate.branch, reason: candidate.blocked });
         continue;
@@ -595,6 +646,8 @@ export class Coordinator {
       branch: wt.branch,
       cwd: wt.dir,
       baseRef: baseSha,
+      controlKeyHash: opts.controlKeyHash,
+      scopeKeyHash: opts.scopeKeyHash,
       acceptance: acceptancePaths.length || opts.acceptanceCommand ? {
         files: acceptancePaths, command: opts.acceptanceCommand,
         hashes: originalAcceptanceHashes,
@@ -606,6 +659,7 @@ export class Coordinator {
       pendingQuestions: [],
     };
 
+    const workerToken = randomBytes(32).toString("base64url");
     const client = new PiRpcClient({
       cwd: wt.dir,
       piBin: this.config.piBin,
@@ -618,12 +672,13 @@ export class Coordinator {
       env: {
         PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
-        PI_COORD_TOKEN: this.config.token,
+        PI_COORD_TOKEN: workerToken,
       },
     });
 
     const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
     this.runtimes.set(id, rt);
+    this.workerTokens.set(workerToken, id);
     // The runtime now occupies the slot: stop counting it in `reserved` so it is
     // not double-counted by activeCount() while the child is starting.
     slot.transferred = true;
@@ -638,6 +693,7 @@ export class Coordinator {
       meta.error = String(e);
       // A failed startup must not leak the child process or any reservations.
       await client.stop().catch(() => {});
+      this.workerTokens.delete(workerToken);
       this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       rt.acceptanceReserved = false;
       this.scheduleSave();
@@ -671,10 +727,10 @@ export class Coordinator {
       rt.meta.lastActivity = Date.now();
       switch (event.type) {
         case "agent_start":
-          rt.meta.status = "working";
+          if (rt.meta.outcome === undefined && rt.meta.status !== "stopped") rt.meta.status = "working";
           break;
         case "agent_settled":
-          rt.meta.status = "idle";
+          if (rt.meta.outcome === undefined && rt.meta.status !== "stopped") rt.meta.status = "idle";
           void this.refreshStats(rt, true);
           break;
         case "message_end": {
@@ -798,11 +854,66 @@ export class Coordinator {
   }
 
   snapshot(id: string): SessionMeta {
-    return this.snapshotOf(this.get(id));
+    const rt = this.runtimes.get(id);
+    if (rt) return this.snapshotOf(rt);
+    const historic = this.history.find((entry) => entry.id === id);
+    if (historic) return { ...historic, pendingQuestions: [...historic.pendingQuestions] };
+    throw new Error(`unknown session: ${id}`);
+  }
+
+  /** Enforce a worker capability without ever persisting or echoing its plaintext. */
+  assertControl(id: string, controlKey?: string): void {
+    const hash = this.snapshot(id).controlKeyHash;
+    if (!hash) return; // Sessions created before capability rollout remain legacy-unprotected.
+    if (!controlKey) throw new Error(`control_key required for session ${id}`);
+    const expected = Buffer.from(hash, "hex");
+    const actual = createHash("sha256").update(controlKey).digest();
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+      throw new Error(`invalid control_key for session ${id}`);
+    }
+  }
+
+  assertControlsForAll(controlKeys: Record<string, string> = {}): void {
+    for (const meta of this.mergedHistory()) this.assertControl(meta.id, controlKeys[meta.id]);
+  }
+
+  assertControlsForActiveRepo(id: string, controlKeys: Record<string, string> = {}): void {
+    const repoIdentity = resolveRepoIdentity(this.snapshot(id).repo);
+    for (const rt of this.runtimes.values()) {
+      if (rt.repoIdentity === repoIdentity && rt.meta.status !== "stopped") {
+        this.assertControl(rt.meta.id, controlKeys[rt.meta.id]);
+      }
+    }
+  }
+
+  workerSessionForToken(token: string): string | undefined {
+    return this.workerTokens.get(token);
+  }
+
+  hasProtectedSessions(): boolean {
+    return this.mergedHistory().some((meta) => meta.controlKeyHash !== undefined);
+  }
+
+  assertSameScope(from: string, to: string): void {
+    const source = this.snapshot(from);
+    const target = this.snapshot(to);
+    if (!source.scopeKeyHash || !target.scopeKeyHash || source.scopeKeyHash !== target.scopeKeyHash) {
+      throw new Error("worker target is outside this session scope");
+    }
+  }
+
+  scopedBoardName(id: string, board: string): string {
+    const scope = this.snapshot(id).scopeKeyHash;
+    if (!scope) throw new Error("legacy worker has no scoped board");
+    return `${scope}:${board}`;
   }
 
   private snapshotOf(rt: Runtime): SessionMeta {
     return { ...rt.meta, pendingQuestions: [...rt.meta.pendingQuestions] };
+  }
+
+  private assertUnfinished(rt: Runtime): void {
+    if (rt.meta.outcome !== undefined) throw new Error(`session ${rt.meta.id} is finished`);
   }
 
   async send(
@@ -814,6 +925,7 @@ export class Coordinator {
   ): Promise<void> {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
+    this.assertUnfinished(rt);
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
     if (rt.meta.status === "error" || rt.meta.status === "stopped") {
@@ -899,6 +1011,7 @@ export class Coordinator {
 
   async commit(id: string, message: string): Promise<string> {
     const rt = this.get(id);
+    this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       if (rt.meta.status !== "idle" && rt.meta.status !== "stopped") throw new Error("settle the worker before committing");
       await checkChanges(rt.meta);
@@ -915,6 +1028,7 @@ export class Coordinator {
   authorizeWrite(id: string): void {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
+    this.assertUnfinished(rt);
     if (rt.meta.status === "stopped" || rt.meta.status === "error") throw new Error("worker is not writable");
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
@@ -929,6 +1043,7 @@ export class Coordinator {
 
   async verify(id: string, into?: string, timeoutMs = 600_000): Promise<Verification> {
     const rt = this.get(id);
+    this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle the worker and its questions before verification");
       rt.meta.verification = undefined;
@@ -944,6 +1059,7 @@ export class Coordinator {
   /** Merge a worker branch into a branch of the main repo (default: its current branch). */
   async merge(id: string, into?: string, noFf = true): Promise<MergeResult> {
     const rt = this.get(id);
+    this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       const target = into ?? await currentBranch(rt.meta.repo);
       const proof = await this.integrationGate.assertCurrent(rt.meta, target);
@@ -962,6 +1078,9 @@ export class Coordinator {
 
   async push(id: string, remote = "origin", branch?: string): Promise<string> {
     const rt = this.get(id);
+    if (branch && branch !== rt.meta.branch && branch !== await currentBranch(rt.meta.repo)) {
+      throw new Error("pi_push may only push the controlled worker branch or the repository's current branch");
+    }
     return pushBranch(rt.meta.repo, remote, branch);
   }
 
@@ -973,6 +1092,7 @@ export class Coordinator {
     login = false,
   ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
     const rt = this.get(id);
+    this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
@@ -1003,6 +1123,7 @@ export class Coordinator {
     this.assertRepoAvailable(rt.repoIdentity);
     await this.refreshStats(rt, true);
     await rt.client.stop();
+    for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
     rt.meta.status = "stopped";
     rt.meta.lastActivity = Date.now();
     this.locks.releaseAll(id, rt.repoIdentity);
@@ -1167,12 +1288,40 @@ export class Coordinator {
   }
 
   async setOutcome(id: string, outcome: Outcome, note?: string): Promise<void> {
-    const rt = this.get(id);
     if (outcome === "taken_over" && !note?.trim()) {
       throw new Error("taken_over requires a nonempty note explaining the takeover reason");
     }
-    return this.withRepoGuard(rt, async () => {
-      if (FINISHED_OUTCOMES.has(outcome)) {
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      const historic = this.history.find((entry) => entry.id === id);
+      if (!historic) throw new Error(`unknown session: ${id}`);
+      if (historic.outcome !== undefined) throw new Error(`session ${id} is already finished`);
+      if (outcome !== "abandoned") {
+        throw new Error("archived sessions without a live verification gate can only be marked abandoned");
+      }
+      historic.outcome = outcome;
+      if (note !== undefined) historic.outcomeNote = note;
+      this.scheduleSave();
+      this.notifyWaiters();
+      return;
+    }
+    this.assertUnfinished(rt);
+    await this.withRepoGuard(rt, async () => {
+      const readonlySuccess = (outcome === "success_first" || outcome === "success_second")
+        && (rt.meta.spec?.purpose === "review" || rt.meta.spec?.purpose === "investigation");
+      if (readonlySuccess) {
+        if (!note?.trim()) throw new Error("read-only success requires an orchestrator acceptance note");
+        if (rt.meta.status !== "idle" && rt.meta.status !== "stopped") throw new Error("settle the read-only worker before acceptance");
+        if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle worker questions before acceptance");
+        if (!rt.meta.lastText?.trim()) throw new Error("read-only success requires a delivered worker report");
+        const diff = await worktreeDiff(rt.meta.worktree, rt.meta.baseRef);
+        if (diff.files.length || !(await isWorktreeClean(rt.meta.worktree))) {
+          throw new Error("read-only success requires an unchanged, clean worker worktree");
+        }
+        rt.meta.reviewAcceptance = {
+          acceptedAt: Date.now(), workerSha: await resolveRef(rt.meta.worktree, "HEAD"), note: note.trim(),
+        };
+      } else if (FINISHED_OUTCOMES.has(outcome)) {
         const proof = rt.meta.verification;
         if (!proof) throw new Error("successful outcome requires current pi_verify evidence");
         await this.integrationGate.assertCurrent(rt.meta, proof.targetBranch, proof.codeChanged);
@@ -1189,6 +1338,12 @@ export class Coordinator {
       this.scheduleSave();
       this.notifyWaiters();
     });
+    if (rt.meta.status === "stopped") {
+      this.archive(rt.meta);
+      this.scheduleSave();
+    } else {
+      await this.stop(id);
+    }
   }
 
   /** Persist a finished/settled session snapshot so the scoreboard survives daemon restarts. */
@@ -1200,9 +1355,10 @@ export class Coordinator {
   }
 
   setTestsOwned(id: string, owned: boolean): void {
-    const rt = this.get(id);
-    rt.meta.testsOwnedByCodex = owned;
+    const rt = this.runtimes.get(id);
     const historic = this.history.find((entry) => entry.id === id);
+    if (!rt && !historic) throw new Error(`unknown session: ${id}`);
+    if (rt) rt.meta.testsOwnedByCodex = owned;
     if (historic) historic.testsOwnedByCodex = owned;
     this.scheduleSave();
     this.notifyWaiters();
@@ -1217,8 +1373,12 @@ export class Coordinator {
    * or second attempt, how many Codex took over after the two-strikes gate, and
    * the percentages.
    */
-  async report(): Promise<Record<string, unknown>> {
-    const ids = [...this.runtimes.keys()];
+  async report(sessionIds?: string[]): Promise<Record<string, unknown>> {
+    const selected = sessionIds === undefined ? undefined : new Set(sessionIds);
+    const knownIds = new Set(this.mergedHistory().map((entry) => entry.id));
+    const unknownIds = sessionIds?.filter((id) => !knownIds.has(id)) ?? [];
+    if (unknownIds.length) throw new Error(`unknown session ids: ${[...new Set(unknownIds)].join(", ")}`);
+    const ids = [...this.runtimes.keys()].filter((id) => selected === undefined || selected.has(id));
     await Promise.all(
       ids.map((id) => {
         const rt = this.runtimes.get(id);
@@ -1226,14 +1386,15 @@ export class Coordinator {
       }),
     );
 
-    const sessions = this.list();
+    const sessions = this.list().filter((session) => selected === undefined || selected.has(session.id));
+    const history = this.history.filter((session) => selected === undefined || selected.has(session.id));
     const activeTasks = sessions.filter(
       (s) => s.status === "starting" || s.status === "idle" || s.status === "working",
     ).length;
 
     // Merge live sessions with the persisted history (live wins on id collisions).
     const byId = new Map<string, SessionMeta>();
-    for (const entry of this.history) byId.set(entry.id, entry);
+    for (const entry of history) byId.set(entry.id, entry);
     for (const session of sessions) byId.set(session.id, session);
     const all = [...byId.values()];
 
@@ -1249,8 +1410,19 @@ export class Coordinator {
       [...WORKSTREAM_PURPOSES, "unspecified"].map((purpose) => [purpose, { total: 0, counts: { ...counts } }]),
     ) as Record<WorkstreamPurpose | "unspecified", { total: number; counts: typeof counts }>;
 
+    const inconsistentOutcomes: { id: string; reasons: string[] }[] = [];
     const tasks = all.map((session) => {
       const outcome = session.outcome ?? "unrecorded";
+      if (FINISHED_OUTCOMES.has(outcome as Outcome)) {
+        const reasons: string[] = [];
+        if (!session.reviewAcceptance && !session.verification?.passed) reasons.push("missing passing verification or read-only acceptance");
+        if (session.reviewAcceptance && session.spec?.purpose !== "review" && session.spec?.purpose !== "investigation") {
+          reasons.push("read-only acceptance on non-review workstream");
+        }
+        if (session.verification?.codeChanged && !session.integration) reasons.push("missing integration");
+        if (session.status === "starting" || session.status === "working") reasons.push("worker still active");
+        if (reasons.length) inconsistentOutcomes.push({ id: session.id, reasons });
+      }
       const purpose = session.spec?.purpose ?? "unspecified";
       counts[outcome]++;
       byPurpose[purpose].total++;
@@ -1265,6 +1437,7 @@ export class Coordinator {
         instructions_sent: session.instructionsSent ?? 0,
         note: session.outcomeNote,
         tests_owned_by_codex: session.testsOwnedByCodex ?? null,
+        review_accepted: session.reviewAcceptance !== undefined,
         cost: session.cost,
         output_tokens: session.tokens?.output ?? 0,
       };
@@ -1277,17 +1450,18 @@ export class Coordinator {
     return {
       total_tasks: total,
       active_tasks: activeTasks,
-      archived_tasks: this.history.length,
+      archived_tasks: history.length,
       counts,
+      inconsistent_outcomes: inconsistentOutcomes,
       workstreams_by_purpose: byPurpose,
       percentages,
       delegated_success_rate: pct(counts.success_first + counts.success_second),
       first_try_rate: pct(counts.success_first),
       take_over_rate: pct(counts.taken_over),
-      cost_evidence: await this.metrics(),
+      cost_evidence: await this.metrics(sessionIds),
       worker_output_tokens: workerOutput,
       tasks,
-      note: "One 'task' = one worker workstream/session. Overall counts and rates include all purposes, not implementation contribution. Purpose is assigned by spec, not inferred from names or outcomes; unspecified means it was not recorded. Actual code contribution requires diff and integration evidence; direct orchestrator work is not measured here. Successful outcomes require verified evidence and integration for changed code. unrecorded means the workstream was never closed with an outcome.",
+      note: "One 'task' = one worker workstream/session. Overall counts and rates include all purposes, not implementation contribution. Purpose is assigned by spec, not inferred from names or outcomes; unspecified means it was not recorded. Actual code contribution requires diff and integration evidence; direct orchestrator work is not measured here. Recorded successes with missing current proof or active workers appear in inconsistent_outcomes and must not be treated as verified current evidence. unrecorded means the workstream was never closed with an outcome.",
     };
   }
 

@@ -179,6 +179,15 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
     fail(file, `${at}.outcome is not a known outcome`);
   }
 
+  if (entry.controlKeyHash !== undefined
+    && (typeof entry.controlKeyHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.controlKeyHash))) {
+    fail(file, `${at}.controlKeyHash is invalid`);
+  }
+  if (entry.scopeKeyHash !== undefined
+    && (typeof entry.scopeKeyHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.scopeKeyHash))) {
+    fail(file, `${at}.scopeKeyHash is invalid`);
+  }
+
   if (entry.spec !== undefined) {
     const spec = entry.spec;
     if (!isRecord(spec)) fail(file, `${at}.spec must be an object`);
@@ -207,6 +216,14 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       || !isRecord(proof.result) || typeof proof.result.stdout !== "string" || typeof proof.result.stderr !== "string"
       || typeof proof.result.timedOut !== "boolean" || !(proof.result.code === null || Number.isInteger(proof.result.code))) {
       fail(file, `${at}.verification is invalid`);
+    }
+  }
+  if (entry.reviewAcceptance !== undefined) {
+    const acceptance = entry.reviewAcceptance;
+    if (!isRecord(acceptance) || typeof acceptance.acceptedAt !== "number" || !Number.isFinite(acceptance.acceptedAt)
+      || typeof acceptance.workerSha !== "string" || !/^[a-f0-9]{40,64}$/.test(acceptance.workerSha)
+      || typeof acceptance.note !== "string" || !acceptance.note.trim()) {
+      fail(file, `${at}.reviewAcceptance is invalid`);
     }
   }
   if (entry.integration !== undefined) {

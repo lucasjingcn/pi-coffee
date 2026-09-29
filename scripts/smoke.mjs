@@ -285,58 +285,58 @@ async function main() {
     acceptance_command: "cat tests/acc.txt",
   });
   const s1 = r.data;
-  check("D1 structured spec spawn succeeds", !!s1?.id && s1?.spec?.goal === "make the acceptance test pass", s1);
-  check("D1a implementation purpose survives MCP dispatch", s1?.purpose === "implementation" && s1?.spec?.purpose === "implementation", s1);
+  check("D1 structured spec spawn succeeds", !!s1?.id && !!s1?.control_key && !!s1?.scope_key && s1?.spec?.goal === "make the acceptance test pass", s1?.id);
+  check("D1a implementation purpose survives MCP dispatch", s1?.purpose === "implementation" && s1?.spec?.purpose === "implementation", s1?.purpose);
   check("D2 acceptance file written into worktree", s1?.id && existsSync(join(WORKTREES, s1.id, "tests/acc.txt")));
 
-  r = await mcpCall("pi_claim", { session_id: s1.id, paths: ["tests/acc.txt"], mode: "rw" });
+  r = await mcpCall("pi_claim", { session_id: s1.id, control_key: s1.control_key, paths: ["tests/acc.txt"], mode: "rw" });
   check("D3 acceptance test is locked against the worker", r.data?.ok === false && r.data?.conflicts?.[0]?.sessionId === "codex", r.data);
 
   // --- scope overlap -----------------------------------------------------------------------
   r = await mcpCall("pi_spawn", { task: "B", spec: { goal: "overlap", scope: ["src/a.ts"], task_type: "mechanical" } });
   check("E  overlapping scope rejected at dispatch", r.isError, r.data);
 
-  r = await mcpCall("pi_spawn", { task: "C", spec: { goal: "Reply with exactly READY and stop; do not modify any files.", scope: ["src/other.ts"], task_type: "feature", purpose: "review" } });
+  r = await mcpCall("pi_spawn", { task: "C", scope_key: s1.scope_key, spec: { goal: "Reply with exactly READY and stop; do not modify any files.", scope: ["src/other.ts"], task_type: "feature", purpose: "review" } });
   const s3 = r.data;
-  check("F  non-overlapping spawn succeeds", !!s3?.id, s3);
+  check("F  non-overlapping spawn succeeds", !!s3?.id && s3?.scope_key === s1.scope_key, s3?.id);
   check("F2 the spec became the first instruction (attempt 1)", s3?.instructions_sent === 1, s3?.instructions_sent);
 
   // --- committed diff visibility -----------------------------------------------------------
-  await mcpCall("pi_exec", { session_id: s1.id, command: "printf y > y.txt && git add -A && git commit -qm y" });
+  await mcpCall("pi_exec", { session_id: s1.id, control_key: s1.control_key, command: "printf y > y.txt && git add -A && git commit -qm y" });
   r = await mcpCall("pi_diff", { session_id: s1.id });
   check("G  pi_diff shows committed changes", (r.data?.files || []).includes("y.txt"), r.data?.files);
 
   // --- finish + report ---------------------------------------------------------------------
-  r = await mcpCall("pi_finish", { session_id: s1.id, outcome: "success_first" });
+  r = await mcpCall("pi_finish", { session_id: s1.id, control_key: s1.control_key, outcome: "success_first" });
   check("H0 unverified success is rejected", r.isError, r.data);
-  r = await mcpCall("pi_verify", { session_id: s1.id });
+  r = await mcpCall("pi_verify", { session_id: s1.id, control_key: s1.control_key });
   check("H1 exact integration candidate passes verification", r.data?.passed === true, r.data);
-  r = await mcpCall("pi_merge", { session_id: s1.id });
+  r = await mcpCall("pi_merge", { session_id: s1.id, control_key: s1.control_key });
   check("H2 verified candidate integrates", r.data?.ok === true, r.data);
-  await mcpCall("pi_finish", { session_id: s1.id, outcome: "success_first", tests_owned_by_codex: true });
+  await mcpCall("pi_finish", { session_id: s1.id, control_key: s1.control_key, outcome: "success_first", tests_owned_by_codex: true });
   r = await mcpCall("pi_report", {});
   check("H  report counts the closed workstream", (r.data?.counts?.success_first || 0) >= 1, r.data?.counts);
   check("H5 report separates implementation and review", r.data?.workstreams_by_purpose?.implementation?.total === 1
     && r.data?.workstreams_by_purpose?.review?.total === 1
     && r.data?.tasks?.find((task) => task.id === s3.id)?.purpose === "review", r.data);
-  r = await mcpCall("pi_record_cost", { id: "smoke-orchestrator", amount: 0.25, currency: "USD", source: "manual", reference: "offline test fixture, not a provider charge", session_ids: [s1.id] });
+  r = await mcpCall("pi_record_cost", { id: "smoke-orchestrator", amount: 0.25, currency: "USD", source: "manual", reference: "offline test fixture, not a provider charge", session_ids: [s1.id], control_keys: {[s1.id]:s1.control_key} });
   check("H3 sourced cost registration", !r.isError && r.data?.id === "smoke-orchestrator", r.data);
   r = await mcpCall("pi_metrics", { session_ids: [s1.id] });
   check("H4 cost evidence reports source and coverage", r.data?.combined?.complete === true && r.data?.orchestrator?.sources?.includes("manual"), r.data);
 
   // --- model routing + two-strikes (fake pi offline, real models live) --------------------
   await mcpCall("pi_wait", { session_ids: [s3.id], until: "settled", timeout_ms: 60000 });
-  r = await mcpCall("pi_send", { session_id: s3.id, message: "Reply with exactly OK and stop." });
+  r = await mcpCall("pi_send", { session_id: s3.id, control_key: s3.control_key, message: "Reply with exactly OK and stop." });
   check(
     "L1  retry (attempt 2) does NOT auto-escalate the model",
     !r.data?.escalated_to && r.data?.instructions_sent === 2,
     r.data,
   );
-  r = await mcpCall("pi_send", { session_id: s3.id, message: "third instruction" });
+  r = await mcpCall("pi_send", { session_id: s3.id, control_key: s3.control_key, message: "third instruction" });
   check("L2  third instruction blocked (two-strikes)", r.isError && r.data?.rule === "two-strikes", r.data);
 
   // --- persistence across restart ----------------------------------------------------------
-  await mcpCall("pi_stop", { session_id: s1.id });
+  await mcpCall("pi_stop", { session_id: s1.id, control_key: s1.control_key });
   check("J  finished worker's worktree auto-cleaned", !existsSync(join(WORKTREES, s1.id)), join(WORKTREES, s1.id));
   await stopDaemon();
   startDaemon(piBin);

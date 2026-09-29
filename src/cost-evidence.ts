@@ -9,6 +9,9 @@ export interface CostSession {
   turns?: number;
   instructionsSent?: number;
   orchestratorChars?: number;
+  /** Internal capability verifier; never included in returned cost evidence. */
+  controlKeyHash?: string;
+  scopeKeyHash?: string;
 }
 
 export interface OrchestratorCostRecord {
@@ -122,7 +125,10 @@ export function summarizeCostEvidence(input: CostEvidenceInput) {
   return {
     selected_session_ids: selectedIds,
     unknown_session_ids,
-    sessions: sessions.map((session) => ({ ...session, cost: validAmount(session.cost) ? session.cost : null })),
+    sessions: sessions.map((session) => {
+      const { controlKeyHash: _controlKeyHash, scopeKeyHash: _scopeKeyHash, ...visible } = session;
+      return { ...visible, cost: validAmount(session.cost) ? session.cost : null };
+    }),
     worker: { currency: workerCurrency, total: workerComplete ? workerSubtotal : null, known_subtotal: workerSubtotal, complete: workerComplete, missing_session_ids: missingWorkerIds },
     orchestrator: { currency: orchestratorCurrency, total: orchestratorTotal, known_subtotals: { ...currencyTotals }, complete: orchestratorComplete, missing_session_ids: missingOrchestratorIds, excluded_record_ids: excludedRecordIds, sources: [...new Set(records.map((record) => record.source))], records },
     combined: { currency: combinedComplete ? workerCurrency : null, total: combinedTotal, complete: combinedComplete, reasons },

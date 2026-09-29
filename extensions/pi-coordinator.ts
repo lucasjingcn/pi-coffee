@@ -101,9 +101,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "coord_send",
     label: "coord_send",
-    description: "Send a message to another worker session (or '*' to broadcast). Injected into their conversation.",
+    description: "Send a message to a worker in the same scope. Injected into their conversation; cross-scope and broadcast sends are blocked.",
     parameters: Type.Object({
-      to: Type.String({ description: "Target session id, or '*' for all" }),
+      to: Type.String({ description: "Target session id in this worker's scope" }),
       message: Type.String(),
       kind: Type.Optional(Type.String({ description: "note | question | answer | broadcast" })),
     }),
@@ -165,7 +165,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "coord_board_post",
     label: "coord_board_post",
-    description: "Post a fact/decision/interface to a shared board that all workers can read.",
+    description: "Post a fact/decision/interface to the board shared by workers in this scope.",
     parameters: Type.Object({ board: Type.String(), key: Type.String(), value: Type.String() }),
     async execute(_id, params) {
       return ok(JSON.stringify(await call("/internal/board/post", { ...params, from: sessionId })));

@@ -15,6 +15,21 @@ verification, Git operations, and external actions. This skill does not grant au
 push, deploy, spend money, send messages to others, or write production data. Local integration does
 not authorize a push. Workers must follow the same boundaries.
 
+The daemon is shared by all Codex chats, and session IDs are global. It cannot trust a Codex chat ID.
+Check the live tool schemas before assuming this boundary is active: `pi_spawn` must accept
+`scope_key` and `pi_send` must accept `control_key`. If not, the daemon has not been restarted
+onto this version. Treat all workers
+as legacy-unprotected until the shared daemon is safely upgraded.
+For each new `pi_spawn`, retain its one-time `control_key` in this chat and pass it to every worker
+write (`pi_send`, `pi_answer`, `pi_commit`, `pi_verify`, `pi_merge`, `pi_exec`, `pi_finish`, `pi_stop`,
+etc.). Pass the first spawn's `scope_key` to later `pi_spawn` calls in this chat so those workers can
+coordinate; use it for their shared board. Never put either key in a worker prompt, report, commit,
+or user-facing output. Keep your own IDs and use scoped `pi_wait`, `pi_list`, `pi_report`, and
+`pi_metrics`. `pi_gc` should receive only your `session_ids` and matching `control_keys`; global
+writes require all affected keys. Legacy workers are marked `control_required:false` and remain
+unprotected by this new boundary. Daemon restart still affects all chats; a single idle snapshot
+is not a safe restart lease because another chat can spawn.
+
 Keep the documented model and output quality. Never lower model capability, reference material,
 resolution, acceptance requirements, or workflow steps to make a task cheaper or easier. Model
 changes require the user's approval under the current project rules; retries stay on the same model
@@ -89,6 +104,12 @@ blocker for actual provider checks, never permission to fabricate a successful r
 6. After acceptance and review pass, use `pi_merge` for authorized local integration. The gate
    rechecks current evidence; daemon restart does not restore an old merge permit.
 
+For a read-only `review` or `investigation`, inspect the worker report and unchanged worktree,
+then close with `pi_finish(success_first|success_second, note=...)` when you accept the findings.
+The daemon records separate read-only acceptance evidence and rejects changes in that worktree.
+Do not mark delivered read-only work `abandoned` merely because it has no code candidate. An
+implementation or takeover still requires the normal `pi_verify` and integration gates.
+
 A passed command proves the covered behavior in its actual environment. Offline fixtures, HTTP
 health, and Git success do not prove real model output, business completion, or savings. Preserve
 required external checks and identify any remaining credential or authorization dependency.
@@ -118,6 +139,9 @@ Prefer a small number of workers with distinct file sets. `PI_COFFEE_PARALLEL_WA
 capacity warning, not a mandate to fill slots. Review may gather evidence in parallel; final judgment
 uses the consolidated evidence. Send actionable findings to the owner or fix them directly when
 that is the more effective authorized path.
+Check a long-running worker's reviewable diff and acceptance progress, not just its turn count.
+If it keeps consuming turns without concrete progress, reassess the scope or contract and stop the
+workstream when appropriate; do not let a stalled worker run indefinitely.
 
 Integrate in dependency order and preserve unrelated changes. Commits, pushes, deployment, cleanup,
 and external writes each follow user authorization and the target repository's rules. Workers never
@@ -125,25 +149,37 @@ push. A tool being available does not authorize its side effects.
 
 ## Close and report
 
+Use `pi_wait` for a group of workers and `pi_list` for a concise snapshot; reserve
+`pi_status(detail=full)` for a specific session whose contract or proof needs inspection.
+Avoid repeated per-worker status calls and repeated full reports while workers are running.
+
 Close each workstream with `pi_finish`: `success_first`, `success_second`, `taken_over`, or `abandoned`.
+It stops the worker and preserves its result and evidence; a finished session cannot receive more
+instructions or writes. A stopped historical session without live acceptance evidence can only be
+closed as `abandoned`, not retroactively called successful or taken over.
 Successful outcomes require passing candidate evidence; a successful workstream with code changes
 also requires integration. An abandoned task may be closed without claiming acceptance.
 
-Report implementation, review and investigation separately using `pi_report.workstreams_by_purpose`.
+Report implementation, review and investigation separately using `pi_report(session_ids=...)` and
+its `workstreams_by_purpose` field. Omit `session_ids` only for an intentional global audit.
 A read-only review must not be reported as delegated implementation. Missing historical purposes remain
 `unspecified`; never infer them from names, token volume or successful outcomes. Describe the actual
 worker changes and the orchestrator's direct implementation, review, integration and takeovers with
 their reasons. Assigned purpose is not proof of code contribution: use the full diff and integration
 evidence. Workstream counts do not measure the proportion of code written or establish savings.
 
-Use `pi_report` for outcomes and `pi_metrics` for usage and cost coverage. Include active and historical
-work, failures, and corrections. Missing costs are unknown, not zero. Distinguish provider-reported,
+Use the concise `pi_report` for outcomes and `pi_metrics` for detailed usage and cost coverage.
+Inspect `inconsistent_outcomes` before citing success counts: a recorded outcome without current proof
+is not current acceptance evidence. Include active and historical work, failures, and corrections.
+Missing costs are unknown, not zero. Distinguish provider-reported,
 manual and estimated evidence, and disclose absent orchestrator usage. Worker output divided by
 partial instruction tokens measures output distribution; it is not a savings rate or quality score.
 A financial comparison needs equivalent scope, acceptance, quality, elapsed time, currency, and the
 complete cost of both worker and orchestrator work, including review and rework.
 
-Use `pi_gc` only under the task's cleanup authorization. It retains dirty worktrees, active or
-unfinished sessions, checked-out branches, and branches whose ancestry does not prove integration.
+Use scoped `pi_gc(session_ids=..., control_keys=...)` only under the task's cleanup authorization.
+It reclaims clean accepted work and empty abandoned work from both live and historical sessions.
+It retains dirty worktrees, active or unfinished sessions, abandoned work with new commits,
+checked-out branches, and branches whose ancestry does not prove integration.
 Report retained resources and external checks accurately. When local acceptance is satisfied and
 only authorized external dependencies remain, stop local work and report those dependencies.

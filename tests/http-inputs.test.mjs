@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {createHash} from 'node:crypto';
 
-async function daemon(fn, token = '') {
+async function daemon(fn, token = '', history = []) {
   const dir = await mkdtemp(join(tmpdir(), 'pi-http-test-'));
+  if (history.length) await writeFile(join(dir,'state.json'),JSON.stringify({counter:0,history,mailbox:[],board:[]}));
   const probe = createServer();
   await new Promise(r => probe.listen(0, '127.0.0.1', r));
   const port = probe.address().port;
@@ -26,7 +28,7 @@ async function daemon(fn, token = '') {
       await new Promise(r => setTimeout(r, 20));
     }
     assert.ok(ready, 'daemon became ready');
-    await fn(base, port);
+    await fn(base, port, dir);
   } finally {
     proc.kill('SIGTERM');
     const killTimer = setTimeout(() => proc.kill('SIGKILL'), 2000);
@@ -57,3 +59,17 @@ test('HTTP broadcast read acknowledgements reach only their recipient', { timeou
   assert.equal((await (await fetch(base + '/internal/inbox?sessionId=one&unread=1')).json()).messages.length, 0);
   assert.equal((await (await fetch(base + '/internal/inbox?sessionId=two&unread=1')).json()).messages.length, 1);
 }));
+
+test('protected sessions close unauthenticated internal mutation bypass and redact hashes', {timeout:10000}, async()=>{
+  const hash=createHash('sha256').update('secret-control').digest('hex');
+  const history=[{id:'protected',name:'protected',repo:'/missing',worktree:'/missing/worker',branch:'pi/protected',
+    cwd:'/missing',baseRef:'HEAD',status:'stopped',createdAt:1,lastActivity:1,pendingQuestions:[],controlKeyHash:hash,scopeKeyHash:hash}];
+  await daemon(async base=>{
+    const response=await fetch(base+'/internal/claim',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({sessionId:'protected',paths:['src/a']})});
+    assert.equal(response.status,401);
+    const status=await (await fetch(base+'/internal/status?sessionId=protected')).json();
+    assert.equal(status.id,'protected');
+    assert.equal(JSON.stringify(status).includes(hash),false);
+  },'',history);
+});

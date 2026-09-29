@@ -62,6 +62,18 @@ function authorized(req: IncomingMessage): boolean {
   return false;
 }
 
+function requestToken(req: IncomingMessage): string {
+  const header = req.headers["x-pi-coord-token"];
+  if (typeof header === "string") return header;
+  const auth = req.headers.authorization;
+  return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : "";
+}
+
+function visibleSession(meta: ReturnType<typeof coord.snapshot>) {
+  const { controlKeyHash: _controlKeyHash, scopeKeyHash: _scopeKeyHash, ...visible } = meta;
+  return visible;
+}
+
 // ---------------------------------------------------------------------------
 // MCP endpoint
 // ---------------------------------------------------------------------------
@@ -94,7 +106,14 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
 // ---------------------------------------------------------------------------
 
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-  if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
+  const token = requestToken(req);
+  const workerSid = token ? coord.workerSessionForToken(token) : undefined;
+  const master = Boolean(config.token) && authorized(req) && !workerSid;
+  const mutating = new Set(["/internal/hello", "/internal/claim", "/internal/authorize-write",
+    "/internal/release", "/internal/read", "/internal/send", "/internal/board/post"]);
+  if (!workerSid && !master && (Boolean(config.token) || (coord.hasProtectedSessions() && mutating.has(url.pathname)))) {
+    return sendJson(res, 401, { error: "unauthorized" });
+  }
 
   let body: any = {};
   try {
@@ -103,6 +122,10 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
     return sendJson(res, 400, { error: String(error instanceof Error ? error.message : error) });
   }
 
+  const own = (id: unknown): void => {
+    if (workerSid && id !== workerSid) throw new Error("worker token cannot target another session");
+  };
+
   try {
     switch (url.pathname) {
       case "/internal/health":
@@ -110,17 +133,25 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 
       case "/internal/hello": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
+        own(sid);
         if (sid) coord.markExtension(sid);
         return sendJson(res, 200, { ok: true });
       }
 
       case "/internal/sessions":
-        return sendJson(res, 200, { sessions: coord.list() });
+        return sendJson(res, 200, { sessions: coord.list()
+          .filter((meta) => !workerSid || (meta.scopeKeyHash && meta.scopeKeyHash === coord.snapshot(workerSid).scopeKeyHash))
+          .map(visibleSession) });
 
       case "/internal/status": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
-        if (sid) return sendJson(res, 200, coord.snapshot(sid));
-        return sendJson(res, 200, { sessions: coord.list() });
+        if (sid) {
+          if (workerSid) coord.assertSameScope(workerSid, sid);
+          return sendJson(res, 200, visibleSession(coord.snapshot(sid)));
+        }
+        return sendJson(res, 200, { sessions: coord.list()
+          .filter((meta) => !workerSid || (meta.scopeKeyHash && meta.scopeKeyHash === coord.snapshot(workerSid).scopeKeyHash))
+          .map(visibleSession) });
       }
 
       case "/internal/claim": {
@@ -133,17 +164,20 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         if (!sessionId || !Array.isArray(paths)) {
           return sendJson(res, 400, { error: "sessionId and paths required" });
         }
+        own(sessionId);
         return sendJson(res, 200, coord.claim(sessionId, paths, mode ?? "rw", repo));
       }
 
       case "/internal/authorize-write": {
         if (typeof body.sessionId !== "string") return sendJson(res, 400, { error: "sessionId required" });
+        own(body.sessionId);
         coord.authorizeWrite(body.sessionId);
         return sendJson(res, 200, { ok: true });
       }
 
       case "/internal/release": {
         const { sessionId, paths, repo } = body as { sessionId: string; paths?: string[]; repo?: string };
+        own(sessionId);
         return sendJson(res, 200, { released: coord.releaseLocks(sessionId, paths, repo) });
       }
 
@@ -152,12 +186,14 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 
       case "/internal/inbox": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
+        own(sid);
         const unread = url.searchParams.get("unread") === "1" || body.unreadOnly === true;
         return sendJson(res, 200, { messages: coord.inbox(sid, unread) });
       }
 
       case "/internal/read": {
         const ids = (body.ids as string[]) ?? [];
+        own(body.sessionId);
         coord.markRead(ids, body.sessionId);
         return sendJson(res, 200, { ok: true });
       }
@@ -165,14 +201,20 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       case "/internal/send": {
         const { from, to, text, kind, deliver } = body as any;
         if (!to || !text) return sendJson(res, 400, { error: "to and text required" });
-        return sendJson(res, 200, coord.postMessage(from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
+        if (workerSid) {
+          if (to === "*") throw new Error("worker broadcast is unavailable across session scopes");
+          coord.assertSameScope(workerSid, to);
+        }
+        return sendJson(res, 200, coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
       }
 
       case "/internal/board/get": {
         const board = url.searchParams.get("board") || body.board;
         const latest = url.searchParams.get("latest") === "1" || body.latest === true;
         if (!board) return sendJson(res, 400, { error: "board required" });
-        return sendJson(res, 200, { entries: latest ? coord.boardLatest(board) : coord.boardRead(board, body.key) });
+        const scopedBoard = workerSid ? coord.scopedBoardName(workerSid, board) : board;
+        const entries = latest ? coord.boardLatest(scopedBoard) : coord.boardRead(scopedBoard, body.key);
+        return sendJson(res, 200, { entries: workerSid ? entries.map((entry) => ({ ...entry, board })) : entries });
       }
 
       case "/internal/board/post": {
@@ -180,7 +222,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         if (!board || !key || value === undefined) {
           return sendJson(res, 400, { error: "board, key, value required" });
         }
-        return sendJson(res, 200, coord.boardPost(board, key, String(value), from ?? "unknown"));
+        const entry = coord.boardPost(workerSid ? coord.scopedBoardName(workerSid, board) : board,
+          key, String(value), workerSid ?? from ?? "unknown");
+        return sendJson(res, 200, workerSid ? { ...entry, board } : entry);
       }
 
       default:

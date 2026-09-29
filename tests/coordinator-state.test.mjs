@@ -4,6 +4,7 @@ import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {existsSync} from 'node:fs';
 import {Coordinator} from '../dist/manager.js';
 import {loadConfig} from '../dist/config.js';
 import {PiRpcClient} from '../dist/rpc-client.js';
@@ -26,6 +27,13 @@ test('parallel spawns respect concurrency cap before worktree creation',async()=
  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
  assert.equal(c.list().filter(s=>s.status==='idle').length,1);
 },1));
+test('an empty abandoned worker auto-cleans its stopped worktree',async()=>fixture(async(c)=>{
+ c.config.autoClean=true;
+ const s=await c.spawn({spec:{goal:'read-only review',scope:['src'],purpose:'review'}});
+ await c.setOutcome(s.id,'abandoned','Review superseded');
+ assert.equal(existsSync(s.worktree),false);
+ assert.equal(c.snapshot(s.id).outcome,'abandoned');
+}));
 test('restart clears locks belonging to workers that cannot survive daemon restart',async()=>fixture(async(c,config)=>{
  const s=await c.spawn({spec:{goal:'one',scope:['a']},acceptanceFiles:[{path:'tests/one',content:'test'}]});
  c.claim(s.id,['extra'],'rw');await delay(650);

@@ -88,6 +88,22 @@ model changes follow user approval and project rules. Small fixes and tightly co
 be completed directly. Workers are useful for clearly scoped, independent, objectively verifiable
 work when the expected benefit exceeds coordination overhead.
 
+One daemon serves every Codex chat configured to use it. Worker IDs are global, and the daemon does
+not receive a trustworthy Codex chat ID. Each new `pi_spawn` therefore returns a one-time
+`control_key`; the daemon stores only its hash and requires the key for worker writes, verification,
+merge, finish, stop, and cleanup. Keep each key in its originating chat. The first spawn also returns
+`scope_key`: pass it to later spawns in that chat to allow worker-to-worker messages and a shared
+board. A new worker's internal token is limited to its own session and that scope, rather than the
+daemon's master token. Keep both keys out of prompts, commits, reports, and user-facing output.
+`pi_status`/`pi_list` show `control_required`; legacy workers show `false` and retain their old
+behavior. Reads and global audits remain visible to daemon clients, and processes under the same OS
+user can access local state; this boundary prevents cross-chat operations through the pi APIs, not
+host-level access. Pass your IDs to `pi_wait`, `pi_list`, `pi_report`, and `pi_metrics`; an unfiltered
+report is daemon-wide. Use scoped `pi_gc` for cleanup. Coordinate daemon restarts across chats: an
+idle snapshot does not prevent a new worker from starting immediately afterward.
+If the live `pi_spawn` input schema lacks `scope_key` or `pi_send` lacks `control_key`, that daemon
+is still on the previous version; source changes and an installed skill alone do not activate isolation.
+
 ```mermaid
 flowchart LR
     R[Requirement] --> O[Orchestrator<br/>scope / acceptance / decisions]
@@ -102,8 +118,9 @@ flowchart LR
 Missing costs remain unknown. Select a task set with `session_ids`; use `pi_record_cost` to register
 orchestrator cost evidence with its amount, currency, source (`manual`, `estimate`, or `provider`),
 nonempty reference, and covered session IDs.
-`pi_report` includes `cost_evidence` alongside the delegation outcomes. Manual and estimated records
-are labeled separately from provider-reported costs.
+`pi_report` includes compact cost coverage alongside the delegation outcomes; `pi_metrics` returns
+the complete per-session evidence. Manual and estimated records are labeled separately from
+provider-reported costs.
 
 `spec.purpose` declares `implementation`, `review`, or `investigation`; `pi_report` returns separate
 `workstreams_by_purpose` counts and outcomes. Older or unclassified work stays `unspecified`.
@@ -286,8 +303,9 @@ repositories retain their own rules.
 5. `pi_merge` requires current passing evidence. Changed SHAs, acceptance files, scope violations,
    dirty target checkouts, and failed or timed-out acceptance block integration. Reverify a changed
    candidate. After a daemon restart, historical evidence does not restore permission to merge.
-6. Close with `pi_finish`, then inspect `pi_report` / `pi_metrics`. A successful outcome needs passing
-   acceptance and, if code changed, an integration record. Clean up with `pi_gc` when authorized.
+6. Close with `pi_finish`, which stops the worker, then inspect `pi_report` / `pi_metrics`.
+   A successful outcome needs passing acceptance and, if code changed, an integration record.
+   Check `inconsistent_outcomes` before citing recorded successes. Clean up with `pi_gc` when authorized.
 
 `pi_exec` remains a diagnostic command runner; its passing result is not a merge permit. The
 orchestrator owns review and final judgment. A worker gets the original task plus one correction;
@@ -353,10 +371,10 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 
 | Tool | What it does |
 |---|---|
-| `pi_spawn` | Create a worktree and branch, then start a worker. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
+| `pi_spawn` | Create a worktree and branch, then start a worker. Returns its one-time `control_key` and a `scope_key`; pass the first scope key into later spawns that should coordinate. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
 | `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
-| `pi_wait` | Block until every listed session is `settled`, or until any worker asks a `question`. Keep timeouts at or under two minutes and poll again. |
-| `pi_status` / `pi_list` | Current state: status, model, cost, context usage, pending questions. |
+| `pi_wait` | Block until every listed session is `settled`, or until any worker asks a `question`. Returns concise snapshots by default; use `detail=full` when needed. Keep timeouts at or under two minutes. |
+| `pi_status` / `pi_list` | Concise state and pending questions by default, including `control_required`. Pass `session_ids` to `pi_list` to include only your workstreams, including stopped history. Use `detail=full` for the contract, transcript excerpt, verification, and integration records; use `pi_metrics` for complete cost evidence. |
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
@@ -367,11 +385,11 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_answer` | Answer a worker's pending question with `confirmed`, `value`, or `cancelled`. |
 | `pi_claim` / `pi_release` / `pi_locks` | Claim paths by hand, release them, or list what is held. |
 | `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
-| `pi_board_post` / `pi_board_read` | Post to the shared board and read it, with a `latest=true` view per key. |
-| `pi_stop` | Stop a worker, optionally removing its worktree and branch. |
-| `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned`. Takeovers require a nonempty reason in `note`; success and takeover require current passing acceptance evidence and integration when code changed. |
-| `pi_report` | Outcome counts grouped by assigned purpose, per-task takeover notes, and overall percentages across all purposes. These are workstream outcomes, not implementation contribution. |
-| `pi_gc` | Reclaim finished work. Removes clean finished worktrees and deletes only branches proven merged. |
+| `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. |
+| `pi_stop` | Stop an unfinished worker early, optionally removing its worktree and branch. |
+| `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
+| `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
+| `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. |
 | `pi_metrics` | Usage and cost evidence for active/historical sessions, optionally filtered by `session_ids`. Missing costs stay unknown; partial ratios do not prove savings. |
 | `pi_record_cost` | Register orchestrator cost evidence with `id`, `amount`, `currency`, `source`, `reference`, and covered `session_ids`; distinguish reported, manual and estimated evidence. |
 
@@ -406,8 +424,11 @@ read-only acceptance mounts; that isolation is not provided by this release.
 
 ## Cleaning up finished work
 
-`pi_gc` does two things. First it stops and evicts finished workers and removes their clean
-worktrees. Then it deletes branches of finished workstreams that are proven merged.
+Scoped `pi_gc` acts only on the supplied session IDs. It stops and evicts selected finished workers
+and removes clean accepted worktrees, including those left in history by a restart. An abandoned
+worktree is also removed when its branch still points at its dispatch base and its files are clean;
+unrecorded work, dirty files, and abandoned branches with new commits remain available. Then gc
+deletes eligible branches whose integration is proven.
 
 A branch is only deleted when its tip is an ancestor of the repository's current `HEAD`. Work
 integrated by squash or rebase is not an ancestor, so it is left alone for you to inspect — gc never
@@ -416,8 +437,9 @@ force-deletes. Candidates come from persisted metadata, so branches whose worktr
 branch name.
 
 Nothing is deleted while it is a current or default branch, checked out in any worktree, attached to
-an active session, or attached to an existing dirty worktree. Abandoned and unfinished workstreams
-are kept. These rules apply no matter how `PI_COFFEE_DELETE_BRANCHES` is set.
+an active session, or attached to an existing dirty worktree. Unfinished work and abandoned work
+with new commits are kept; an empty abandoned branch can be removed only when no other session
+shares it and ancestry proves it safe. These rules apply no matter how `PI_COFFEE_DELETE_BRANCHES` is set.
 
 The result reports `branches_deleted` and a `branches_retained` entry with a reason for every branch
 it kept. If git fails on a branch, it is retained and reported, never counted as deleted for you.

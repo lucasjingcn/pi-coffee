@@ -43,6 +43,16 @@ test("report separates implementation, review, investigation and unclassified hi
     assert.equal(report.workstreams_by_purpose.unspecified.total, 1);
     assert.equal(report.tasks.find((task) => task.id === "s5").purpose, "unspecified",
       "missing purpose is never inferred from a task name");
+    assert.deepEqual(report.inconsistent_outcomes.map((item) => item.id), ["s1", "s2", "s3"],
+      "old recorded successes without proof remain visible but are flagged");
+    const selected = await coordinator.report(["s1", "s3"]);
+    assert.equal(selected.total_tasks, 2);
+    assert.equal(selected.counts.success_first, 2);
+    assert.equal(selected.workstreams_by_purpose.implementation.total, 1);
+    assert.equal(selected.workstreams_by_purpose.review.total, 1);
+    assert.deepEqual(selected.tasks.map((task) => task.id), ["s1", "s3"]);
+    assert.deepEqual(selected.cost_evidence.selected_session_ids, ["s1", "s3"]);
+    await assert.rejects(coordinator.report(["s999"]), /unknown session/i);
     assert.match(report.note, /not implementation contribution/);
     await coordinator.stopAll();
     coordinator = new Coordinator(config);
@@ -62,5 +72,30 @@ test("persisted purposes reject invalid classifications without guessing old rec
     const record = meta("s1");
     record.spec.purpose = purpose;
     assert.throws(() => validateSnapshot(snapshot([record]), "fixture"), /spec.purpose/);
+  }
+});
+
+test("archived unfinished work can be closed as abandoned without inventing acceptance", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-archived-finish-"));
+  const dataDir = join(root, "data");
+  await mkdir(dataDir);
+  const config = loadConfig({ dataDir, workspaceRoot: join(root, "workers"), autoClean: false });
+  let coordinator;
+  try {
+    await writeFile(join(dataDir, "state.json"), JSON.stringify(snapshot([meta("s1", "implementation")])));
+    coordinator = new Coordinator(config);
+    await coordinator.init();
+    await assert.rejects(coordinator.setOutcome("s1", "taken_over", "root took over"), /archived|verification/i);
+    await coordinator.setOutcome("s1", "abandoned", "Stopped without an integrated candidate");
+    coordinator.setTestsOwned("s1", true);
+    assert.equal(coordinator.snapshot("s1").testsOwnedByCodex, true);
+    assert.equal((await coordinator.report()).counts.abandoned, 1);
+    await coordinator.stopAll();
+    coordinator = new Coordinator(config);
+    await coordinator.init();
+    assert.equal((await coordinator.report()).counts.abandoned, 1);
+  } finally {
+    if (coordinator) await coordinator.stopAll();
+    await rm(root, { recursive: true, force: true });
   }
 });

@@ -47,7 +47,7 @@ test('MCP and HTTP manual claims propagate repo and release only that namespace'
     assert.equal((await mcp('pi_release', { session_id: 'codex', repo: repos[0] })).released, 0);
     assert.equal((await post('/internal/claim', { sessionId: 'peer', paths: ['shared'], mode: 'rw', repo: repos[1] })).ok, false);
     assert.equal((await post('/internal/release', { sessionId: 'codex', repo: repos[1] })).released, 1);
-    assert.equal((await mcp('pi_claim', { session_id: 'peer', paths: ['shared'], repo: repos[1] })).ok, true);
+    assert.equal((await mcp('pi_claim', { session_id: 'codex', paths: ['shared'], repo: repos[1] })).ok, true);
   } finally {
     proc.kill('SIGTERM');
     const timer = setTimeout(() => proc.kill('SIGKILL'), 2000);

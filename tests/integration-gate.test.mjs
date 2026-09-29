@@ -43,6 +43,23 @@ test('integration and successful finish require daemon-executed verification',()
   await c.exec('s1','true');await assert.rejects(c.merge('s1'),/pi_verify/);
 }));
 
+test('a worker capability cannot push another worker branch by name',()=>fixture(async({c})=>{
+  await assert.rejects(c.push('s1','origin','pi/another-worker'),/controlled worker branch/);
+}));
+
+test('completed read-only review has its own acceptance evidence without weakening code gates',()=>fixture(async({c,meta,git,worker})=>{
+  meta.spec.purpose='review';meta.lastText='Reviewed the requested contract and reported concrete findings.';
+  await assert.rejects(c.setOutcome('s1','success_first'),/acceptance note/);
+  await assert.rejects(c.setOutcome('s1','success_first','Findings accepted'),/unchanged, clean/);
+  git(worker,'reset','--hard',meta.baseRef);
+  await c.setOutcome('s1','success_first','Findings accepted after review');
+  assert.ok(meta.reviewAcceptance?.workerSha);
+  assert.equal(meta.status,'stopped');
+  const report=await c.report();
+  assert.equal(report.workstreams_by_purpose.review.counts.success_first,1);
+  assert.deepEqual(report.inconsistent_outcomes,[]);
+}));
+
 test('takeover requires a reason and preserves verification and integration gates',()=>fixture(async({c,meta})=>{
   for (const note of [undefined, '', '   ']) {
     await assert.rejects(c.setOutcome('s1','taken_over',note),/nonempty note/);
@@ -68,8 +85,23 @@ test('passing merged candidate can integrate and close, and evidence survives as
   await assert.rejects(c.setOutcome('s1','success_first'),/target changed|integration/);
   assert.equal((await c.merge('s1')).ok,true);
   assert.equal(git(repo,'rev-parse','HEAD^{tree}'),proof.candidateTree);
-  await c.setOutcome('s1','success_first');assert.equal((await c.report()).counts.success_first,1);
+  await c.setOutcome('s1','success_first');
+  const report=await c.report();
+  assert.equal(report.counts.success_first,1);
+  assert.deepEqual(report.inconsistent_outcomes,[]);
   assert.equal(meta.integration.workerSha,proof.workerSha);
+  assert.equal(meta.status,'stopped');
+  await assert.rejects(c.send('s1','more work'),/finished|stopped/);
+  await assert.rejects(c.exec('s1','true'),/finished/);
+  assert.throws(()=>c.authorizeWrite('s1'),/finished/);
+  assert.equal(meta.verification.passed,true);
+}));
+
+test('an already stopped worker can be closed as abandoned',()=>fixture(async({c,meta})=>{
+  await c.stop('s1');
+  await c.setOutcome('s1','abandoned','No accepted candidate');
+  assert.equal(meta.status,'stopped');
+  assert.equal((await c.report()).counts.abandoned,1);
 }));
 
 for (const [name, command] of [['failed acceptance','exit 7'],['timed out acceptance','sleep 3'],['candidate mutation','printf tampered > src/item.txt']]) {
