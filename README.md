@@ -121,7 +121,8 @@ model quality or financial benefit is established by the offline tests.
 
 ```mermaid
 flowchart LR
-    Codex[MCP client<br/>e.g. Codex] -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>registry · locks · mailbox · board]
+    Codex[MCP client<br/>e.g. Codex] -- "stdio MCP" --> Proxy[local proxy]
+    Proxy -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>registry · locks · mailbox · board]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + branch]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -135,9 +136,9 @@ Codex calls `pi_spawn`, the daemon creates a worktree, starts `pi --mode rpc` as
 injects a worker-side extension into it. That extension is what enforces file claims, polls the
 mailbox, and provides the `coord_*` tools inside the worker.
 
-Workers talk to the daemon over JSONL lines on stdin/stdout; the daemon talks to Codex over MCP. The
-daemon deliberately runs the `pi` executable rather than importing pi's internal modules, so a
-`pi update` does not break the integration.
+Workers talk to the daemon over JSONL lines on stdin/stdout. For a local install, Codex uses a stdio
+proxy that reads the same configuration file as the daemon and forwards MCP requests over HTTP.
+The daemon runs the pinned local pi CLI instead of importing pi's internal modules.
 
 ## Requirements
 
@@ -176,9 +177,9 @@ This one command works in a macOS/Linux shell or Windows PowerShell. It:
 - registers the **stdio proxy** as the Codex MCP server (the proxy forwards to the HTTP daemon and
   reconnects on its own, so restarting the daemon does not break the Codex session);
 - asks for your provider, API key, and model, and stores them in the user's `.pi-coffee/env` file;
-- installs and starts a background daemon for the current user at login (LaunchAgent, systemd user service, or Windows Scheduled Task).
+- installs and starts a background daemon for the current user at login (LaunchAgent, systemd user service, or Windows Scheduled Task), then checks its health.
 
-Because pi reads provider API keys from the environment, that last step means you do **not** have to
+Because pi reads provider API keys from the environment, the credential setup means you do **not** have to
 run `/login` inside pi. Adjust it later with:
 
 ```bash
@@ -186,12 +187,13 @@ npm run setup     # provider, API key, model, thinking level (writes ~/.pi-coffe
 npm run doctor    # preflight: node, git, pi, credentials, data directory
 ```
 
-For foreground debugging, stop the background daemon and run `npm run start`. Both modes load the same env file through `scripts/start.mjs`; point it elsewhere with `PI_COFFEE_ENV_FILE`.
+For foreground debugging, stop the background daemon and run `npm run start`. Both modes load the
+same env file through `scripts/start.mjs`; point it elsewhere with `PI_COFFEE_ENV_FILE`.
 
 Check that it came up:
 
 ```bash
-curl http://127.0.0.1:8787/internal/health   # {"ok":true,...}
+node scripts/check-health.mjs
 ```
 
 Restart Codex. It connects, picks up the orchestration instructions, loads the `pi-orchestrator`
@@ -199,16 +201,13 @@ skill, and the `pi_*` tools appear. On Windows the background process starts whe
 
 ## Pointing Codex at the daemon
 
-`npm run install:local` registers this when `codex` is on your `PATH`. For manual repair, add the server in
-`~/.codex/config.toml` and restart Codex. Locally, use the stdio proxy:
+`npm run install:local` requires `codex` on your `PATH` and registers the proxy. For manual repair,
+add the server in `~/.codex/config.toml` and restart Codex. The local proxy reads the setup file:
 
 ```toml
 [mcp_servers.pi]
 command = "node"            # an absolute path to node is recommended
 args = ["/absolute/path/to/pi-coffee/scripts/proxy.mjs"]
-
-[mcp_servers.pi.env]
-PI_COFFEE_URL = "http://127.0.0.1:8787/mcp"
 ```
 
 If the daemon runs on another machine, connect to it directly and pass a token:
@@ -320,7 +319,7 @@ Homebrew and `~/.pi/agent/bin` so `pi` and `git` resolve.
 ### Windows 10+ (current-user login task)
 
 In PowerShell, inspect it with `Get-ScheduledTask -TaskName pi-coffee`; stop it with
-`Stop-ScheduledTask -TaskName pi-coffee`. Logs are in `%USERPROFILE%\.pi-coffee\logs\daemon.log`.
+`Stop-ScheduledTask -TaskName pi-coffee`. Logs are in `$HOME\.pi-coffee\logs\daemon.log`.
 The task runs only after this user logs in. Git for Windows supplies Bash for worker acceptance commands.
 
 To keep everything on one Mac (useful when the repository lives there):
@@ -431,7 +430,8 @@ Everything is configured through environment variables.
 |---|---|---|
 | `PI_COFFEE_HOST` | `127.0.0.1` | Bind address. Loopback by default. |
 | `PI_COFFEE_PORT` | `8787` | Port for `/mcp` and `/internal/*`. |
-| `PI_COFFEE_PI_BIN` | `pi` | The pi executable. |
+| `PI_COFFEE_PI_BIN` | pinned local pi CLI with `npm run start` | Explicit pi CLI override. |
+| `PI_COFFEE_BASH_BIN` | detected Bash | Bash executable for acceptance commands; on Windows, Git for Windows supplies it. |
 | `PI_COFFEE_DEFAULT_REPO` | *(none)* | Default repository for `pi_spawn`. If unset, every spawn must pass `repo`. |
 | `PI_COFFEE_WORKSPACE_ROOT` | `~/.pi-coffee/worktrees` | Where worktrees are created. |
 | `PI_COFFEE_PROVIDER` / `PI_COFFEE_MODEL` | `deepseek` / `deepseek-flash` | Worker provider and model. |
@@ -489,7 +489,8 @@ write locking. Run one daemon per state directory.
 |---|---|---|
 | `{"error":"unauthorized"}` | Token mismatch between daemon and client | Set the same `PI_COFFEE_TOKEN` on the daemon and in the Codex/proxy environment. |
 | `pi_spawn` fails with "repo is required" | No default repository configured | Set `PI_COFFEE_DEFAULT_REPO`, or pass `repo` on every spawn. |
-| A worker starts and immediately errors out | `pi` is not logged in as the daemon user | Run `pi` once as that user to authenticate. |
+| A worker starts and immediately errors out | Provider credentials are missing or invalid | Run `npm run doctor`, then update them with `npm run setup`. |
+| Acceptance commands fail on Windows | Git Bash is unavailable | Install Git for Windows and rerun `npm run doctor`. |
 | `git` complains about "dubious ownership" | The daemon user differs from the repo owner | The daemon already passes `safe.directory=*` to its own git calls; if you see this elsewhere, check your git version. |
 | Sessions show `stopped` after a restart | Workers do not survive a daemon restart | This is expected. Spawn new sessions; the transcript files are still on disk. |
 | The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port. |
@@ -519,15 +520,16 @@ task-type gate, scope overlap, test-first acceptance, diffing, model overrides, 
 gate, finishing and reporting, and restart persistence — against a fake `pi` that speaks JSONL, so
 it needs no credentials and no network.
 
-GitHub Actions is configured to run `npm ci` and `npm run verify` on Linux and macOS on pushes
-and pull requests, using Node 22.19.0 and 24. Check the actual run for remote results; workflow
-configuration alone is not evidence of a passing macOS run. The pi dependency is pinned for development type checking only; CI does not log in to or call a
-model provider.
+GitHub Actions runs `npm ci` and `npm run verify` on Linux and macOS with Node 22.19.0 and 24.
+A separate Windows job builds, type-checks, starts the daemon with an isolated setup file, and parses
+the PowerShell installers. Check the actual run for remote results; workflow configuration alone is
+not evidence of a passing Windows installation. The pinned pi dependency is also the default local
+worker CLI. CI does not log in to or call a model provider.
 
 The orchestration policy lives only in `codex/pi-orchestrator/SKILL.md`: the runtime prompt loads
 its body and the installer copies the same file. Keep `codex/` with `src/` and `dist/` in deployments.
-After upgrades, copy the updated skill to `${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator/SKILL.md`
-and restart the daemon and MCP client so their policy versions match.
+Rerunning `npm run install:local` after workers finish updates the installed skill and background
+startup; restart Codex to load the updated policy.
 
 ### Repository layout
 
@@ -535,8 +537,8 @@ and restart the daemon and MCP client so their policy versions match.
 src/               daemon, MCP server, git plumbing, locks, state store
 extensions/        worker-side pi extension (claims, inbox, coord_* tools)
 tests/             offline test suite (node --test)
-scripts/           setup, doctor, smoke, and status helpers
-deploy/            systemd and launchd installers
+scripts/           setup, startup, health, smoke, and status helpers
+deploy/            systemd, launchd, and Windows task installers
 codex/             Codex skill installed by npm run install:local
 Dockerfile         image with Node, git, and pi bundled
 docker-compose.yml host-facing compose file
@@ -545,13 +547,12 @@ docker-compose.yml host-facing compose file
 
 ## Upgrade and uninstall
 
-Native install:
+After active workers finish, stop the background daemon with the command in [Deployment](#deployment),
+then update the checkout and rerun the same installer (macOS/Linux shell or Windows PowerShell):
 
 ```bash
 git pull
-npm install
-npm run build
-# restart the daemon: systemctl --user restart pi-coffee, or stop and re-run ./run.sh
+npm run install:local
 ```
 
 Docker:
@@ -560,14 +561,24 @@ Docker:
 docker compose build --pull && docker compose up -d
 ```
 
-To remove everything:
+To remove the background startup, use the command for your platform:
 
 ```bash
-# stop the daemon first (the service, `docker compose down`, or Ctrl-C on ./run.sh)
-rm -rf ~/.pi-coffee                              # daemon state and credentials
-rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
-codex mcp remove pi
+systemctl --user disable --now pi-coffee                         # Linux
+rm ~/.config/systemd/user/pi-coffee.service
+systemctl --user daemon-reload
+
+launchctl bootout gui/$(id -u)/com.picoffee.daemon               # macOS
+rm ~/Library/LaunchAgents/com.picoffee.daemon.plist
 ```
+
+```powershell
+Stop-ScheduledTask -TaskName pi-coffee                            # Windows
+Unregister-ScheduledTask -TaskName pi-coffee -Confirm:$false     # Windows
+```
+
+Then run `codex mcp remove pi`. Removing the installed skill and `~/.pi-coffee` is optional;
+the latter deletes local credentials and daemon state, so preserve anything you still need.
 
 ## Known limitations
 

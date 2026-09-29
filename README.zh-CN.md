@@ -108,7 +108,8 @@ worker 输出量除以部分指令 token 只是输出分工指标，不能当节
 
 ```mermaid
 flowchart LR
-    Codex[MCP 客户端<br/>如 Codex] -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>注册表 · 锁 · 信箱 · 黑板]
+    Codex[MCP 客户端<br/>如 Codex] -- "stdio MCP" --> Proxy[本机代理]
+    Proxy -- "streamable HTTP MCP" --> Daemon[pi-coffee daemon<br/>注册表 · 锁 · 信箱 · 黑板]
     Daemon -- "RPC JSONL" --> W1[pi worker 1<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> W2[pi worker 2<br/>worktree + 分支]
     Daemon -- "RPC JSONL" --> WN[pi worker N ...]
@@ -121,8 +122,9 @@ daemon 是一个不大的 Node 进程，对外提供 HTTP 上的 MCP 接口，�
 `pi_spawn` 时，daemon 会建好 worktree，把 `pi --mode rpc` 作为子进程启动，并给它注入一个 worker
 端扩展。文件声明、信箱轮询和 `coord_*` 工具都由这个扩展提供。
 
-worker 通过 stdin/stdout 上的 JSONL 和 daemon 通信，daemon 再通过 MCP 和 Codex 通信。daemon
-刻意去跑 `pi` 可执行文件，而不是 import pi 的内部模块，这样 `pi update` 不会把集成搞坏。
+worker 通过 stdin/stdout 上的 JSONL 和 daemon 通信。本机安装时，Codex 连接 stdio 代理；代理读取
+与 daemon 相同的配置文件，再通过 HTTP 转发 MCP 请求。daemon 运行固定版本的本地 pi CLI，不导入
+pi 内部模块。
 
 ## 环境要求
 
@@ -161,21 +163,22 @@ npm run install:local
   不会弄断 Codex 会话）；
 - 从 npm 安装固定版本的 pi；
 - 问你要 provider、API key 和 model，写进当前用户的 `.pi-coffee/env`；
-- 安装并启动当前用户的登录后台任务（macOS LaunchAgent、Linux systemd 用户服务或 Windows 计划任务）。
+- 安装并启动当前用户的登录后台任务（macOS LaunchAgent、Linux systemd 用户服务或 Windows 计划任务），再检查健康状态。
 
-因为 pi 直接从环境变量读 provider 密钥，最后这一步意味着**不需要**再进 pi 跑 `/login`。之后想改：
+因为 pi 直接从环境变量读 provider 密钥，完成凭据配置后**不需要**再进 pi 跑 `/login`。之后想改：
 
 ```bash
 npm run setup     # 交互式设置 provider、API key、model、thinking 级别（写入 ~/.pi-coffee/env）
 npm run doctor    # 预检：node、git、pi、凭据、数据目录
 ```
 
-前台调试时先停止后台 daemon，再运行 `npm run start`。两种启动方式都会通过 `scripts/start.mjs` 读取同一份配置；可用 `PI_COFFEE_ENV_FILE` 改位置。
+前台调试时先停止后台 daemon，再运行 `npm run start`。两种启动方式都会通过 `scripts/start.mjs`
+读取同一份配置；可用 `PI_COFFEE_ENV_FILE` 改位置。
 
 起来之后确认一下：
 
 ```bash
-curl http://127.0.0.1:8787/internal/health   # {"ok":true,...}
+node scripts/check-health.mjs
 ```
 
 然后重启 Codex。它会连上来、拿到编排说明、加载 `pi-orchestrator` skill，`pi_*` 工具随即出现。
@@ -183,16 +186,13 @@ Windows 后台任务在当前用户登录后启动；未登录时不会运行。
 
 ## 让 Codex 连上 daemon
 
-`codex` 在 `PATH` 里的话，`npm run install:local` 已经帮你配好了。手工修复时可写进 `~/.codex/config.toml`，
-再重启 Codex。本机用 stdio 代理：
+`npm run install:local` 要求 `codex` 在 `PATH` 中，并会注册代理。手工修复时可写进
+`~/.codex/config.toml`，再重启 Codex。本机代理会读取配置文件：
 
 ```toml
 [mcp_servers.pi]
 command = "node"            # 建议写成 node 的绝对路径
 args = ["/absolute/path/to/pi-coffee/scripts/proxy.mjs"]
-
-[mcp_servers.pi.env]
-PI_COFFEE_URL = "http://127.0.0.1:8787/mcp"
 ```
 
 daemon 在别的机器上，就直接连，并带上 token：
@@ -296,7 +296,7 @@ launchctl print gui/$(id -u)/com.picoffee.daemon
 ### Windows 10+（当前用户登录计划任务）
 
 PowerShell 用 `Get-ScheduledTask -TaskName pi-coffee` 查看，用 `Stop-ScheduledTask -TaskName pi-coffee` 停止。
-日志位于 `%USERPROFILE%\.pi-coffee\logs\daemon.log`。worker 验收命令需要 Git for Windows 提供 Git Bash。
+日志位于 `$HOME\.pi-coffee\logs\daemon.log`。worker 验收命令需要 Git for Windows 提供 Git Bash。
 
 如果仓库就在 Mac 上，整套都放本机最省事：
 
@@ -397,7 +397,8 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 |---|---|---|
 | `PI_COFFEE_HOST` | `127.0.0.1` | 绑定地址，默认只监听回环。 |
 | `PI_COFFEE_PORT` | `8787` | `/mcp` 和 `/internal/*` 的端口。 |
-| `PI_COFFEE_PI_BIN` | `pi` | pi 可执行文件。 |
+| `PI_COFFEE_PI_BIN` | `npm run start` 使用本地固定版本 pi CLI | 显式指定其他 pi CLI。 |
+| `PI_COFFEE_BASH_BIN` | 自动寻找 Bash | 验收命令使用的 Bash；Windows 由 Git for Windows 提供。 |
 | `PI_COFFEE_DEFAULT_REPO` | *(空)* | `pi_spawn` 的默认仓库。不设的话每次 spawn 都要传 `repo`。 |
 | `PI_COFFEE_WORKSPACE_ROOT` | `~/.pi-coffee/worktrees` | worktree 的创建位置。 |
 | `PI_COFFEE_PROVIDER` / `PI_COFFEE_MODEL` | `deepseek` / `deepseek-flash` | worker 的 provider 和 model。 |
@@ -448,7 +449,8 @@ daemon。
 |---|---|---|
 | 返回 `{"error":"unauthorized"}` | daemon 和客户端 token 对不上 | 让 daemon 和 Codex/代理环境用同一个 `PI_COFFEE_TOKEN`。 |
 | `pi_spawn` 报 "repo is required" | 没配默认仓库 | 设 `PI_COFFEE_DEFAULT_REPO`，或者每次 spawn 都传 `repo`。 |
-| worker 一起来就报错退出 | `pi` 没以 daemon 用户登录 | 用那个用户跑一次 `pi` 完成登录。 |
+| worker 一起来就报错退出 | provider 凭据缺失或无效 | 运行 `npm run doctor`，再用 `npm run setup` 更新凭据。 |
+| Windows 上验收命令失败 | 找不到 Git Bash | 安装 Git for Windows，再运行 `npm run doctor`。 |
 | git 抱怨 "dubious ownership" | daemon 用户和仓库属主不一致 | daemon 给自己的 git 调用已经加了 `safe.directory=*`；如果在别处看到，检查 git 版本。 |
 | 重启后会话变成 `stopped` | worker 不会跨 daemon 重启存活 | 这是预期行为，重新 spawn；会话记录文件还在。 |
 | daemon 启动时报 `EADDRINUSE` | 端口被占用 | 把 `PI_COFFEE_PORT` 换成一个空闲端口。 |
@@ -476,13 +478,14 @@ SMOKE_LIVE=0 ./smoke.sh   # 只跑确定性冒烟，不调用模型
 用一个只会说 JSONL 的假 `pi` 把整条控制链走一遍：spec 校验、task-type 关卡、scope 重叠、验收测试
 先行、diff、模型覆盖、two-strikes、finish/report、重启持久化。它不需要任何凭据，也不需要网络。
 
-GitHub Actions 配置在 push 和 pull request 时，用 Linux/macOS 与 Node 22.19.0/24 跑
-`npm ci` 和 `npm run verify`；远端结果以实际运行记录为准，workflow 文件存在不代表 macOS CI 通过。
-pi 依赖固定版本只是为了开发期类型检查，CI 不登录、也不调用任何模型提供方。
+GitHub Actions 在 Linux/macOS 上用 Node 22.19.0/24 跑 `npm ci` 和 `npm run verify`；另有 Windows
+任务构建、类型检查、使用隔离配置启动 daemon，并解析 PowerShell 安装脚本。远端结果以实际运行记录为准，
+workflow 文件存在不代表 Windows 安装已通过。固定版本的 pi 也是本地 worker 默认 CLI；CI 不登录、
+也不调用任何模型提供方。
 
 编排正文只维护在 `codex/pi-orchestrator/SKILL.md`；运行时直接加载正文，安装程序复制同一个文件。
-部署时保留 `codex/`、`src/` 和 `dist/`。升级后把新版 skill 复制到
-`${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator/SKILL.md`，重启 daemon 和 MCP 客户端，保持策略版本一致。
+部署时保留 `codex/`、`src/` 和 `dist/`。活跃 worker 结束后重跑 `npm run install:local`，会更新已安装
+的 skill 和后台启动配置；再重启 Codex 加载新策略。
 
 ### 仓库结构
 
@@ -490,8 +493,8 @@ pi 依赖固定版本只是为了开发期类型检查，CI 不登录、也不�
 src/               daemon、MCP server、git 操作、锁、状态存储
 extensions/        worker 端 pi 扩展（文件声明、信箱、coord_* 工具）
 tests/             离线测试套件（node --test）
-scripts/           setup、doctor、冒烟和状态辅助脚本
-deploy/            systemd 和 launchd 安装脚本
+scripts/           setup、启动、健康检查、冒烟和状态辅助脚本
+deploy/            systemd、launchd 和 Windows 计划任务安装脚本
 codex/             npm run install:local 安装的 Codex skill
 Dockerfile         内置 Node、git、pi 的镜像
 docker-compose.yml 面向用户的 compose 文件
@@ -500,13 +503,12 @@ docker-compose.yml 面向用户的 compose 文件
 
 ## 升级与卸载
 
-本地安装：
+待活跃 worker 结束后，先按[部署](#部署)里的命令停止后台 daemon，再更新代码并运行同一条安装命令
+（macOS/Linux 终端或 Windows PowerShell）：
 
 ```bash
 git pull
-npm install
-npm run build
-# 重启 daemon：systemctl --user restart pi-coffee，或停掉后重新 ./run.sh
+npm run install:local
 ```
 
 Docker：
@@ -515,14 +517,24 @@ Docker：
 docker compose build --pull && docker compose up -d
 ```
 
-彻底卸载：
+移除后台启动时按系统运行相应命令：
 
 ```bash
-# 先停掉 daemon（服务、`docker compose down`，或对 ./run.sh 按 Ctrl-C）
-rm -rf ~/.pi-coffee                              # daemon 状态与凭据
-rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator"
-codex mcp remove pi
+systemctl --user disable --now pi-coffee                         # Linux
+rm ~/.config/systemd/user/pi-coffee.service
+systemctl --user daemon-reload
+
+launchctl bootout gui/$(id -u)/com.picoffee.daemon               # macOS
+rm ~/Library/LaunchAgents/com.picoffee.daemon.plist
 ```
+
+```powershell
+Stop-ScheduledTask -TaskName pi-coffee                            # Windows
+Unregister-ScheduledTask -TaskName pi-coffee -Confirm:$false     # Windows
+```
+
+然后运行 `codex mcp remove pi`。是否删除已安装的 skill 和 `~/.pi-coffee` 由你决定；后者包含本地凭据与
+daemon 状态，删除前先保留需要的数据。
 
 ## 已知限制
 

@@ -36,7 +36,7 @@ workers finish before reinstalling; the installer will refuse to restart a runni
 ## 3. Verify
 
 ```bash
-curl -s http://127.0.0.1:8787/internal/health          # {"ok":true,...}
+node scripts/check-health.mjs
 ```
 
 Then restart Codex. It should:
@@ -48,7 +48,8 @@ Smoke test from Codex: ask it to `pi_spawn` a worker that creates a file, then `
 
 ## 4. Configuration (optional)
 
-Set these before starting the daemon (or inside the LaunchAgent's `EnvironmentVariables`):
+Set these in `~/.pi-coffee/env` before restarting the daemon. `npm run setup` manages provider
+credentials and model settings; other keys can be edited in the same file:
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -64,6 +65,7 @@ Set these before starting the daemon (or inside the LaunchAgent's `EnvironmentVa
 - **Workers fail to start / auth errors** — run `npm run doctor` as the daemon's user and check the
   provider credentials in `~/.pi-coffee/env`.
 - **Codex doesn't see the server** — check `~/.codex/config.toml` has `[mcp_servers.pi]`,
-  and that `curl http://127.0.0.1:8787/internal/health` works.
+  and run `node scripts/check-health.mjs`.
 - **Stale worktree errors** — `cd <repo> && git worktree prune` (the daemon also prunes on spawn).
-- **Port already in use** — change `PI_COFFEE_PORT` and update the Codex URL to match.
+- **Port already in use** — change `PI_COFFEE_PORT` in the setup file and restart the daemon;
+  the local Codex proxy reads the same file.
