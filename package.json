@@ -19,7 +19,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js",
+    "start": "node scripts/start.mjs",
+    "install:local": "node scripts/install-local.mjs",
     "smoke": "node scripts/smoke.mjs",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",

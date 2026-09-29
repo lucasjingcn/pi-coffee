@@ -8,7 +8,6 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PORT="${PI_COFFEE_PORT:-8787}"
 UNIT_NAME="pi-coffee"
 
 NODE_BIN="$(command -v node || true)"
@@ -21,16 +20,13 @@ if [ ! -f "$DIR/dist/index.js" ]; then
   exit 1
 fi
 
-PI_BIN="$(command -v pi || true)"
 DAEMON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/.pi/agent/bin"
 
-ENV_BLOCK="Environment=PATH=$DAEMON_PATH
-Environment=PI_COFFEE_PORT=$PORT
-Environment=PI_COFFEE_DATA_DIR=$HOME/.pi-coffee"
-[ -n "$PI_BIN" ] && ENV_BLOCK="$ENV_BLOCK
-Environment=PI_COFFEE_PI_BIN=$PI_BIN"
-[ -n "${PI_COFFEE_DEFAULT_REPO:-}" ] && ENV_BLOCK="$ENV_BLOCK
-Environment=PI_COFFEE_DEFAULT_REPO=$PI_COFFEE_DEFAULT_REPO"
+ENV_BLOCK="Environment=PATH=$DAEMON_PATH"
+if [ -n "${PI_COFFEE_ENV_FILE:-}" ]; then
+  ENV_BLOCK="$ENV_BLOCK
+Environment=PI_COFFEE_ENV_FILE=$PI_COFFEE_ENV_FILE"
+fi
 
 if [ "$(id -u)" = "0" ]; then
   UNIT="/etc/systemd/system/$UNIT_NAME.service"
@@ -44,7 +40,7 @@ Type=simple
 User=root
 WorkingDirectory=$DIR
 $ENV_BLOCK
-ExecStart=$NODE_BIN $DIR/dist/index.js
+ExecStart=$NODE_BIN $DIR/scripts/start.mjs
 Restart=on-failure
 RestartSec=3
 
@@ -54,7 +50,7 @@ EOF
   systemctl daemon-reload
   systemctl enable --now "$UNIT_NAME"
   echo "installed system service: $UNIT"
-  echo "  endpoint: http://127.0.0.1:$PORT/mcp"
+  echo "  endpoint: check PI_COFFEE_PORT in the setup file (default http://127.0.0.1:8787/mcp)"
   echo "  status:   systemctl status $UNIT_NAME"
   echo "  logs:     journalctl -u $UNIT_NAME -f"
   echo "  stop:     systemctl disable --now $UNIT_NAME"
@@ -70,7 +66,7 @@ Description=pi-coffee - Codex-as-manager MCP for parallel pi workers
 Type=simple
 WorkingDirectory=$DIR
 $ENV_BLOCK
-ExecStart=$NODE_BIN $DIR/dist/index.js
+ExecStart=$NODE_BIN $DIR/scripts/start.mjs
 Restart=on-failure
 RestartSec=3
 
@@ -80,7 +76,7 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable --now "$UNIT_NAME"
   echo "installed user service: $UNIT"
-  echo "  endpoint: http://127.0.0.1:$PORT/mcp"
+  echo "  endpoint: check PI_COFFEE_PORT in the setup file (default http://127.0.0.1:8787/mcp)"
   echo "  start on boot (run once): loginctl enable-linger $USER"
   echo "  status:   systemctl --user status $UNIT_NAME"
   echo "  logs:     journalctl --user -u $UNIT_NAME -f"

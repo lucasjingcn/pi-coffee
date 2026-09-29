@@ -79,7 +79,9 @@ export class PiRpcClient extends EventEmitter {
     if (this.opts.extensionPath) args.push("--extension", this.opts.extensionPath);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
 
-    const proc = spawn(this.opts.piBin ?? "pi", args, {
+    const piBin = this.opts.piBin ?? "pi";
+    const isNodeScript = piBin.toLowerCase().endsWith(".js");
+    const proc = spawn(isNodeScript ? process.execPath : piBin, isNodeScript ? [piBin, ...args] : args, {
       cwd: this.opts.cwd,
       env: { ...process.env, ...(this.opts.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],

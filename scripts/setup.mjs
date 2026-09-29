@@ -164,7 +164,7 @@ async function main() {
   console.log(`  thinking:  ${thinking}`);
   console.log(`  API key:   ${keyVar} = ${mask(apiKey)}`);
   if (entries.PI_COFFEE_PI_BIN) console.log(`  pi binary: ${entries.PI_COFFEE_PI_BIN}`);
-  console.log("\nRestart the daemon (`./run.sh`) to pick it up.");
+  console.log("\nRestart the daemon to pick up the updated settings.");
 }
 
 main().catch((error) => {

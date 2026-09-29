@@ -4,7 +4,6 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PORT="${PI_COFFEE_PORT:-8787}"
 LABEL="com.picoffee.daemon"
 LA_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LA_DIR/$LABEL.plist"
@@ -25,8 +24,11 @@ chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true
 
 # launchd has a minimal PATH; make sure the daemon can find git + node + pi.
 DAEMON_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.pi/agent/bin:$HOME/.bun/bin"
-REPO_KEYS=""
-[ -n "${PI_COFFEE_DEFAULT_REPO:-}" ] && REPO_KEYS="    <key>PI_COFFEE_DEFAULT_REPO</key><string>$PI_COFFEE_DEFAULT_REPO</string>"
+ENV_FILE_KEY=""
+if [ -n "${PI_COFFEE_ENV_FILE:-}" ]; then
+  ESCAPED_ENV_FILE="$(printf '%s' "$PI_COFFEE_ENV_FILE" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g')"
+  ENV_FILE_KEY="    <key>PI_COFFEE_ENV_FILE</key><string>$ESCAPED_ENV_FILE</string>"
+fi
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -37,15 +39,14 @@ cat > "$PLIST" <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>$NODE_BIN</string>
-    <string>$PROJECT_DIR/dist/index.js</string>
+    <string>$PROJECT_DIR/scripts/start.mjs</string>
   </array>
   <key>WorkingDirectory</key><string>$PROJECT_DIR</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>$DAEMON_PATH</string>
     <key>HOME</key><string>$HOME</string>
-    <key>PI_COFFEE_PORT</key><string>$PORT</string>
-$REPO_KEYS
+$ENV_FILE_KEY
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -66,7 +67,7 @@ fi
 
 sleep 1
 echo "installed LaunchAgent: $PLIST"
-echo "  endpoint:  http://127.0.0.1:$PORT/mcp"
+echo "  endpoint:  check PI_COFFEE_PORT in the setup file (default http://127.0.0.1:8787/mcp)"
 echo "  logs:      $LOG_DIR/daemon.{out,err}.log"
 echo "  status:    launchctl print gui/$UID_NUM/$LABEL | head"
 echo "  stop:      launchctl bootout gui/$UID_NUM/$LABEL"

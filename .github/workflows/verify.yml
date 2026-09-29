@@ -27,3 +27,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+  windows-startup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: node --test tests/startup-platform.test.mjs
+      - shell: powershell
+        run: |
+          foreach ($path in @('deploy/windows/install.ps1', 'deploy/windows/install-task.ps1', 'deploy/windows/run-task.ps1')) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) { throw "$path has PowerShell syntax errors: $errors" }
+          }

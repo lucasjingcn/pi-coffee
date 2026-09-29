@@ -1347,7 +1347,7 @@ function runCommand(
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
-    const proc = spawn("bash", [login ? "-lc" : "-c", command], { cwd, env: process.env, detached: grouped });
+    const proc = spawn(process.env.PI_COFFEE_BASH_BIN || "bash", [login ? "-lc" : "-c", command], { cwd, env: process.env, detached: grouped });
 
     let stdout = "";
     let stderr = "";

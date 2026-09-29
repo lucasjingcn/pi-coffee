@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # Install pi-coffee: build it, install the Codex skill, register the MCP server, and
 # set up pi so workers can authenticate without a separate `/login` step.
-# Run this as the SAME Unix user that runs your MCP client.
+# Run this as the same user that runs your MCP client.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-PORT="${PI_COFFEE_PORT:-8787}"
+# Updating a live coordinator would interrupt its workers. Leave it untouched.
+case "$(uname -s)" in
+  Darwin)
+    if launchctl print "gui/$(id -u)/com.picoffee.daemon" 2>/dev/null | grep -q 'state = running'; then
+      echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
+      exit 1
+    fi ;;
+  Linux)
+    if systemctl --user is-active --quiet pi-coffee 2>/dev/null; then
+      echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
+      exit 1
+    fi ;;
+esac
+
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 # --- prerequisites ---------------------------------------------------------
@@ -33,70 +46,35 @@ mkdir -p "$CODEX_HOME_DIR/skills/pi-orchestrator"
 cp "$DIR/codex/pi-orchestrator/SKILL.md" "$CODEX_HOME_DIR/skills/pi-orchestrator/SKILL.md"
 
 # --- register the MCP server ----------------------------------------------
-echo "==> register MCP server with Codex (stdio proxy -> http://127.0.0.1:$PORT/mcp)"
+echo "==> register MCP server with Codex (stdio proxy reads the same setup file as the daemon)"
 NODE_BIN="$(command -v node || echo node)"
-if command -v codex >/dev/null 2>&1; then
-  codex mcp remove pi >/dev/null 2>&1 || true
-  codex mcp add pi -- "$NODE_BIN" "$DIR/dist/stdio-proxy.js"
-else
-  echo "   codex not on PATH; register manually in ~/.codex/config.toml:"
-  echo "     [mcp_servers.pi]"
-  echo "     command = \"$NODE_BIN\""
-  echo "     args = [\"$DIR/dist/stdio-proxy.js\"]"
+if ! command -v codex >/dev/null 2>&1; then
+  echo "error: Codex CLI is required on PATH to register the MCP server" >&2
+  exit 1
 fi
+codex mcp remove pi >/dev/null 2>&1 || true
+codex mcp add pi -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
 
-# --- pi binary -------------------------------------------------------------
-find_pi() {
-  if [ -n "${PI_COFFEE_PI_BIN:-}" ]; then
-    if [ -x "${PI_COFFEE_PI_BIN}" ]; then echo "${PI_COFFEE_PI_BIN}"; return 0; fi
-    if command -v "${PI_COFFEE_PI_BIN}" >/dev/null 2>&1; then command -v "${PI_COFFEE_PI_BIN}"; return 0; fi
-  fi
-  if command -v pi >/dev/null 2>&1; then command -v pi; return 0; fi
-  if [ -x "$HOME/.pi/agent/bin/pi" ]; then echo "$HOME/.pi/agent/bin/pi"; return 0; fi
-  return 1
-}
-
-if PI_PATH="$(find_pi)"; then
-  echo "==> pi found: $PI_PATH"
-else
-  echo "==> pi not found"
-  if [ "${PI_COFFEE_SKIP_PI_INSTALL:-0}" = "1" ]; then
-    echo "   PI_COFFEE_SKIP_PI_INSTALL=1; skipping."
-  else
-    install_pi=1
-    if [ -t 0 ] && [ "${PI_COFFEE_YES:-0}" != "1" ]; then
-      read -r -p "   Install pi now? [Y/n] " reply
-      case "$reply" in [nN]*) install_pi=0 ;; esac
-    fi
-    if [ "$install_pi" = "1" ]; then
-      if command -v curl >/dev/null 2>&1; then
-        echo "   installing via https://pi.dev/install.sh"
-        curl -fsSL https://pi.dev/install.sh | sh
-      else
-        echo "   installing via npm (global)"
-        npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-      fi
-    else
-      echo "   skipped. Workers cannot start until pi is installed."
-    fi
-  fi
-fi
+# pi is a pinned local development dependency installed above.
 
 # --- provider credentials --------------------------------------------------
 # pi reads API keys from the environment, so storing a key and a model id here
 # removes the need to run `/login` inside pi.
 if [ "${PI_COFFEE_SKIP_SETUP:-0}" != "1" ] && [ -t 0 ]; then
   echo "==> provider setup"
-  node "$DIR/scripts/setup.mjs" || true
+  node "$DIR/scripts/setup.mjs"
 fi
 
 # --- verify ----------------------------------------------------------------
 echo "==> doctor"
-node "$DIR/scripts/doctor.mjs" || true
+node "$DIR/scripts/doctor.mjs"
 
-cat <<EOF
+echo "==> install current-user background startup"
+case "$(uname -s)" in
+  Darwin) bash "$DIR/deploy/macos/install-daemon.sh" ;;
+  Linux) bash "$DIR/deploy/linux/install-service.sh" ;;
+  *) echo "error: unsupported Unix platform" >&2; exit 1 ;;
+esac
 
-Done. Next:
-  1. Start the daemon (same user as your MCP client):   $DIR/run.sh
-  2. Restart your MCP client. It connects and exposes the pi_* tools.
-EOF
+node "$DIR/scripts/check-health.mjs"
+echo "Done. Restart Codex to load the pi_* tools."

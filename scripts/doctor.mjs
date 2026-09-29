@@ -11,8 +11,10 @@
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { apiKeyVarFor, envFilePath, loadEnvFile } from "./lib/env.mjs";
 import { resolvePiBin, piVersion } from "./lib/pi.mjs";
+import { resolveBashBin } from "./lib/bash.mjs";
 
 function run(cmd, args) {
   try {
@@ -43,6 +45,10 @@ check(
 // --- git ---
 const gitVersion = run("git", ["--version"]);
 check("git", Boolean(gitVersion), gitVersion ?? "not found", "install git");
+if (process.platform === "win32") {
+  const bashBin = resolveBashBin();
+  check("Git Bash", Boolean(bashBin), bashBin ?? "not found", "install Git for Windows with Git Bash");
+}
 
 // --- pi ---
 const piBin = resolvePiBin();
@@ -51,14 +57,14 @@ check(
   "pi binary",
   Boolean(piBin),
   piBin ? `${piBin}${piVer ? ` (v${piVer})` : ""}` : "not found",
-  "run ./install.sh, or install it manually: npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+  "run npm install to install the pinned local pi dependency",
 );
 
 // --- provider credentials ---
 // pi accepts either an env var (which we pass through) or its own auth.json.
 const provider = process.env.PI_COFFEE_PROVIDER || "deepseek";
 const keyVar = apiKeyVarFor(provider);
-const authPath = join(process.env.HOME || "", ".pi", "agent", "auth.json");
+const authPath = join(homedir(), ".pi", "agent", "auth.json");
 const hasEnvKey = Boolean(process.env[keyVar]);
 const hasAuth = existsSync(authPath);
 check(
@@ -69,7 +75,7 @@ check(
 );
 
 // --- data directory ---
-const dataDir = process.env.PI_COFFEE_DATA_DIR || join(process.env.HOME || "", ".pi-coffee");
+const dataDir = process.env.PI_COFFEE_DATA_DIR || join(homedir(), ".pi-coffee");
 let dataOk = true;
 let dataDetail = dataDir;
 try {

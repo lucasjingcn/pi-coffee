@@ -145,10 +145,11 @@ daemon deliberately runs the `pi` executable rather than importing pi's internal
 |---|---|
 | **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19 and 24. |
 | **git** | Worktrees, diffs, merges, branch cleanup. |
-| **pi** | `install.sh` can install it. It can authenticate from an API key in the environment, so the interactive `/login` step is optional. |
+| **pi** | Installed as a pinned local npm dependency. It can authenticate from an API key in the environment, so `/login` is optional. |
 | **An MCP client** | Codex is the reference client; any MCP-capable client works. |
+| **Windows 10+** | Git for Windows with Git Bash, plus Node and Codex CLI on `PATH`. |
 
-Run the daemon, Codex, and the workers as the **same Unix user**. They need to share file ownership.
+Run the daemon, Codex, and the workers as the **same user**. They need to share file ownership.
 Provider credentials can come from the generated env file (see below) or from pi's own
 `~/.pi/agent/auth.json`. Root is not required — any user with a working `pi` and write access to the
 repository is fine.
@@ -165,18 +166,17 @@ cd pi-coffee
 Then:
 
 ```bash
-./install.sh     # deps + build + Codex skill + MCP registration + pi/provider setup
-./run.sh         # start the daemon in the foreground (http://127.0.0.1:8787)
+npm run install:local
 ```
 
-`install.sh` does a few things:
+This one command works in a macOS/Linux shell or Windows PowerShell. It:
 
 - runs `npm install` and `npm run build`;
 - installs the `pi-orchestrator` skill for Codex;
 - registers the **stdio proxy** as the Codex MCP server (the proxy forwards to the HTTP daemon and
   reconnects on its own, so restarting the daemon does not break the Codex session);
-- if `pi` is missing, offers to install it;
-- asks for your provider, API key, and model, and stores them in `~/.pi-coffee/env` (mode 600).
+- asks for your provider, API key, and model, and stores them in the user's `.pi-coffee/env` file;
+- installs and starts a background daemon for the current user at login (LaunchAgent, systemd user service, or Windows Scheduled Task).
 
 Because pi reads provider API keys from the environment, that last step means you do **not** have to
 run `/login` inside pi. Adjust it later with:
@@ -186,8 +186,7 @@ npm run setup     # provider, API key, model, thinking level (writes ~/.pi-coffe
 npm run doctor    # preflight: node, git, pi, credentials, data directory
 ```
 
-`run.sh` sources `~/.pi-coffee/env` before starting the daemon, so spawned workers inherit the key.
-Point it elsewhere with `PI_COFFEE_ENV_FILE`.
+For foreground debugging, stop the background daemon and run `npm run start`. Both modes load the same env file through `scripts/start.mjs`; point it elsewhere with `PI_COFFEE_ENV_FILE`.
 
 Check that it came up:
 
@@ -196,18 +195,17 @@ curl http://127.0.0.1:8787/internal/health   # {"ok":true,...}
 ```
 
 Restart Codex. It connects, picks up the orchestration instructions, loads the `pi-orchestrator`
-skill, and the `pi_*` tools appear. For a daemon that survives logout and reboots, install it as a
-service — see [Deployment](#deployment).
+skill, and the `pi_*` tools appear. On Windows the background process starts when this user signs in; it does not run before login.
 
 ## Pointing Codex at the daemon
 
-`install.sh` handles this when `codex` is on your `PATH`. Otherwise, add the server yourself in
+`npm run install:local` registers this when `codex` is on your `PATH`. For manual repair, add the server in
 `~/.codex/config.toml` and restart Codex. Locally, use the stdio proxy:
 
 ```toml
 [mcp_servers.pi]
 command = "node"            # an absolute path to node is recommended
-args = ["/absolute/path/to/pi-coffee/dist/stdio-proxy.js"]
+args = ["/absolute/path/to/pi-coffee/scripts/proxy.mjs"]
 
 [mcp_servers.pi.env]
 PI_COFFEE_URL = "http://127.0.0.1:8787/mcp"
@@ -300,31 +298,37 @@ Missing credentials block actual model calls; independently authorized local wor
 
 ## Deployment
 
-### Linux (systemd)
+The single install command above configures the right background startup for the host. For maintenance:
+
+### Linux (systemd user service)
 
 ```bash
-sudo ./deploy/linux/install-service.sh    # system-wide service
-./deploy/linux/install-service.sh         # or a per-user service in ~/.config/systemd/user/
-loginctl enable-linger "$USER"            # required for a user service to start at boot
+systemctl --user status pi-coffee
+systemctl --user stop pi-coffee
 ```
 
 ### macOS (launchd)
 
 ```bash
-npm install && npm run build
-./deploy/macos/install-daemon.sh          # writes ~/Library/LaunchAgents/com.picoffee.daemon.plist
+launchctl print gui/$(id -u)/com.picoffee.daemon
 ```
 
 Logs go to `~/.pi-coffee/logs/daemon.{out,err}.log`. Stop the agent with
 `launchctl bootout gui/$(id -u)/com.picoffee.daemon`. The launch agent sets a `PATH` that includes
 Homebrew and `~/.pi/agent/bin` so `pi` and `git` resolve.
 
+### Windows 10+ (current-user login task)
+
+In PowerShell, inspect it with `Get-ScheduledTask -TaskName pi-coffee`; stop it with
+`Stop-ScheduledTask -TaskName pi-coffee`. Logs are in `%USERPROFILE%\.pi-coffee\logs\daemon.log`.
+The task runs only after this user logs in. Git for Windows supplies Bash for worker acceptance commands.
+
 To keep everything on one Mac (useful when the repository lives there):
 
 ```bash
 rsync -a --exclude node_modules --exclude dist ./ mac:~/pi-coffee/
 # then, on the Mac:
-cd ~/pi-coffee && ./install.sh && ./run.sh
+cd ~/pi-coffee && npm run install:local
 ```
 
 ### Daemon on another machine
@@ -441,10 +445,10 @@ Everything is configured through environment variables.
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
 | `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
-| `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `run.sh`, `npm run setup`, and `npm run doctor` read/write for provider credentials. |
+| `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
-`install.sh` also honors `PI_COFFEE_SKIP_PI_INSTALL=1`, `PI_COFFEE_SKIP_SETUP=1`, and
-`PI_COFFEE_YES=1` (answer yes to every prompt).
+For unattended installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through the
+environment or an existing env file. The doctor check must pass before background startup is installed.
 
 Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
 caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least
@@ -521,7 +525,7 @@ configuration alone is not evidence of a passing macOS run. The pi dependency is
 model provider.
 
 The orchestration policy lives only in `codex/pi-orchestrator/SKILL.md`: the runtime prompt loads
-its body and `install.sh` copies the same file. Keep `codex/` with `src/` and `dist/` in deployments.
+its body and the installer copies the same file. Keep `codex/` with `src/` and `dist/` in deployments.
 After upgrades, copy the updated skill to `${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator/SKILL.md`
 and restart the daemon and MCP client so their policy versions match.
 
@@ -533,7 +537,7 @@ extensions/        worker-side pi extension (claims, inbox, coord_* tools)
 tests/             offline test suite (node --test)
 scripts/           setup, doctor, smoke, and status helpers
 deploy/            systemd and launchd installers
-codex/             Codex skill installed by install.sh
+codex/             Codex skill installed by npm run install:local
 Dockerfile         image with Node, git, and pi bundled
 docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker
