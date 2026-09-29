@@ -10,7 +10,7 @@ import {PiRpcClient} from '../dist/rpc-client.js';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 PiRpcClient.prototype.start=async function(){};
 PiRpcClient.prototype.stop=async function(){};
-PiRpcClient.prototype.prompt=async function(){return {success:true};};
+PiRpcClient.prototype.prompt=async function(){this.emit("event",{type:"agent_settled"});return {success:true};};
 PiRpcClient.prototype.getState=async function(){return {isStreaming:false};};
 PiRpcClient.prototype.getSessionStats=async function(){return {cost:0,tokens:{}};};
 async function fixture(fn,maxSessions=4){
@@ -33,13 +33,13 @@ test('restart clears locks belonging to workers that cannot survive daemon resta
  try{assert.deepEqual(restarted.locksList(),[]);}finally{await restarted.stopAll();}
 }));
 test('completed live scoreboard persists before stop and crash',async()=>fixture(async(c,config)=>{
- const s=await c.spawn({spec:{goal:'one',scope:['a']}});
- c.setOutcome(s.id,'success_first','done');c.setTestsOwned(s.id,true);await delay(650);
+ const s=await c.spawn({spec:{goal:'one',scope:['a']},acceptanceCommand:'true'});
+ assert.equal((await c.verify(s.id)).passed,true);await c.setOutcome(s.id,'success_first','done');c.setTestsOwned(s.id,true);await delay(650);
  const restarted=new Coordinator(config);await restarted.init();
  try{const report=await restarted.report();assert.equal(report.counts.success_first,1);assert.equal(report.tasks[0].tests_owned_by_codex,true);assert.equal(report.active_tasks,0);}finally{await restarted.stopAll();}
 }));
 test('stopAll flushes scoreboard synchronously before it resolves',async()=>fixture(async(c,config)=>{
- const s=await c.spawn({spec:{goal:'one',scope:['a']}});c.setOutcome(s.id,'success_first');c.setTestsOwned(s.id,true);
+ const s=await c.spawn({spec:{goal:'one',scope:['a']},acceptanceCommand:'true'});assert.equal((await c.verify(s.id)).passed,true);await c.setOutcome(s.id,'success_first');c.setTestsOwned(s.id,true);
  await c.stopAll();const state=JSON.parse(await readFile(join(config.dataDir,'state.json'),'utf8'));
  assert.ok(state.history.some(h=>h.id===s.id&&h.outcome==='success_first'&&h.testsOwnedByCodex===true));
 }));

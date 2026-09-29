@@ -8,6 +8,8 @@ import { Board, Mailbox, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
 import { StateStore } from "./state-store.js";
+import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, type Verification, type IntegrationRecord } from "./integration.js";
+import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { PiRpcClient } from "./rpc-client.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
 import {
@@ -76,7 +78,9 @@ export interface SessionMeta {
   /** Whether the acceptance test was authored/owned by Codex (spec-derived) rather than the worker. */
   testsOwnedByCodex?: boolean;
   /** Coordinator-authored acceptance files written into the worktree before the worker starts. */
-  acceptance?: { files: string[]; command?: string };
+  acceptance?: { files: string[]; command?: string; hashes?: Record<string, string> };
+  verification?: Verification;
+  integration?: IntegrationRecord;
   /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
@@ -141,6 +145,10 @@ export class Coordinator {
   private saveChain: Promise<void> = Promise.resolve();
   /** Validated primary/backup store: atomic writes, corruption recovery, contextual errors. */
   private store: StateStore;
+  private integrationGate = new IntegrationGate();
+  private busyRepos = new Set<string>();
+  private dispatchingRepos = new Map<string, number>();
+  private orchestratorCosts: OrchestratorCostRecord[] = [];
 
   constructor(config: Config) {
     this.config = config;
@@ -354,6 +362,7 @@ export class Coordinator {
   private async load(): Promise<void> {
     const { state } = await this.store.load();
     this.counter = state.counter;
+    this.orchestratorCosts = state.orchestratorCosts;
     // Locks are held by live sessions, and sessions never survive a daemon
     // restart. Drop any persisted locks instead of resurrecting orphaned locks
     // that would block new spawns.
@@ -400,6 +409,7 @@ export class Coordinator {
       // Include live snapshots so a crash/restart can report in-flight work as
       // stopped history while preserving completed outcomes and tests-ownership metadata.
       history: this.mergedHistory(),
+      orchestratorCosts: this.orchestratorCosts,
     };
     await this.store.write(data);
   }
@@ -419,9 +429,7 @@ export class Coordinator {
       byId.set(rt.meta.id, { ...rt.meta, pendingQuestions: [] });
     }
 
-    let all = [...byId.values()];
-    if (all.length > 500) all = all.slice(-500);
-    return all;
+    return [...byId.values()];
   }
 
   /** Cancel any pending debounced save and wait for the freshest state to hit disk. */
@@ -461,9 +469,21 @@ export class Coordinator {
     // until then, every failure path releases it here.
     this.reserveSlot();
     const slot = { transferred: false };
+    let dispatchIdentity: string | undefined;
     try {
+      const repo = opts.repo ?? this.config.defaultRepo;
+      if (repo && existsSync(repo)) {
+        dispatchIdentity = resolveRepoIdentity(repo);
+        this.assertRepoAvailable(dispatchIdentity);
+        this.dispatchingRepos.set(dispatchIdentity, (this.dispatchingRepos.get(dispatchIdentity) ?? 0) + 1);
+      }
       return await this.spawnSession(opts, slot);
     } finally {
+      if (dispatchIdentity) {
+        const remaining = (this.dispatchingRepos.get(dispatchIdentity) ?? 0) - 1;
+        if (remaining > 0) this.dispatchingRepos.set(dispatchIdentity, remaining);
+        else this.dispatchingRepos.delete(dispatchIdentity);
+      }
       if (!slot.transferred) this.releaseReservation();
     }
   }
@@ -500,7 +520,8 @@ export class Coordinator {
     // Scope pre-claim & overlap pre-check: reserve the declared scope before
     // creating anything, so two workstreams with overlapping files are rejected
     // at dispatch instead of mid-flight.
-    const scope = opts.spec?.scope ?? [];
+    this.assertRepoAvailable(repoIdentity);
+    const scope = normalizedScope(opts.spec?.scope ?? []);
     if (scope.length) {
       const pre = this.locks.claim(id, scope, "rw", repoIdentity);
       if (!pre.ok) {
@@ -552,11 +573,13 @@ export class Coordinator {
       throw e;
     }
 
+    let originalAcceptanceHashes: Record<string, string>;
     // Test-first delegation: write Codex-authored acceptance files BEFORE the worker starts.
     try {
       for (const f of opts.acceptanceFiles ?? []) {
         await writeAcceptanceFile(wt.dir, f.path, f.content);
       }
+      originalAcceptanceHashes = await acceptanceHashes(wt.dir, acceptancePaths);
     } catch (e) {
       this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       await removeWorktree(repo, wt.dir).catch(() => {});
@@ -571,7 +594,10 @@ export class Coordinator {
       branch: wt.branch,
       cwd: wt.dir,
       baseRef: baseSha,
-      acceptance: acceptancePaths.length ? { files: acceptancePaths, command: opts.acceptanceCommand } : undefined,
+      acceptance: acceptancePaths.length || opts.acceptanceCommand ? {
+        files: acceptancePaths, command: opts.acceptanceCommand,
+        hashes: originalAcceptanceHashes,
+      } : undefined,
       spec: opts.spec,
       status: "starting",
       createdAt: Date.now(),
@@ -786,19 +812,28 @@ export class Coordinator {
     opts: { provider?: string; model?: string } = {},
   ): Promise<void> {
     const rt = this.get(id);
+    this.assertRepoAvailable(rt.repoIdentity);
+    rt.meta.verification = undefined;
+    rt.meta.integration = undefined;
     if (rt.meta.status === "error" || rt.meta.status === "stopped") {
       throw new Error(`session ${id} is ${rt.meta.status}`);
     }
 
-    if (opts.model) {
-      const provider = opts.provider ?? rt.meta.provider ?? this.config.provider;
-      await rt.client.setModel(provider, opts.model).catch(() => undefined);
+    const previousStatus = rt.meta.status;
+    rt.meta.status = "working"; // Reserve the pending instruction before the first RPC await.
+    try {
+      if (opts.model) {
+        const provider = opts.provider ?? rt.meta.provider ?? this.config.provider;
+        await rt.client.setModel(provider, opts.model);
+      }
+      if (mode === "steer") await rt.client.steer(message);
+      else if (mode === "followup") await rt.client.followUp(message);
+      else if (rt.client.isStreaming) await rt.client.prompt(message, "followUp");
+      else await rt.client.prompt(message);
+    } catch (error) {
+      if (rt.meta.status === "working" && !rt.client.isStreaming) rt.meta.status = previousStatus;
+      throw error;
     }
-
-    if (mode === "steer") await rt.client.steer(message);
-    else if (mode === "followup") await rt.client.followUp(message);
-    else if (rt.client.isStreaming) await rt.client.prompt(message, "followUp");
-    else await rt.client.prompt(message);
 
     if (countInstruction) {
       rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + message.length;
@@ -863,20 +898,65 @@ export class Coordinator {
 
   async commit(id: string, message: string): Promise<string> {
     const rt = this.get(id);
-    return commitAll(rt.meta.worktree, message);
+    return this.withRepoGuard(rt, async () => {
+      if (rt.meta.status !== "idle" && rt.meta.status !== "stopped") throw new Error("settle the worker before committing");
+      await checkChanges(rt.meta);
+      rt.meta.verification = undefined;
+      rt.meta.integration = undefined;
+      return commitAll(rt.meta.worktree, message);
+    });
+  }
+
+  private assertRepoAvailable(identity: string): void {
+    if (this.busyRepos.has(identity)) throw new Error("repository is verifying or integrating; retry after it completes");
+  }
+
+  authorizeWrite(id: string): void {
+    const rt = this.get(id);
+    this.assertRepoAvailable(rt.repoIdentity);
+    if (rt.meta.status === "stopped" || rt.meta.status === "error") throw new Error("worker is not writable");
+    rt.meta.verification = undefined;
+    rt.meta.integration = undefined;
+  }
+
+  private async withRepoGuard<T>(rt: Runtime, fn: () => Promise<T>): Promise<T> {
+    this.assertRepoAvailable(rt.repoIdentity);
+    if (this.dispatchingRepos.has(rt.repoIdentity)) throw new Error("repository has a dispatch in flight; retry after it settles");
+    this.busyRepos.add(rt.repoIdentity);
+    try { return await fn(); } finally { this.busyRepos.delete(rt.repoIdentity); }
+  }
+
+  async verify(id: string, into?: string, timeoutMs = 600_000): Promise<Verification> {
+    const rt = this.get(id);
+    return this.withRepoGuard(rt, async () => {
+      if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle the worker and its questions before verification");
+      rt.meta.verification = undefined;
+      rt.meta.integration = undefined;
+      const proof = await this.integrationGate.verify(rt.meta, into ?? await currentBranch(rt.meta.repo),
+        (cwd, command) => runCommand(command, cwd, timeoutMs));
+      rt.meta.verification = proof;
+      this.scheduleSave();
+      return proof;
+    });
   }
 
   /** Merge a worker branch into a branch of the main repo (default: its current branch). */
   async merge(id: string, into?: string, noFf = true): Promise<MergeResult> {
     const rt = this.get(id);
-    const target = into ?? (await currentBranch(rt.meta.repo));
-    const result = await mergeBranch(rt.meta.repo, rt.meta.branch, target, { noFf });
-
-    // A successful merge auto-records the outcome unless one was set explicitly.
-    if (result.ok && !rt.meta.outcome) {
-      this.setOutcome(id, (rt.meta.instructionsSent ?? 1) <= 1 ? "success_first" : "success_second");
-    }
-    return result;
+    return this.withRepoGuard(rt, async () => {
+      const target = into ?? await currentBranch(rt.meta.repo);
+      const proof = await this.integrationGate.assertCurrent(rt.meta, target);
+      const result = await mergeBranch(rt.meta.repo, proof.workerSha, target, { noFf });
+      if (result.ok) {
+        const mergedSha = await resolveRef(rt.meta.repo, "HEAD");
+        const tree = await resolveRef(rt.meta.repo, "HEAD^{tree}");
+        if (tree !== proof.candidateTree) throw new Error("integrated tree differs from tested candidate; no success recorded");
+        rt.meta.integration = { workerSha: proof.workerSha, targetBranch: target, previousTargetSha: proof.targetSha,
+          mergedSha, candidateTree: tree, integratedAt: Date.now() };
+        this.scheduleSave();
+      }
+      return { ...result, branch: rt.meta.branch };
+    });
   }
 
   async push(id: string, remote = "origin", branch?: string): Promise<string> {
@@ -889,13 +969,19 @@ export class Coordinator {
     id: string,
     command: string,
     timeoutMs = 600_000,
+    login = false,
   ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
     const rt = this.get(id);
-    return runCommand(command, rt.meta.worktree, timeoutMs);
+    return this.withRepoGuard(rt, async () => {
+      rt.meta.verification = undefined;
+      rt.meta.integration = undefined;
+      return runCommand(command, rt.meta.worktree, timeoutMs, login);
+    });
   }
 
   async answer(sessionId: string, requestId: string, response: Partial<UiResponse>): Promise<void> {
     const rt = this.get(sessionId);
+    this.assertRepoAvailable(rt.repoIdentity);
     const index = rt.meta.pendingQuestions.findIndex((q) => q.id === requestId);
     if (index === -1) throw new Error(`no pending question ${requestId} for session ${sessionId}`);
 
@@ -913,6 +999,8 @@ export class Coordinator {
 
   async stop(id: string, opts: { removeWorktree?: boolean; deleteBranch?: boolean } = {}): Promise<void> {
     const rt = this.get(id);
+    this.assertRepoAvailable(rt.repoIdentity);
+    await this.refreshStats(rt, true);
     await rt.client.stop();
     rt.meta.status = "stopped";
     rt.meta.lastActivity = Date.now();
@@ -961,6 +1049,7 @@ export class Coordinator {
 
   claim(sessionId: string, paths: string[], mode: LockMode, repo?: string): ClaimResult {
     const namespace = this.namespaceFor(sessionId, repo);
+    this.assertRepoAvailable(namespace);
     const result = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode, namespace);
     if (result.ok) this.scheduleSave();
     return result;
@@ -1076,19 +1165,26 @@ export class Coordinator {
     return this.board.latest(board);
   }
 
-  setOutcome(id: string, outcome: Outcome, note?: string): void {
+  async setOutcome(id: string, outcome: Outcome, note?: string): Promise<void> {
     const rt = this.get(id);
-    rt.meta.outcome = outcome;
-    if (note !== undefined) rt.meta.outcomeNote = note;
+    return this.withRepoGuard(rt, async () => {
+      if (FINISHED_OUTCOMES.has(outcome)) {
+        const proof = rt.meta.verification;
+        if (!proof) throw new Error("successful outcome requires current pi_verify evidence");
+        await this.integrationGate.assertCurrent(rt.meta, proof.targetBranch, proof.codeChanged);
+      }
+      rt.meta.outcome = outcome;
+      if (note !== undefined) rt.meta.outcomeNote = note;
 
-    const historic = this.history.find((entry) => entry.id === id);
-    if (historic) {
-      historic.outcome = outcome;
-      if (note !== undefined) historic.outcomeNote = note;
-    }
+      const historic = this.history.find((entry) => entry.id === id);
+      if (historic) {
+        historic.outcome = outcome;
+        if (note !== undefined) historic.outcomeNote = note;
+      }
 
-    this.scheduleSave();
-    this.notifyWaiters();
+      this.scheduleSave();
+      this.notifyWaiters();
+    });
   }
 
   /** Persist a finished/settled session snapshot so the scoreboard survives daemon restarts. */
@@ -1097,7 +1193,6 @@ export class Coordinator {
     const index = this.history.findIndex((entry) => entry.id === meta.id);
     if (index >= 0) this.history[index] = snapshot;
     else this.history.push(snapshot);
-    if (this.history.length > 500) this.history = this.history.slice(-500);
   }
 
   setTestsOwned(id: string, owned: boolean): void {
@@ -1145,12 +1240,10 @@ export class Coordinator {
       abandoned: 0,
       unrecorded: 0,
     };
-    let workerCost = 0;
     let workerOutput = 0;
 
     const tasks = all.map((session) => {
       counts[(session.outcome ?? "unrecorded") as Outcome | "unrecorded"]++;
-      workerCost += session.cost ?? 0;
       workerOutput += session.tokens?.output ?? 0;
       return {
         id: session.id,
@@ -1178,75 +1271,35 @@ export class Coordinator {
       delegated_success_rate: pct(counts.success_first + counts.success_second),
       first_try_rate: pct(counts.success_first),
       take_over_rate: pct(counts.taken_over),
-      worker_cost: Number(workerCost.toFixed(4)),
+      cost_evidence: await this.metrics(),
       worker_output_tokens: workerOutput,
       tasks,
-      note: "One 'task' = one worker workstream/session. outcomes come from pi_finish (or are auto-recorded by pi_merge). unrecorded means the workstream was never closed with an outcome.",
+      note: "One 'task' = one worker workstream/session. successful outcomes require verified evidence and integration for changed code. unrecorded means the workstream was never closed with an outcome.",
     };
   }
 
-  /**
-   * Aggregate output-discipline metrics.
-   *
-   * We can measure worker output exactly (pi session stats). Codex's own output
-   * tokens are NOT observable here, so orchestrator_instruction_* is a lower
-   * bound computed from the instruction text Codex sent through the daemon.
-   * Higher worker_output_per_orchestrator_token is better.
-   */
-  async metrics(): Promise<Record<string, unknown>> {
-    const ids = [...this.runtimes.keys()];
-    await Promise.all(
-      ids.map((id) => {
-        const rt = this.runtimes.get(id);
-        return rt ? this.refreshStats(rt, true) : Promise.resolve();
-      }),
-    );
-
-    const workers = ids
-      .filter((id) => this.runtimes.has(id))
-      .map((id) => {
-        const meta = this.snapshot(id);
-        return {
-          id,
-          status: meta.status,
-          provider: meta.provider,
-          model: meta.model,
-          output_tokens: meta.tokens?.output ?? 0,
-          input_tokens: meta.tokens?.input ?? 0,
-          cache_read_tokens: meta.tokens?.cacheRead ?? 0,
-          cost: meta.cost ?? 0,
-          turns: meta.turns ?? 0,
-          orchestrator_instruction_chars: meta.orchestratorChars ?? 0,
-          instructions_sent: meta.instructionsSent ?? 0,
-        };
-      });
-
-    const sum = (key: string) => workers.reduce((acc: number, worker: any) => acc + (worker[key] as number), 0);
-    const workerOutput = sum("output_tokens");
-    const orchestratorChars = sum("orchestrator_instruction_chars");
-    const orchestratorTokensEst = Math.round(orchestratorChars / 4);
-
-    return {
-      workers,
-      totals: {
-        worker_output_tokens: workerOutput,
-        worker_input_tokens: sum("input_tokens"),
-        worker_cache_read_tokens: sum("cache_read_tokens"),
-        worker_cost: sum("cost"),
-        worker_turns: sum("turns"),
-        orchestrator_instruction_chars: orchestratorChars,
-        orchestrator_instruction_tokens_est: orchestratorTokensEst,
-      },
-      discipline: {
-        worker_output_tokens: workerOutput,
-        orchestrator_instruction_tokens_est: orchestratorTokensEst,
-        worker_output_per_orchestrator_token:
-          orchestratorTokensEst > 0 ? Number((workerOutput / orchestratorTokensEst).toFixed(2)) : null,
-        note:
-          "Codex's own output tokens are not observable from the daemon; orchestrator_instruction_* is a lower bound. Codex should keep its output to judgment and let workers emit code: a high worker_output_per_orchestrator_token ratio is healthy, and a rising Codex-side cost means it is writing code it should have delegated.",
-      },
-    };
+  /** Register sourced orchestrator accounting data without inventing missing costs. */
+  recordCost(value: unknown): OrchestratorCostRecord {
+    const record = validateCostRecord(value);
+    record.session_ids.sort();
+    const knownIds = new Set(this.mergedHistory().map((entry) => entry.id));
+    if (record.session_ids.some((id) => !knownIds.has(id))) throw new Error("cost references an unknown session");
+    const previous = this.orchestratorCosts.find((entry) => entry.id === record.id);
+    if (previous) {
+      if (JSON.stringify(previous) !== JSON.stringify(record)) throw new Error("cost record id already has different data");
+      return previous;
+    }
+    this.orchestratorCosts.push(record);
+    this.scheduleSave();
+    return record;
   }
+
+  async metrics(sessionIds?: string[]): Promise<Record<string, unknown>> {
+    await Promise.all([...this.runtimes.values()].map((rt) => this.refreshStats(rt, true)));
+    return summarizeCostEvidence({ active: this.list(), history: this.history,
+      orchestrator_records: this.orchestratorCosts, session_ids: sessionIds });
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,10 +1329,11 @@ function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  login = false,
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
-    const proc = spawn("bash", ["-lc", command], { cwd, env: process.env, detached: grouped });
+    const proc = spawn("bash", [login ? "-lc" : "-c", command], { cwd, env: process.env, detached: grouped });
 
     let stdout = "";
     let stderr = "";

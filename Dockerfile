@@ -27,6 +27,8 @@ COPY --from=build /app/dist ./dist
 # ../src/bash-paths.js, so the source tree must be present as well.
 COPY src ./src
 COPY extensions ./extensions
+# The runtime orchestration policy is loaded from the authoritative skill.
+COPY codex ./codex
 
 ENV NODE_ENV=production \
     PI_COFFEE_HOST=0.0.0.0 \

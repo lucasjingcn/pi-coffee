@@ -2,9 +2,9 @@
 
 # pi-coffee
 
-**Stop paying premium-model prices to write boilerplate.** pi-coffee is an MCP server that lets your
-expensive model stay the manager — planning, writing specs, reviewing, and verifying — while cheap pi
-workers write the actual code in isolated git worktrees.
+**Coordinate coding workers with reviewable acceptance evidence.** pi-coffee is an MCP server that
+lets an orchestrator assign independent implementation to pi workers in isolated git worktrees,
+review full diffs, and verify the proposed integration before merging. Small fixes stay direct.
 
 Any MCP client can drive it. Codex is the reference client, but Claude, Cursor, or anything else that
 speaks MCP works too. The client splits a job into well-defined pieces, hands each piece to an agent,
@@ -14,14 +14,14 @@ Two agents editing the same repository normally overwrite each other. Here each 
 own git worktree on its own branch, claims the files it is about to touch, and can message the other
 agents or ask the orchestrator a question when something is unclear.
 
-> **Where the savings come from**
+> **What to measure**
 >
-> - The expensive model handles planning, specs, review, and verification — a small amount of output.
-> - The bulk of the code is written by workers on a cheap model (DeepSeek by default).
-> - Workers run in parallel, so you buy wall-clock time with cheap tokens instead of expensive ones.
-> - `pi_metrics` shows the ratio, so you can confirm the expensive model is staying out of the way.
+> - Delegate when independent work justifies specification, review, and integration overhead.
+> - Keep the required model capability and output quality; a cheaper model must still meet them.
+> - Include failed attempts, rework, and orchestrator review in any cost comparison.
+> - `pi_metrics` reports usage and cost coverage. Partial token ratios do not prove savings.
 
-[![Focus](https://img.shields.io/badge/focus-cost%20saving-brightgreen)](#why-it-saves-money)
+[![Focus](https://img.shields.io/badge/focus-verified%20coordination-brightgreen)](#cost-and-delegation-evidence)
 [![CI](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml/badge.svg)](https://github.com/lucasjingcn/pi-coffee/actions/workflows/verify.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -32,7 +32,7 @@ agents or ask the orchestrator a question when something is unclear.
 
 - [Background](#background)
 - [What you get](#what-you-get)
-- [Why it saves money](#why-it-saves-money)
+- [Cost and delegation evidence](#cost-and-delegation-evidence)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Install and run](#install-and-run)
@@ -73,54 +73,43 @@ of this document is the mechanics.
 - **Blocking questions.** A stuck worker can ask Codex a question through `coord_ask`. It shows up
   in `pi_wait` / `pi_status` and Codex answers with `pi_answer`.
 - **Acceptance tests written by Codex.** Codex drops the test into the worktree and locks it before
-  the worker starts, so the worker has to make the test pass rather than rewrite it.
+  the worker starts. Digests are checked again at integration; locks alone are not a sandbox.
+- **Candidate acceptance before merging.** `pi_verify` runs the fixed acceptance command on the
+  proposed worker + target result. Changed SHAs, failed tests, and out-of-scope edits block merging.
 - **Structured specs and a paper trail.** Every spawn carries a goal and a scope; the daemon rejects
   overlapping scopes up front. When the task is done, `pi_report` tells you how much of the work
   landed on the first try.
 
-## Why it saves money
+## Cost and delegation evidence
 
-The same work, two ways:
+The default worker configuration is DeepSeek (`PI_COFFEE_PROVIDER=deepseek`,
+`PI_COFFEE_MODEL=deepseek-flash`). Choose it only when it meets the task's documented quality floor;
+model changes follow user approval and project rules. Small fixes and tightly coupled changes should
+be completed directly. Workers are useful for clearly scoped, independent, objectively verifiable
+work when the expected benefit exceeds coordination overhead.
 
 ```mermaid
 flowchart LR
-    subgraph before["Before: one expensive model does everything"]
-        direction TB
-        R1([Requirement]) --> E1["Expensive model<br/>writes every line"] --> M1([Merge])
-    end
-    subgraph after["With pi-coffee: expensive model manages, cheap models write"]
-        direction TB
-        R2([Requirement]) --> E2["Expensive model<br/>plan / spec / tests"]
-        E2 --> W1["Worker 1<br/>cheap model"]
-        E2 --> W2["Worker 2<br/>cheap model"]
-        W1 --> E3["Expensive model<br/>review / verify"]
-        W2 --> E3
-        E3 --> M2([Merge])
-    end
+    R[Requirement] --> O[Orchestrator<br/>scope / acceptance / decisions]
+    O --> W1[Independent worker 1]
+    O --> W2[Independent worker 2]
+    W1 --> V[Full diff review<br/>candidate acceptance]
+    W2 --> V
+    V --> M[Authorized integration]
 ```
 
-Say you want to add a feature. You connect your MCP client (Codex, for example) to pi-coffee and let it
-stay the manager. Codex plans the change, writes the spec and the acceptance test, and hands the
-implementation to workers running on a cheap model — DeepSeek by default
-(`PI_COFFEE_PROVIDER=deepseek`, `PI_COFFEE_MODEL=deepseek-flash`). The workers write the code in isolated
-worktrees and run the tests; Codex reviews the diffs and verifies the result. The bulk of the
-generated code never passes through the expensive model's output, and that is where the token
-savings come from.
+`pi_metrics` includes active and historical worker sessions, including failures and corrections.
+Missing costs remain unknown. Select a task set with `session_ids`; use `pi_record_cost` to register
+orchestrator cost evidence with its amount, currency, source (`manual`, `estimate`, or `provider`),
+nonempty reference, and covered session IDs.
+`pi_report` includes `cost_evidence` alongside the delegation outcomes. Manual and estimated records
+are labeled separately from provider-reported costs.
 
-The loop looks like this:
-
-1. Codex turns a requirement into a `spec` and an acceptance test.
-2. `pi_spawn` starts one or more DeepSeek workers; they write the code and run the tests.
-3. Codex reviews the diff and runs the acceptance command itself with `pi_exec`.
-4. You merge. Most of the patch was written by the cheap model.
-
-`pi_metrics` exposes `worker_output_per_orchestrator_token` for exactly this: a high ratio means the
-expensive model stuck to judgment while the workers emitted the code. If you see Codex producing
-large patches, you are paying premium prices for work a cheap model could have done.
-
-A few honest caveats. Review and verification still cost money, and the result depends on how good
-the spec is. The trade pays off when the task is bigger than a one-line fix; for tiny changes,
-delegating costs more than doing it yourself, which is why `pi_spawn` warns about that case.
+A worker-output / partial-instruction token ratio measures output distribution, not a savings rate
+or quality. Complete cost totals require known worker and orchestrator costs covering the same task
+set in a compatible currency. A savings claim additionally needs an equivalent baseline with the
+same acceptance, quality and scope. Include waiting, review, failed attempts, and rework. No real
+model quality or financial benefit is established by the offline tests.
 
 ## How it works
 
@@ -277,22 +266,31 @@ docker compose down -v                            # stop and drop daemon state
 
 ## A task, start to finish
 
-This is roughly what a single delegated change looks like.
+First follow the user's instructions and the target repository's `AGENTS.md`. Delegate only when
+there is a clear expected benefit; a one-line repair is direct work. For ai-gen, its own size gate
+also requires at least three independent tasks before considering parallel sub-agents; other
+repositories retain their own rules.
 
-1. Codex derives an acceptance test from the requirement. It calls `pi_spawn` with a `spec`
-   (`goal`, `scope`), the test in `acceptance_files`, and an `acceptance_command`. The test lands in
-   the new worktree and is locked before the worker starts.
-2. The worker reads the spec, edits files, and runs the test. If it needs a decision, it calls
-   `coord_ask`; if it wants to touch a file another worker holds, `coord_send` is the way to
-   negotiate.
-3. Codex calls `pi_wait`, follows progress with `pi_tail`, and reads the full patch with `pi_diff`.
-4. Before trusting the result, Codex runs the acceptance command itself with `pi_exec`.
-5. Once it is happy, Codex merges (`pi_merge`), closes the workstream (`pi_finish`), prints the
-   scoreboard (`pi_report`), and reclaims disk (`pi_gc`).
+1. Derive acceptance from the requirement. Call `pi_spawn` with a `spec` (`goal`, `scope`) and a
+   fixed `acceptance_command`. Add independent tests through `acceptance_files` when needed;
+   these are written before the worker starts and their digests are recorded.
+2. The worker edits within scope and runs tests. Questions go through `coord_ask`; conflicting
+   claims require coordination. The report includes files, commands, results, and unresolved issues.
+3. Wait for the worker to settle and review the full `pi_diff`. Commit the reviewed changes under
+   the repository's authorization rules; verification requires a clean, settled worker branch.
+4. Call `pi_verify`. It builds an isolated candidate from the exact worker and target commits and
+   runs the registered acceptance command. Inspect exit code, timeout, output, SHAs, and tree evidence.
+5. `pi_merge` requires current passing evidence. Changed SHAs, acceptance files, scope violations,
+   dirty target checkouts, and failed or timed-out acceptance block integration. Reverify a changed
+   candidate. After a daemon restart, historical evidence does not restore permission to merge.
+6. Close with `pi_finish`, then inspect `pi_report` / `pi_metrics`. A successful outcome needs passing
+   acceptance and, if code changed, an integration record. Clean up with `pi_gc` when authorized.
 
-A worker gets two attempts: the original task plus one correction. A third instruction is refused
-unless Codex explicitly overrides it and says why. If it still is not right, Codex takes over — that
-is the intended outcome, not a failure.
+`pi_exec` remains a diagnostic command runner; its passing result is not a merge permit. The
+orchestrator owns review and final judgment. A worker gets the original task plus one correction;
+a third instruction requires a reasoned override. Model changes require applicable user approval.
+Commit, push, deployment and paid provider calls each follow user and repository authorization.
+Missing credentials block actual model calls; independently authorized local work can continue.
 
 ## Deployment
 
@@ -353,18 +351,20 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
-| `pi_merge` | Merge a worker branch into the main repo. On conflict the merge is left in progress and the conflicting files are returned. |
+| `pi_verify` | Run the fixed acceptance command against the exact worker + target candidate; record exit code, timeout, output and commit/tree evidence. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |
-| `pi_exec` | Run a shell command in a worker's worktree — this is how Codex verifies the acceptance test itself. |
+| `pi_exec` | Run a non-login shell command in a worker worktree for diagnostics. This does not create merge evidence. |
 | `pi_answer` | Answer a worker's pending question with `confirmed`, `value`, or `cancelled`. |
 | `pi_claim` / `pi_release` / `pi_locks` | Claim paths by hand, release them, or list what is held. |
 | `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
 | `pi_board_post` / `pi_board_read` | Post to the shared board and read it, with a `latest=true` view per key. |
 | `pi_stop` | Stop a worker, optionally removing its worktree and branch. |
-| `pi_finish` | Record how a workstream ended: `success_first`, `success_second`, `taken_over`, or `abandoned`. |
+| `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned`. Success requires current passing acceptance evidence and integration when code changed. |
 | `pi_report` | The delegation scoreboard: first-try, second-try, and take-over counts with percentages. |
 | `pi_gc` | Reclaim finished work. Removes clean finished worktrees and deletes only branches proven merged. |
-| `pi_metrics` | Worker output tokens and cost versus how much Codex itself sent down the wire. |
+| `pi_metrics` | Usage and cost evidence for active/historical sessions, optionally filtered by `session_ids`. Missing costs stay unknown; partial ratios do not prove savings. |
+| `pi_record_cost` | Register orchestrator cost evidence with `id`, `amount`, `currency`, `source`, `reference`, and covered `session_ids`; distinguish reported, manual and estimated evidence. |
 
 ## Worker-side tools
 
@@ -375,7 +375,9 @@ Each daemon-spawned pi session also gets these tools from the worker extension:
 
 ## How file claims work
 
-Before a worker writes, it claims the path. On `edit` and `write` that is the target file. On `bash`
+The extension blocks `edit`, `write`, and `bash` when coordination is unavailable, invalid, or a
+required claim is denied. Reconnect and retry after resolving the issue. Recognized writes outside
+the worktree, including resolved symlink targets, are refused. Before a worker writes, it claims the path. On `edit` and `write` that is the target file. On `bash`
 it scans the command for literal redirect, `tee`, and `sed -i` targets and claims those. If a claim
 conflicts with another worker's, the tool call is blocked and the worker is told who holds it, so it
 can coordinate instead of trampling the other change.
@@ -387,9 +389,11 @@ match. Absolute paths inside a worker's worktree are normalized to the same rela
 are hashed. `pi_claim` and `pi_release` can target a specific `repo`; if you leave it out, the daemon
 default is used, while worker sessions always use their own repository.
 
-The locks are advisory. They cover recognizable literal targets; variables, command substitution,
-and globs are not resolved. For genuinely untrusted workers, use a read-only acceptance directory
-and separate process isolation rather than relying on claims.
+The locks are coordination protection, not a security sandbox. They cover recognizable literal
+targets; dynamic scripts, variables, command substitution and globs are not fully contained. Digest
+and scope checks block invalid results from integration but cannot undo arbitrary script writes.
+Untrusted workers require separate OS/container isolation, credential restrictions, and appropriate
+read-only acceptance mounts; that isolation is not provided by this release.
 
 ## Cleaning up finished work
 
@@ -452,6 +456,10 @@ missing or corrupt, a valid backup is used and a warning goes to stderr. If both
 filesystem cannot be read, startup fails instead of quietly starting from scratch. Save failures are
 logged; a failed flush during shutdown exits with a non-zero status.
 
+Completed verification is retained as history; daemon restart invalidates its merge permission.
+Reverify the current candidate before integrating. Cost records remain part of the historical task
+evidence.
+
 The backup can lag the primary by one save, and there is no power-loss durability or multi-daemon
 write locking. Run one daemon per state directory.
 
@@ -489,7 +497,8 @@ npm run dev            # run the daemon from source with tsx
 npm run typecheck      # main sources
 npm run typecheck:extensions   # extension against the real pi API types
 npm test               # build, then run the offline test suite
-npm run verify         # typecheck + typecheck:extensions + test
+npm run verify         # typecheck + typecheck:extensions + offline tests
+node scripts/sync-playbook.mjs --check  # after build: canonical skill/runtime/installer consistency
 ./smoke.sh             # full end-to-end smoke (a couple of tiny live model calls)
 SMOKE_LIVE=0 ./smoke.sh   # deterministic smoke only, no model calls
 ```
@@ -500,9 +509,15 @@ task-type gate, scope overlap, test-first acceptance, diffing, model overrides, 
 gate, finishing and reporting, and restart persistence — against a fake `pi` that speaks JSONL, so
 it needs no credentials and no network.
 
-GitHub Actions runs `npm ci` and `npm run verify` on pushes and pull requests, on Node 22.19.0 and
-24. The pi dependency is pinned for development type checking only; CI does not log in to or call a
+GitHub Actions is configured to run `npm ci` and `npm run verify` on Linux and macOS on pushes
+and pull requests, using Node 22.19.0 and 24. Check the actual run for remote results; workflow
+configuration alone is not evidence of a passing macOS run. The pi dependency is pinned for development type checking only; CI does not log in to or call a
 model provider.
+
+The orchestration policy lives only in `codex/pi-orchestrator/SKILL.md`: the runtime prompt loads
+its body and `install.sh` copies the same file. Keep `codex/` with `src/` and `dist/` in deployments.
+After upgrades, copy the updated skill to `${CODEX_HOME:-$HOME/.codex}/skills/pi-orchestrator/SKILL.md`
+and restart the daemon and MCP client so their policy versions match.
 
 ### Repository layout
 

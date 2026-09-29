@@ -9,7 +9,8 @@
  *   - poll the mailbox and inject peer/coordinator messages into the conversation
  *   - expose peer tools: send/inbox/claim/release/board/status/sessions
  */
-import { isAbsolute, relative } from "node:path";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { bashPaths } from "../src/bash-paths.js";
@@ -65,12 +66,28 @@ export default function (pi: ExtensionAPI) {
   function relInRepo(ctx: ExtensionContext, p: string): string | undefined {
     if (typeof p !== "string" || p.length === 0) return undefined;
 
-    const abs = isAbsolute(p) ? p : `${ctx.cwd}/${p}`;
+    const abs = resolve(ctx.cwd, p);
     const rel = relative(ctx.cwd, abs).split("\\").join("/");
 
     // Reject only real parent traversal, not legitimate names like "..notes.txt".
-    if (rel === ".." || rel.startsWith("../")) return undefined;
-    return rel; // outside the worktree: not ours to lock
+    if (rel === ".." || rel.startsWith("../") || rel === ".git" || rel.startsWith(".git/")) return undefined;
+    // For actual worker roots, resolve the nearest existing ancestor too: lexical
+    // containment alone would allow symlink parents to escape the worktree.
+    if (existsSync(ctx.cwd)) {
+      try {
+        let parent = abs;
+        while (dirname(parent) !== parent) {
+          try { lstatSync(parent); break; } catch (error: any) {
+            if (error?.code !== "ENOENT") throw error;
+            parent = dirname(parent);
+          }
+        }
+        const physical = relative(realpathSync(ctx.cwd), realpathSync(parent));
+        if (physical === ".." || physical.startsWith("../") || isAbsolute(physical)
+          || physical === ".git" || physical.startsWith(".git/")) return undefined;
+      } catch { return undefined; }
+    }
+    return rel;
   }
 
   function ok(text: string) {
@@ -217,7 +234,8 @@ export default function (pi: ExtensionAPI) {
     if (need.length === 0) return {};
 
     const res = await call("/internal/claim", { sessionId, paths: need, mode: "rw" });
-    if (res.ok) {
+    if (typeof res?.ok !== "boolean") throw new Error("invalid file claim response");
+    if (res.ok === true) {
       for (const r of need) held.add(r);
       return {};
     }
@@ -233,27 +251,29 @@ export default function (pi: ExtensionAPI) {
 
     if (event.toolName === "edit" || event.toolName === "write") {
       const rel = relInRepo(ctx, (event.input as any)?.path);
-      if (rel) rels = [rel];
+      if (!rel) return { block: true, reason: "Write target must be inside the worker worktree and outside Git metadata." };
+      rels = [rel];
     } else if (event.toolName === "bash") {
       const cmd = (event.input as any)?.command;
       if (typeof cmd === "string") {
-        rels = bashPaths(cmd)
-          .map((p) => relInRepo(ctx, p))
-          .filter((p): p is string => Boolean(p));
+        const paths = bashPaths(cmd).map((p) => relInRepo(ctx, p));
+        if (paths.some((p) => !p)) return { block: true, reason: "Recognized shell write target escapes the worker worktree or enters Git metadata." };
+        rels = paths as string[];
       }
     } else {
       return undefined;
     }
 
-    if (rels.length === 0) return undefined;
-
     try {
+      // Every write-capable call checks coordination, even cached claims or
+      // unrecognized shell scripts. This is a fault barrier, not a sandbox.
+      const permission = await call("/internal/authorize-write", { sessionId });
+      if (permission?.ok !== true) throw new Error("invalid write authorization response");
       const result = await ensureClaims([...new Set(rels)]);
       if (result.blocked) return { block: true, reason: result.blocked };
       return undefined;
     } catch {
-      // Coordinator unreachable: fail open so a daemon outage doesn't freeze work.
-      return undefined;
+      return { block: true, reason: "Coordinator could not authorize the write. Retry after coordination recovers." };
     }
   });
 

@@ -92,9 +92,10 @@ const cases=[
     ]
   },
   {
-    "title": "normal outside edit ignored",
+    "title": "normal outside edit blocked",
     "tool": "write",
     "path": "../outside.txt",
+    "blocked": true,
     "paths": []
   }
 ];
@@ -104,13 +105,14 @@ test('extension claims actual shell write operands without treating source code 
  process.env.PI_COORD_URL='http://coordinator.test';process.env.PI_COORD_SESSION_ID='one';
  const handlers=new Map();let claims=[];
  globalThis.fetch=async(url,opts)=>{
- const body=JSON.parse(opts.body||'{}');assert.equal(new URL(url).pathname,'/internal/claim');claims.push(...body.paths);
+ const body=JSON.parse(opts.body||'{}');if(new URL(url).pathname==='/internal/authorize-write')return {ok:true,text:async()=>JSON.stringify({ok:true})};assert.equal(new URL(url).pathname,'/internal/claim');claims.push(...body.paths);
  return {ok:true,text:async()=>JSON.stringify({ok:true,granted:body.paths,conflicts:[]})};
  };
  const extension=(await import('./extensions/pi-coordinator.ts')).default;
  for(const c of ${JSON.stringify(cases)}){
  claims=[];handlers.clear();extension({registerTool(){},on(n,f){handlers.set(n,f);}});
- const tool=c.tool||'bash';await handlers.get('tool_call')({toolName:tool,input:tool==='bash'?{command:c.cmd}:{path:c.path}},{cwd:'/worktree'});
+ const tool=c.tool||'bash';const outcome=await handlers.get('tool_call')({toolName:tool,input:tool==='bash'?{command:c.cmd}:{path:c.path}},{cwd:'/worktree'});
+ assert.equal(Boolean(outcome?.block), Boolean(c.blocked), c.title);
  assert.deepEqual([...new Set(claims)].sort(),[...new Set(c.paths)].sort(),c.title);
  }
  console.log('CLAIMS OK');

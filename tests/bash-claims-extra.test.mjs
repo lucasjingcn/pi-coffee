@@ -23,6 +23,7 @@ test('real filenames new/setTimeout stay protected and non-command words create 
     for(const c of ${JSON.stringify(cases)}) {
       let hook;let paths=[];
       globalThis.fetch=async(url,opts)=>{
+        if(new URL(url).pathname==='/internal/authorize-write')return {ok:true,text:async()=>JSON.stringify({ok:true})};
         paths.push(...JSON.parse(opts.body).paths);
         return {ok:true,text:async()=>JSON.stringify({ok:true})};
       };
@@ -31,7 +32,7 @@ test('real filenames new/setTimeout stay protected and non-command words create 
       assert.deepEqual([...new Set(paths)].sort(),c.paths.sort(),c.cmd);
     }
     let hook;
-    globalThis.fetch=async(url,opts)=>({ok:true,text:async()=>JSON.stringify({ok:false,conflicts:[{path:'/new',sessionId:'other'}]})});
+    globalThis.fetch=async(url,opts)=>({ok:true,text:async()=>JSON.stringify(new URL(url).pathname==='/internal/authorize-write'?{ok:true}:{ok:false,conflicts:[{path:'/new',sessionId:'other'}]})});
     extension({registerTool(){},on(n,f){if(n==='tool_call')hook=f;}});
     const result=await hook({toolName:'bash',input:{command:'printf real > new'}},{cwd:'/worktree'});
     assert.equal(result.block,true);

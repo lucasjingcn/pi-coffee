@@ -21,7 +21,7 @@ function gitEnv(): NodeJS.ProcessEnv {
 }
 
 /** Run git and return trimmed stdout. Throws on failure. */
-async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
+export async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const { stdout } = await run("git", ["-C", cwd, ...args], {
     timeout,
     maxBuffer: 32 * 1024 * 1024,
@@ -31,7 +31,7 @@ async function git(cwd: string, args: string[], timeout = 120_000): Promise<stri
 }
 
 /** Like `git`, but returns stdout verbatim so leading columns and patch whitespace survive. */
-async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<string> {
+export async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const { stdout } = await run("git", ["-C", cwd, ...args], {
     timeout,
     maxBuffer: 32 * 1024 * 1024,
@@ -294,8 +294,8 @@ export async function worktreeDiff(dir: string, base = "HEAD"): Promise<DiffSumm
     gitRaw(dir, ["diff", `${base}...HEAD`]),
     gitRaw(dir, ["diff", "HEAD"]),
     gitRaw(dir, ["status", "--porcelain"]),
-    gitRaw(dir, ["diff", "--name-only", "-z", `${base}...HEAD`]),
-    gitRaw(dir, ["diff", "--name-only", "-z", "HEAD"]),
+    gitRaw(dir, ["diff", "--no-renames", "--name-only", "-z", `${base}...HEAD`]),
+    gitRaw(dir, ["diff", "--no-renames", "--name-only", "-z", "HEAD"]),
     gitRaw(dir, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
 

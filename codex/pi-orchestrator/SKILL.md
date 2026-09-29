@@ -1,163 +1,125 @@
 ---
 name: pi-orchestrator
-description: Use this for ANY implementation task (build/change/fix/refactor) in a repository where the pi-coffee MCP server is connected (tools pi_*). You are the general manager: DEFAULT TO DELEGATING implementation to pi workers via pi_spawn, then review their FULL diffs, verify with pi_exec, and integrate/commit/push yourself.
+description: Use when considering pi-coffee workers for a repository change. Delegate only independent, clearly specified work whose expected benefit exceeds coordination overhead. Complete small fixes directly, follow user and repository instructions, review full diffs, and verify candidates before integration.
 ---
 
 # pi-orchestrator
 
-You are the **general manager (大总管)**. **Default action = delegate implementation to pi workers.**
-Do NOT write application code yourself except for trivial one-line fixes or after two-strikes.
-Optimize for correctness over cheap tokens: keep design, spec, debugging, review, verification and
-integration yourself, and verify delegated work before merging.
+This file is the authoritative pi-coffee orchestration policy. The daemon loads this same body for
+its `orchestrate` prompt; `install.sh` copies the complete file into the Codex skill directory.
 
-## Prime directive
-The general manager owns the quality of the result. Delegation is a throughput tool for work that can
-be objectively verified — never a way to outsource judgment.
+## Authority and quality
 
-## What YOU do (never delegate)
-- Architecture, module boundaries, data models, API/interface design.
-- Ambiguous requirements: clarify and decide before any worker starts.
-- Security, auth, data-loss, concurrency, and performance-critical code.
-- Debugging hard failures and interpreting surprising behavior.
-- Every code review, every merge, every final verification, every push.
+User instructions and the target repository's `AGENTS.md` govern task scope, delegation, model use,
+verification, Git operations, and external actions. This skill does not grant authority to commit,
+push, deploy, spend money, send messages to others, or write production data. Local integration does
+not authorize a push. Workers must follow the same boundaries.
 
-## What you MAY delegate (quality-safe)
-- Well-specified, mechanical, or repetitive implementation.
-- Test writing for an already-decided interface.
-- Documentation and examples.
-- Refactors with a precise before/after spec and green tests to protect them.
-- Work whose acceptance criteria can be checked by commands (build, tests, linters).
+Keep the documented model and output quality. Never lower model capability, reference material,
+resolution, acceptance requirements, or workflow steps to make a task cheaper or easier. Model
+changes require the user's approval under the current project rules; retries stay on the same model
+unless an approved change is explicitly requested. Do not silently escalate to a costlier model.
 
-## Delegation spec (use the structured spec in `pi_spawn`)
-`pi_spawn` takes a structured spec and validates it. `goal` and `scope` are REQUIRED; an incomplete
-spec is rejected with a checklist. Provide:
-- `goal`: one unambiguous sentence.
-- `scope`: worktree-relative paths the worker may touch. These are pre-claimed at dispatch, so a
-  workstream whose scope overlaps an active one is rejected BEFORE any code is written.
-- `non_goals`: explicitly what NOT to touch.
-- `contracts`: interfaces, types, signatures, invariants to honor.
-- `constraints`: no new deps, no public API changes, don't push, performance/style, etc.
-- `task_type`: `mechanical | feature | refactor | debug | design | security`. `design` and `security`
-  are BLOCKED from delegation (judgment work is yours) unless you pass `spec_override` + reason.
-A bad spec is the most expensive mistake here. If anything is ambiguous, tell the worker to
-`coord_ask` BEFORE writing code.
+## Choose direct work or delegation
 
-## Worker completion contract
-A worker report is only DONE when it includes the files changed, the exact verification command(s) it
-ran, and their passing output. If tests/build were not run, the task is not done — send it back.
+The orchestrator owns the final result and may implement it directly. A one-line repair, a localized
+small fix, or tightly coupled work should be completed directly. Delegate only when the work is
+independent, has an explicit scope and objective acceptance, and its expected benefit exceeds the
+cost of specification, waiting, full-diff review, candidate verification, and integration. File count
+or code volume alone does not require delegation.
 
-## Acceptance tests belong to Codex (not the worker)
-Derive the acceptance test from the requirement, independent of the implementation.
-- BAD (rubber stamp): look at the worker's code, then write a test that matches it. If the code is
-  wrong, the test freezes the bug in and still passes.
-- GOOD: from the requirement alone, write what SHOULD happen, then run it. If the worker's code is
-  wrong, the test fails and catches it.
-Rules:
-- Write or derive the acceptance test BEFORE (or independently of) reading the worker's code.
-- Pass it to `pi_spawn` as `acceptance_files` (and `acceptance_command`). It is written into the
-  worktree before the worker starts and locked against worker edits, so the worker can only make it
-  pass.
-- A worker's own tests are never sufficient evidence on their own; treat them as a claim to verify.
-- The worker's job is to make YOUR acceptance test pass. Verify with `pi_exec` + `acceptance_command`.
-- Pass `tests_owned_by_codex:true` to `pi_finish` when closing the workstream.
+Follow the target project's size gate. For ai-gen specifically, small changes are direct work;
+parallel sub-agents are considered only when the plan contains at least three independent tasks.
+That threshold is an ai-gen project rule, not a universal requirement for other repositories.
 
-## Review checklist (run on the full `pi_diff`)
-- Read the full patch, not a summary. Check every hunk.
-- Correctness: edge cases, error paths, off-by-one, null/undefined, concurrency, resource cleanup.
-- Contracts honored: signatures/types unchanged, or intentionally changed and propagated.
-- Tests: meaningful, and actually exercise the new behavior; no rubber-stamp tests.
-- Scope: nothing touched outside the agreed scope; no drive-by refactors.
-- Then re-run the build/tests yourself on the integrated result. Use `pi_exec` to run the acceptance
-  command inside the worker's worktree before merging.
+If pi tools, model credentials, or paid-call authorization are missing, report the dependent blocker
+and continue independently authorized local implementation and checks. Do not stall all work merely
+because a skill mentions a tool.
 
-## Integration discipline
-- Merge in dependency order; keep the main branch green after every merge.
-- Resolve conflicts yourself or with a dedicated worker; never discard work silently.
-- Commit with meaningful messages; push last. Workers never push.
+Keep architecture, ambiguous product decisions, security, permissions, billing, difficult debugging,
+final review, and final acceptance with the orchestrator. Workers may gather evidence for these
+areas; their reports do not replace the orchestrator's judgment.
 
-## Cleanup after closure (pi_gc)
-Once a workstream is merged and closed with `pi_finish`, reclaim it with `pi_gc` instead of manual
-branch management. gc deletes only branches whose tip is an ancestor of the repo's current HEAD,
-which is the proof that the merge is already in the integrated history:
-- Squash/rebase-integrated branches are NOT ancestry-proven and are retained. After review, remove
-  those deliberately (e.g. explicit `pi_stop` with `delete_branch:true`) or leave them.
-- Historical sessions whose worktree is already gone are still checked. Abandoned/unfinished
-  sessions, active sessions, existing dirty worktrees, checked-out branches, and the current/default
-  branch are never touched - gc has no force mode.
-- Read the result: `branches_deleted` counts real deletions and `branches_retained` lists every
-  branch kept with its reason. A git failure retains the branch; it is never reported as deleted.
-- Closure order: review full diff -> verify acceptance -> merge -> `pi_finish(outcome)` -> `pi_report`
-  -> `pi_gc`. Report remaining workers, worktrees, and retained branches explicitly.
+## Specify a workstream
 
-## When NOT to use a worker
-- Specifying the task costs more than doing it.
-- The task is entangled with other in-flight changes.
-- The requirement is unclear (decide first).
-- The change is security- or data-critical.
+Before `pi_spawn`, provide a structured `spec`:
 
-## Two-strikes rule (enforced by the daemon)
-A workstream gets at most TWO delegated attempts: the initial task plus ONE correction. This is a hard
-gate, not advice: `pi_send` refuses the third instruction unless you pass `override:true` with an
-`override_reason`.
-- Automatic model escalation is DISABLED: a retry stays on the SAME model unless you explicitly pass
-  `model` to `pi_send`. Never silently route a worker to a costlier model.
-- If it still fails your acceptance criteria after the second attempt, stop delegating it.
-- Do it yourself. That is the correct call, not a failure of process.
-- If it is genuinely too large for you to take on directly, you MAY spawn ONE worker with an explicit
-  stronger model (pass an explicit model id to `pi_spawn`) plus the concrete failures and evidence, then verify hard.
-- Never enter an endless correction loop. It burns quota, time, and the worker's context.
-- `pi_status` exposes `instructions_sent`; overrides are recorded on the pi-coffee board for audit.
+- `goal`: a clear outcome.
+- `scope`: worktree-relative paths the worker may change; active overlapping scopes are rejected.
+- `non_goals`, `contracts`, and `constraints`: interfaces, invariants, quality and authorization bounds.
+- `task_type`: mechanical, feature, refactor, or debug. Design and security tasks require an explicit
+  `spec_override` with a reason; this override does not supply missing user authorization.
+- `acceptance_command`: fixed at dispatch for code integration; do not change it to match the patch.
 
-## Orchestration overhead
-Each worker is a separate context with duplicated repo reading and its own integration cost. Keep
-2-4 workers, each with a distinct file set. Over-parallelizing costs tokens AND lowers quality.
-`pi_spawn` warns when active workers reach `PI_COFFEE_PARALLEL_WARN` (default 4) - when you see it,
-integrate/merge before spawning more.
+Derive acceptance from the requirement before, or independently of, reading the implementation.
+Use `acceptance_files` where an independent test is needed; the daemon records their digests and the
+extension protects them from recognized writes. Existing appropriate project tests may suffice.
+A worker's own passing tests are useful evidence, but cannot independently prove correctness.
 
-## Review: parallel evidence, serial judgment
-Review is judgment and needs a whole-picture view; splitting it across workers loses cross-file
-coherence - exactly the class of defect most likely to slip. So:
-- Parallel (delegate to pi): gather evidence per module - run tests/linters, list call sites,
-  reproduce failures, flag suspicious spots.
-- Serial (keep with you): synthesize the evidence and decide - real bug? severity? fix or not?
-- Keep review context tight: review each branch against its acceptance command, not every diff
-  replayed in one long thread.
+Workers must report changed files, exact commands, their results, and unresolved issues. Unclear
+requirements should be raised through `coord_ask` before dependent edits. Missing credentials are a
+blocker for actual provider checks, never permission to fabricate a successful result.
 
-## Model routing
-- Default worker model: `deepseek-flash`. Automatic escalation is DISABLED.
-- A retry stays on the same model unless you explicitly pass `model` to `pi_send`.
-- Judgment calls / design / debugging -> you, the general manager.
+## Review and verify the candidate
 
-## Delegation threshold (when to do it yourself)
-Delegating is not free: YOU pay the spec, the acceptance test, the wait, the full-diff review, the
-independent verification, and the merge. For a small, localized fix that overhead usually exceeds the
-output you offload — losing both money and time.
-- Do it yourself: you can make the change in 1-2 edits without exploration, or it is a single
-  localized spot (typo, missing null check, one-line condition, missing import, small rename).
-- Delegate: multi-file, dozens+ lines, needs exploration, or mechanical/repetitive volume.
-- Sanity check before spawning: "is the spec + acceptance test + review + verify I'm about to spend
-  worth more or less than just writing this change myself?" If more, write it yourself.
+1. Wait for the worker to settle, then inspect the full `pi_diff`, including uncommitted changes.
+2. Check contracts, edge cases, failures, scope, meaningful acceptance, and other people's changes.
+3. Commit only the authorized worker changes according to repository and user rules. The worker
+   branch must be settled and clean before candidate verification.
+4. Call `pi_verify` to run the fixed acceptance command in an isolated candidate formed from the
+   worker commit and target commit. `pi_exec` is for diagnostics and worker checks; its result does
+   not grant merge permission.
+5. Read the actual exit code, timeout, output, worker SHA, target SHA, and candidate tree evidence.
+   Verification failure, changed acceptance files, out-of-scope changes, a dirty checkout, or a
+   changed worker or target commit blocks integration. Reverify a changed candidate.
+6. After acceptance and review pass, use `pi_merge` for authorized local integration. The gate
+   rechecks current evidence; daemon restart does not restore an old merge permit.
 
-## Output discipline: you produce judgment, workers produce code
-The most expensive thing you emit is output tokens (writing code). Keep your output to decisions,
-review findings, and tiny surgical fixes; let workers emit the bulk code.
-- On review, do NOT rewrite the worker's implementation. List concrete findings and send them back
-  to the SAME worker (`pi_send`). The fix is cheap on the worker and expensive on you.
-- Edit code yourself only for trivial one-line/typo fixes, or when the worker is stuck or broken.
-- If you notice yourself generating a large patch, stop and delegate it instead.
-- Keep the worker alive through the review/fix cycle (do not `pi_stop` before the branch is merged)
-  so findings can go back to it.
-- Sanity check via `pi_metrics`: worker_output_tokens should dominate; a low
-  worker_output_per_orchestrator_token ratio means you are writing code you should have delegated.
+A passed command proves the covered behavior in its actual environment. Offline fixtures, HTTP
+health, and Git success do not prove real model output, business completion, or savings. Preserve
+required external checks and identify any remaining credential or authorization dependency.
 
-## Task completion report (required)
-When the overall task is done, produce the delegation scoreboard:
-1. Close every workstream with `pi_finish(session_id, outcome)`. outcomes:
-   - `success_first`  -> met acceptance on the initial task
-   - `success_second` -> met acceptance after exactly one correction
-   - `taken_over`     -> you finished it yourself after two failed attempts
-   - `abandoned`      -> dropped/obsolete
-2. Call `pi_report` and summarize it to the user, e.g.:
-   "派给 pi 的任务 N 个：一次完成 X 个 (A%)，二次完成 Y 个 (B%)，失败后自己干 Z 个 (C%)。"
-3. Include the percentage breakdown and flag any unrecorded workstreams.
-Do not skip this. The scoreboard is how the user sees whether delegation is actually paying off.
+## Coordination protection and its limits
+
+The worker extension blocks `edit`, `write`, and `bash` if coordination fails or required claims
+cannot be obtained. Recognized writes outside the worktree are blocked. Acceptance digests and
+scope checks protect integration even when a script evades literal path detection.
+
+Claims are coordination protection, not a security sandbox. Shell variables, dynamic scripts and
+other arbitrary subprocess writes are not fully contained. Untrusted workers need a separately
+designed OS or container isolation boundary with appropriate credential and filesystem access.
+Never describe locks or candidate tests as full isolation.
+
+## Corrections and integration
+
+A workstream receives the initial task and at most one correction. `pi_send` refuses a third
+instruction without `override:true` and `override_reason`. After two failed attempts, reassess the
+cause and take over directly when appropriate. A further worker or stronger model needs explicit
+justification and applicable user approval; do not loop retries or reduce quality.
+
+Prefer a small number of workers with distinct file sets. `PI_COFFEE_PARALLEL_WARN` (default 4) is a
+capacity warning, not a mandate to fill slots. Review may gather evidence in parallel; final judgment
+uses the consolidated evidence. Send actionable findings to the owner or fix them directly when
+that is the more effective authorized path.
+
+Integrate in dependency order and preserve unrelated changes. Commits, pushes, deployment, cleanup,
+and external writes each follow user authorization and the target repository's rules. Workers never
+push. A tool being available does not authorize its side effects.
+
+## Close and report
+
+Close each workstream with `pi_finish`: `success_first`, `success_second`, `taken_over`, or `abandoned`.
+Successful outcomes require passing candidate evidence; a successful workstream with code changes
+also requires integration. An abandoned task may be closed without claiming acceptance.
+
+Use `pi_report` for outcomes and `pi_metrics` for usage and cost coverage. Include active and historical
+work, failures, and corrections. Missing costs are unknown, not zero. Distinguish provider-reported,
+manual and estimated evidence, and disclose absent orchestrator usage. Worker output divided by
+partial instruction tokens measures output distribution; it is not a savings rate or quality score.
+A financial comparison needs equivalent scope, acceptance, quality, elapsed time, currency, and the
+complete cost of both worker and orchestrator work, including review and rework.
+
+Use `pi_gc` only under the task's cleanup authorization. It retains dirty worktrees, active or
+unfinished sessions, checked-out branches, and branches whose ancestry does not prove integration.
+Report retained resources and external checks accurately. When local acceptance is satisfied and
+only authorized external dependencies remain, stop local work and report those dependencies.

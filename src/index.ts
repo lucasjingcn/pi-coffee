@@ -136,6 +136,12 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         return sendJson(res, 200, coord.claim(sessionId, paths, mode ?? "rw", repo));
       }
 
+      case "/internal/authorize-write": {
+        if (typeof body.sessionId !== "string") return sendJson(res, 400, { error: "sessionId required" });
+        coord.authorizeWrite(body.sessionId);
+        return sendJson(res, 200, { ok: true });
+      }
+
       case "/internal/release": {
         const { sessionId, paths, repo } = body as { sessionId: string; paths?: string[]; repo?: string };
         return sendJson(res, 200, { released: coord.releaseLocks(sessionId, paths, repo) });

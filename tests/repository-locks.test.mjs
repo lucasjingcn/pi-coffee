@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,writeFile,rm,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {Coordinator} from '../dist/manager.js';import {loadConfig} from '../dist/config.js';import {PiRpcClient} from '../dist/rpc-client.js';
-PiRpcClient.prototype.start=async()=>{};PiRpcClient.prototype.stop=async()=>{};PiRpcClient.prototype.prompt=async()=>({success:true});PiRpcClient.prototype.getState=async()=>({isStreaming:false});PiRpcClient.prototype.getSessionStats=async()=>({cost:0,tokens:{}});
+PiRpcClient.prototype.start=async()=>{};PiRpcClient.prototype.stop=async()=>{};PiRpcClient.prototype.prompt=async function(){this.emit("event",{type:"agent_settled"});return {success:true};};PiRpcClient.prototype.getState=async()=>({isStreaming:false});PiRpcClient.prototype.getSessionStats=async()=>({cost:0,tokens:{}});
 async function fixture(fn){
  const dir=await mkdtemp(join(tmpdir(),'pi-repo-locks-'));const repos=[join(dir,'a'),join(dir,'b')];
  for(const repo of repos){await mkdir(repo);const git=(...a)=>execFileSync('git',['-C',repo,...a]);git('init','-q');git('config','user.name','test');git('config','user.email','test@test');await writeFile(join(repo,'base.txt'),'base');git('add','-A');git('commit','-qm','init');}

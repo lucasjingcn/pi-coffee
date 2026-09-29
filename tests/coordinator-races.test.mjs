@@ -10,7 +10,7 @@ import {PiRpcClient} from '../dist/rpc-client.js';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 PiRpcClient.prototype.start=async function(){};
 PiRpcClient.prototype.stop=async function(){};
-PiRpcClient.prototype.prompt=async function(){return {success:true};};
+PiRpcClient.prototype.prompt=async function(){this.emit("event",{type:"agent_settled"});return {success:true};};
 PiRpcClient.prototype.getState=async function(){return {isStreaming:false};};
 PiRpcClient.prototype.getSessionStats=async function(){return {cost:0,tokens:{}};};
 

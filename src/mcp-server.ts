@@ -40,6 +40,8 @@ function compactMeta(m: SessionMeta) {
     lastText: m.lastText?.slice(0, 800),
     extension: m.extension ?? false,
     acceptance: m.acceptance ?? null,
+    verification: m.verification ?? null,
+    integration: m.integration ?? null,
     spec: m.spec ?? null,
     pendingQuestions: m.pendingQuestions.map((q) => ({
       id: q.id,
@@ -113,9 +115,9 @@ export function buildServer(coord: Coordinator): McpServer {
           .array(z.object({ path: z.string().describe("Worktree-relative path"), content: z.string() }))
           .optional()
           .describe(
-            "Spec-derived acceptance tests written into the worktree BEFORE the worker starts. They are locked against worker edits, so the worker must make them pass rather than change them.",
+            "Coordinator-authored acceptance files written before startup. Advisory locks plus content hashes protect integration; this is not an OS sandbox.",
           ),
-        acceptance_command: z.string().optional().describe("Command that runs the acceptance test (recorded for verification)"),
+        acceptance_command: z.string().optional().describe("Fixed acceptance command executed by pi_verify against the merged candidate; required for verification/integration"),
       },
     },
     async (args) => {
@@ -314,7 +316,7 @@ export function buildServer(coord: Coordinator): McpServer {
       },
     },
     async ({ session_id, remove_worktree, delete_branch, outcome, note }) => {
-      if (outcome) coord.setOutcome(session_id, outcome, note);
+      if (outcome) await coord.setOutcome(session_id, outcome, note);
       await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
     },
@@ -338,7 +340,7 @@ export function buildServer(coord: Coordinator): McpServer {
       },
     },
     async ({ session_id, outcome, note, stop, tests_owned_by_codex }) => {
-      coord.setOutcome(session_id, outcome, note);
+      await coord.setOutcome(session_id, outcome, note);
       if (tests_owned_by_codex !== undefined) coord.setTestsOwned(session_id, tests_owned_by_codex);
       if (stop) await coord.stop(session_id);
       return json({
@@ -373,11 +375,20 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Output-discipline metrics",
       description:
-        "Aggregate worker output tokens/cost and the orchestrator's instruction volume. Use to check the discipline: workers should emit the code (high worker_output_tokens), Codex should emit judgment (low instruction volume). Note: Codex's own tokens are not observable here; the orchestrator figure is a lower bound.",
-      inputSchema: {},
+        "Report cost evidence for active and historical workers, including failures. Unknown costs remain unknown. Orchestrator costs need explicit source records; output volume is not savings evidence.",
+      annotations: { readOnlyHint: true },
+      inputSchema: { session_ids: z.array(z.string()).min(1).optional() },
     },
-    async () => json(await coord.metrics()),
+    async ({ session_ids }) => json(await coord.metrics(session_ids)),
   );
+
+  server.registerTool("pi_record_cost", {
+    title: "Record orchestrator cost evidence",
+    description: "Register a sourced orchestrator cost for explicit sessions. Use a stable record id; identical repeats are idempotent and conflicting repeats fail. Never invent missing usage or savings.",
+    annotations: { readOnlyHint: false, idempotentHint: true },
+    inputSchema: { id: z.string().min(1), amount: z.number().finite().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/),
+      source: z.enum(["manual", "estimate", "provider"]), reference: z.string().min(1), session_ids: z.array(z.string()).min(1) },
+  }, async (record) => json(coord.recordCost(record)));
 
   server.registerTool(
     "pi_tail",
@@ -439,11 +450,26 @@ export function buildServer(coord: Coordinator): McpServer {
   );
 
   server.registerTool(
+    "pi_verify",
+    {
+      title: "Verify the exact integration candidate",
+      description: "Execute the registered acceptance command in an isolated merged candidate. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
+      annotations: { readOnlyHint: false, idempotentHint: false },
+      inputSchema: { session_id: z.string(), into: z.string().optional(), timeout_ms: z.number().int().min(1000).max(1_800_000).optional() },
+    },
+    async ({ session_id, into, timeout_ms }) => {
+      const proof = await coord.verify(session_id, into, timeout_ms);
+      return proof.passed ? json(proof) : errorJson(proof);
+    },
+  );
+
+  server.registerTool(
     "pi_merge",
     {
       title: "Merge a worker branch",
       description:
-        "Merge a worker's branch into a branch of the main repo (default: the repo's current branch). On conflict the merge is left in progress and conflicts are returned for you to resolve.",
+        "Merge only with current successful pi_verify evidence into the clean checked-out target. Source/target changes invalidate verification. Successful Git merge alone does not close a task.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
         session_id: z.string(),
         into: z.string().optional().describe("Target branch in the main repo (default: current)"),
@@ -473,9 +499,10 @@ export function buildServer(coord: Coordinator): McpServer {
         session_id: z.string(),
         command: z.string(),
         timeout_ms: z.number().int().min(1000).max(1_800_000).optional(),
+        login: z.boolean().optional().describe("Explicitly opt in to a login shell; default false preserves daemon PATH without loading user shell initialization"),
       },
     },
-    async ({ session_id, command, timeout_ms }) => json(await coord.exec(session_id, command, timeout_ms ?? 600_000)),
+    async ({ session_id, command, timeout_ms, login }) => json(await coord.exec(session_id, command, timeout_ms ?? 600_000, login ?? false)),
   );
 
   server.registerTool(

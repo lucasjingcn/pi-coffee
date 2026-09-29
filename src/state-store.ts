@@ -1,6 +1,7 @@
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { BoardEntry, MailMessage, MessageKind } from "./mailbox.js";
 import type { Outcome, SessionMeta, SessionStatus } from "./manager.js";
+import { validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
 export interface StateSnapshot {
@@ -8,6 +9,7 @@ export interface StateSnapshot {
   mailbox: MailMessage[];
   board: BoardEntry[];
   history: SessionMeta[];
+  orchestratorCosts: OrchestratorCostRecord[];
 }
 
 export interface LoadResult {
@@ -37,7 +39,7 @@ function safeReason(error: unknown): string {
 }
 
 function emptyState(): StateSnapshot {
-  return { counter: 0, mailbox: [], board: [], history: [] };
+  return { counter: 0, mailbox: [], board: [], history: [], orchestratorCosts: [] };
 }
 
 /**
@@ -60,6 +62,15 @@ export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
   const mailbox = optionalArray(raw.mailbox, file, "mailbox", validateMailboxEntry);
   const board = optionalArray(raw.board, file, "board", validateBoardEntry);
   const history = optionalArray(raw.history, file, "history", validateHistoryEntry);
+  const orchestratorCosts = optionalArray(raw.orchestratorCosts, file, "orchestratorCosts", (entry, index) => {
+    try { return validateCostRecord(entry); } catch { fail(file, `orchestratorCosts[${index}] is invalid`); }
+  });
+  const costIds = new Set<string>();
+  for (const record of orchestratorCosts) {
+    if (costIds.has(record.id)) fail(file, "duplicate orchestrator cost id");
+    costIds.add(record.id);
+    if (record.session_ids.some((id) => !history.some((entry) => entry.id === id))) fail(file, "cost references unknown history session");
+  }
 
   // Session ids are allocated as s<N>. Bumping the counter to at least the
   // highest id seen in history prevents a restart from reusing an id that
@@ -75,7 +86,7 @@ export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
     counter = Math.max(counter, n);
   });
 
-  return { counter, mailbox, board, history };
+  return { counter, mailbox, board, history, orchestratorCosts };
 }
 
 function optionalArray<T>(
@@ -165,6 +176,35 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
   const outcome = entry.outcome;
   if (outcome !== undefined && (typeof outcome !== "string" || !OUTCOMES.has(outcome as Outcome))) {
     fail(file, `${at}.outcome is not a known outcome`);
+  }
+
+  if (entry.acceptance !== undefined) {
+    if (!isRecord(entry.acceptance) || !Array.isArray(entry.acceptance.files)
+      || !entry.acceptance.files.every((p) => typeof p === "string")
+      || (entry.acceptance.command !== undefined && typeof entry.acceptance.command !== "string")
+      || (entry.acceptance.hashes !== undefined && (!isRecord(entry.acceptance.hashes)
+        || !Object.values(entry.acceptance.hashes).every((v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v))))) {
+      fail(file, `${at}.acceptance is invalid`);
+    }
+  }
+  if (entry.verification !== undefined) {
+    const proof = entry.verification;
+    if (!isRecord(proof) || typeof proof.epoch !== "string" || typeof proof.command !== "string"
+      || typeof proof.targetBranch !== "string" || typeof proof.passed !== "boolean" || typeof proof.codeChanged !== "boolean"
+      || typeof proof.verifiedAt !== "number" || !Number.isFinite(proof.verifiedAt)
+      || ![proof.workerSha, proof.targetSha, proof.candidateTree].every((v) => typeof v === "string" && /^[a-f0-9]{40,64}$/.test(v))
+      || !Array.isArray(proof.changedFiles) || !proof.changedFiles.every((v) => typeof v === "string")
+      || !isRecord(proof.result) || typeof proof.result.stdout !== "string" || typeof proof.result.stderr !== "string"
+      || typeof proof.result.timedOut !== "boolean" || !(proof.result.code === null || Number.isInteger(proof.result.code))) {
+      fail(file, `${at}.verification is invalid`);
+    }
+  }
+  if (entry.integration !== undefined) {
+    const record = entry.integration;
+    if (!isRecord(record) || typeof record.targetBranch !== "string" || typeof record.integratedAt !== "number"
+      || !Number.isFinite(record.integratedAt)
+      || ![record.workerSha, record.previousTargetSha, record.mergedSha, record.candidateTree]
+        .every((v) => typeof v === "string" && /^[a-f0-9]{40,64}$/.test(v))) fail(file, `${at}.integration is invalid`);
   }
 
   return { ...(entry as unknown as SessionMeta) };
