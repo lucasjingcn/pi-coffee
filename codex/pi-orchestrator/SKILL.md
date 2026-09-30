@@ -16,10 +16,12 @@ push, deploy, spend money, send messages to others, or write production data. Lo
 not authorize a push. Workers must follow the same boundaries.
 
 The daemon is shared by all Codex chats, and session IDs are global. It cannot trust a Codex chat ID.
-Check the live tool schemas before assuming this boundary is active: `pi_spawn` must accept
-`scope_key` and `pi_send` must accept `control_key`. If not, the daemon has not been restarted
-onto this version. Treat all workers
-as legacy-unprotected until the shared daemon is safely upgraded.
+Check the daemon's live `/mcp` `tools/list` before assuming this boundary is active: `pi_spawn`
+must accept `scope_key` and `pi_send` must accept `control_key`. A running Codex chat may still
+display cached, older tool declarations after a daemon restart; that alone does not prove the daemon
+is old. A scoped, read-only `pi_list(session_ids=...)` call can also confirm that new arguments reach
+the daemon. If the live daemon lacks the new fields, defer protected writes until it is safely
+upgraded. If the daemon has them but the client cannot forward them, refresh the MCP connection.
 For each new `pi_spawn`, retain its one-time `control_key` in this chat and pass it to every worker
 write (`pi_send`, `pi_answer`, `pi_commit`, `pi_verify`, `pi_merge`, `pi_exec`, `pi_finish`, `pi_stop`,
 etc.). Pass the first spawn's `scope_key` to later `pi_spawn` calls in this chat so those workers can

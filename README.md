@@ -101,8 +101,10 @@ user can access local state; this boundary prevents cross-chat operations throug
 host-level access. Pass your IDs to `pi_wait`, `pi_list`, `pi_report`, and `pi_metrics`; an unfiltered
 report is daemon-wide. Use scoped `pi_gc` for cleanup. Coordinate daemon restarts across chats: an
 idle snapshot does not prevent a new worker from starting immediately afterward.
-If the live `pi_spawn` input schema lacks `scope_key` or `pi_send` lacks `control_key`, that daemon
-is still on the previous version; source changes and an installed skill alone do not activate isolation.
+Check the daemon's live `/mcp` `tools/list` for `pi_spawn.scope_key` and `pi_send.control_key`.
+An existing Codex chat can display cached older tool declarations even while the daemon has the new
+schema; a scoped read-only `pi_list(session_ids=...)` call can confirm that new arguments reach it.
+If the live daemon lacks the fields, source changes and an installed skill alone do not activate isolation.
 
 ```mermaid
 flowchart LR
