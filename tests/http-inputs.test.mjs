@@ -105,3 +105,13 @@ test('invalid internal payloads cannot poison mailbox, board or persisted state'
   assert.equal(state.board.length, 1);
   assert.equal(state.board[0].board, 'audit');
 }));
+
+
+test('board GET respects the worker extension key query', {timeout: 10000}, async () => daemon(async base => {
+  for (const key of ['wanted', 'other']) {
+    const response = await fetch(base + '/internal/board/post', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({board: 'audit', key, value: key})});
+    assert.equal(response.status, 200);
+  }
+  const body = await (await fetch(base + '/internal/board/get?board=audit&key=wanted')).json();
+  assert.deepEqual(body.entries.map(e => e.key), ['wanted']);
+}));

@@ -240,7 +240,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         const latest = url.searchParams.get("latest") === "1" || body.latest === true;
         if (!board) return sendJson(res, 400, { error: "board required" });
         const scopedBoard = workerSid ? coord.scopedBoardName(workerSid, board) : board;
-        const entries = latest ? coord.boardLatest(scopedBoard) : coord.boardRead(scopedBoard, body.key);
+        const key = url.searchParams.get("key") || body.key;
+        const entries = latest ? coord.boardLatest(scopedBoard) : coord.boardRead(scopedBoard, key);
         return sendJson(res, 200, { entries: workerSid ? entries.map((entry) => ({ ...entry, board })) : entries });
       }
 
