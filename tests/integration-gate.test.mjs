@@ -8,6 +8,7 @@ import {Coordinator} from '../dist/manager.js';
 import {loadConfig} from '../dist/config.js';
 import {acceptanceHashes} from '../dist/integration.js';
 import {resolveRepoIdentity} from '../dist/lock-repo.js';
+import {validateSnapshot} from '../dist/state-store.js';
 
 async function fixture(fn, command = 'test "$(cat src/item.txt)" = changed') {
   const root = await mkdtemp(join(tmpdir(), 'pi-integration-gate-'));
@@ -218,4 +219,88 @@ test('a verified observation with no code changes can close without merge',()=>f
   git(worker,'reset','--hard',meta.baseRef);meta.acceptance={files:[],hashes:{},command:'test -f src/item.txt'};
   const proof=await c.verify('s1');assert.equal(proof.codeChanged,false);
   await c.setOutcome('s1','success_first');assert.equal((await c.report()).counts.success_first,1);
+}));
+
+test('every declared requirement needs an explicit candidate-bound review before merge',()=>fixture(async({c,meta,head})=>{
+  meta.spec.requirements=[{id:'change',text:'Change the item to changed.'},{id:'preserve',text:'Preserve the other item.'}];
+  const proof=await c.verify('s1');const before=head();
+  await assert.rejects(c.merge('s1'),/pi_review/);
+  const good={requirements:[{id:'change',met:true,evidence:'src/item.txt contains changed; fixed acceptance passed.'},
+    {id:'preserve',met:true,evidence:'src/target.txt remains base in the reviewed candidate.'}],test_changes:[]};
+  for (const bad of [
+    {...good,requirements:good.requirements.slice(0,1)},
+    {...good,requirements:[...good.requirements,good.requirements[0]]},
+    {...good,requirements:[...good.requirements,{id:'unknown',met:true,evidence:'extra'}]},
+    {...good,requirements:[{...good.requirements[0],met:false},good.requirements[1]]},
+    {...good,requirements:[{...good.requirements[0],evidence:'   '},good.requirements[1]]},
+  ]) await assert.rejects(c.review('s1',proof.id,bad),/requirement|evidence|duplicate|unknown/);
+  assert.equal(head(),before);assert.equal(meta.candidateReview,undefined);
+  const review=await c.review('s1',proof.id,good);
+  assert.equal(review.verificationId,proof.id);
+  good.requirements[0].met=false;assert.equal(meta.candidateReview.requirements[0].met,true);
+  assert.equal((await c.merge('s1')).ok,true);
+  await c.setOutcome('s1','success_first');
+}));
+
+test('review cannot be reused after reverification or a changed task contract',()=>fixture(async({c,meta})=>{
+  meta.spec.requirements=[{id:'change',text:'Change item.'}];
+  const evidence={requirements:[{id:'change',met:true,evidence:'Fixed acceptance and src/item.txt reviewed.'}],test_changes:[]};
+  const first=await c.verify('s1');await c.review('s1',first.id,evidence);
+  const second=await c.verify('s1');assert.notEqual(first.id,second.id);
+  await assert.rejects(c.review('s1',first.id,evidence),/verification|candidate/);
+  await assert.rejects(c.merge('s1'),/pi_review/);
+  await c.review('s1',second.id,evidence);
+  meta.spec.requirements=[];
+  await assert.rejects(c.merge('s1'),/contract.*changed/);
+  meta.spec.requirements=[{id:'change',text:'Change item.'}];
+}));
+
+test('a late review cannot attach to a candidate whose target already moved',()=>fixture(async({c,meta,repo,git})=>{
+  meta.spec.requirements=[{id:'change',text:'Change item.'}];const proof=await c.verify('s1');
+  await writeFile(join(repo,'src/target.txt'),'moved');git(repo,'add','src/target.txt');git(repo,'commit','-qm','moved');
+  await assert.rejects(c.review('s1',proof.id,{requirements:[{id:'change',met:true,evidence:'reviewed item'}],test_changes:[]}),/target changed/);
+  assert.equal(meta.candidateReview,undefined);
+}));
+
+test('modified existing validation requires exact per-file approval even when acceptance is green',()=>fixture(async({c,meta,worker,git,head})=>{
+  // Treat an existing non-conventional file as a project-specific validation definition.
+  meta.spec.scope.push('src/target.txt');meta.spec.validation_paths=['src/target.txt'];
+  await writeFile(join(worker,'src/target.txt'),'weakened definition');git(worker,'add','src/target.txt');git(worker,'commit','-qm','change validation');
+  const proof=await c.verify('s1');const before=head();
+  assert.deepEqual(proof.existingValidationChanges,['src/target.txt']);
+  await assert.rejects(c.merge('s1'),/pi_review/);
+  for (const test_changes of [[],[{path:'wrong',approved:true,reason:'reviewed'}],
+    [{path:'src/target.txt',approved:false,reason:'weakens validation'}],
+    [{path:'src/target.txt',approved:true,reason:'   '}],
+    [{path:'src/target.txt',approved:true,reason:'reviewed'},{path:'src/target.txt',approved:true,reason:'reviewed'}]]) {
+    await assert.rejects(c.review('s1',proof.id,{requirements:[],test_changes}),/validation|test|duplicate|unknown|reason/);
+  }
+  assert.equal(head(),before);
+  await c.review('s1',proof.id,{requirements:[],test_changes:[{path:'src/target.txt',approved:true,
+    reason:'Compared the original definition and candidate; this fixture intentionally changes it.'}]});
+  assert.equal((await c.merge('s1')).ok,true);
+}));
+
+test('coordinator acceptance files remain immutable regardless of review',()=>fixture(async({c,meta,worker,git})=>{
+  meta.spec.scope.push('tests');await writeFile(join(worker,'tests/acceptance.txt'),'tampered');
+  git(worker,'add','tests/acceptance.txt');git(worker,'commit','-qm','tamper');
+  await assert.rejects(c.verify('s1'),/acceptance files changed/);
+  await assert.rejects(c.review('s1','fake',{requirements:[],test_changes:[]}),/verification/);
+}));
+
+test('review survives as validated audit data but restart does not restore a merge permit',()=>fixture(async({c,meta,config})=>{
+  meta.spec.requirements=[{id:'change',text:'Change item.'}];
+  const proof=await c.verify('s1');await c.review('s1',proof.id,{requirements:[{id:'change',met:true,evidence:'Fixed acceptance and complete item diff reviewed.'}],test_changes:[]});
+  await c.stopAll();
+  const raw=JSON.parse(await readFile(join(config.dataDir,'state.json'),'utf8'));
+  assert.equal(validateSnapshot(raw,'fixture').history[0].candidateReview.verificationId,proof.id);
+  for (const mutate of [
+    r=>r.history[0].candidateReview.requirements[0].evidence=' ',
+    r=>r.history[0].candidateReview.verificationId='stale',
+    r=>r.history[0].spec.requirements.push({id:'change',text:'duplicate'}),
+  ]) {const bad=structuredClone(raw);mutate(bad);assert.throws(()=>validateSnapshot(bad,'fixture'),/candidateReview|duplicate/);}
+  const restarted=new Coordinator(config);await restarted.init();const stored=restarted.history.find(s=>s.id==='s1');
+  restarted.runtimes.set('s1',{meta:stored,client:{isStreaming:false,stop:async()=>{},getState:async()=>{throw new Error('offline');}},repoIdentity:resolveRepoIdentity(stored.repo)});
+  try {assert.equal(stored.candidateReview.verificationId,proof.id);await assert.rejects(restarted.merge('s1'),/pi_verify/);}
+  finally {await restarted.stopAll();}
 }));

@@ -74,6 +74,8 @@ of this document is the mechanics.
   in `pi_wait` / `pi_status` and Codex answers with `pi_answer`.
 - **Acceptance tests written by Codex.** Codex drops the test into the worktree and locks it before
   the worker starts. Digests are checked again at integration; locks alone are not a sandbox.
+- **Requirement and existing-test review.** `pi_review` records each hard requirement and explicitly
+  approves changed existing tests/configurations against the exact verified candidate.
 - **Candidate acceptance before merging.** `pi_verify` runs the fixed acceptance command on the
   proposed worker + target result. Changed SHAs, failed tests, and out-of-scope edits block merging.
 - **Structured specs and a paper trail.** Every spawn carries a goal and a scope; the daemon rejects
@@ -302,12 +304,28 @@ repositories retain their own rules.
    the repository's authorization rules; verification requires a clean, settled worker branch.
 4. Call `pi_verify`. It builds an isolated candidate from the exact worker and target commits and
    runs the registered acceptance command. Inspect exit code, timeout, output, SHAs, and tree evidence.
-5. `pi_merge` requires current passing evidence. Changed SHAs, acceptance files, scope violations,
+5. When requirements or existing validation changes need review, call `pi_review` with the exact
+   verification ID and complete requirement/file verdicts as described below.
+6. `pi_merge` requires current passing evidence and the necessary candidate review. Changed SHAs, acceptance files, scope violations,
    dirty target checkouts, and failed or timed-out acceptance block integration. Reverify a changed
    candidate. After a daemon restart, historical evidence does not restore permission to merge.
-6. Close with `pi_finish`, which stops the worker, then inspect `pi_report` / `pi_metrics`.
+7. Close with `pi_finish`, which stops the worker, then inspect `pi_report` / `pi_metrics`.
    A successful outcome needs passing acceptance and, if code changed, an integration record.
    Check `inconsistent_outcomes` before citing recorded successes. Clean up with `pi_gc` when authorized.
+
+Candidate review: declare hard requirements in `spec.requirements: [{id,text}]` and project-specific
+validation definitions in `spec.validation_paths` (for example `package.json` or CI scripts).
+After `pi_verify`, if requirements were declared or `existingValidationChanges` is nonempty, call
+`pi_review` with its exact `id` as `verification_id`, one `{id,met:true,evidence}` per requirement,
+and one `{path,approved:true,reason}` in `test_changes` per modified existing validation file.
+All conventional test edits, deletions and renames require review, including append-only edits;
+new test files alone do not. Missing, duplicate, unknown, negative or empty verdicts block approval.
+Review the original tests and full diff: structured evidence is an orchestrator judgment, not an
+automatic semantic proof. Reverification or source/target/contract changes invalidate approval.
+Coordinator acceptance files remain immutable. `pi_merge` and successful implementation outcomes
+require this review in addition to the existing candidate verification. Read-only reviews retain
+their separate unchanged-worktree acceptance path. Protected workers receive explicitly addressed
+messages and exclude global broadcasts, including old persisted broadcasts.
 
 `pi_exec` remains a diagnostic command runner; its passing result is not a merge permit. The
 orchestrator owns review and final judgment. A worker gets the original task plus one correction;
@@ -381,6 +399,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
 | `pi_verify` | Run the fixed acceptance command against the exact worker + target candidate; record exit code, timeout, output and commit/tree evidence. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_review` | Record one evidence verdict per requirement and one approval reason per modified existing validation file, bound to the exact verification ID. Incomplete or stale reviews cannot authorize integration. |
 | `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |
 | `pi_exec` | Run a non-login shell command in a worker worktree for diagnostics. This does not create merge evidence. |

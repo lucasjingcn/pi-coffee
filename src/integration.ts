@@ -5,8 +5,12 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { acceptancePath } from "./acceptance.js";
 import { currentBranch, git, isWorktreeClean, resolveRef, worktreeDiff } from "./worktree.js";
+import { existingValidationChanges } from "./validation-changes.js";
+import { reviewContractHash, validateCandidateReview, validateReviewSpec, type CandidateReview } from "./candidate-review.js";
+import type { DelegationSpec } from "./types.js";
 
 export interface Verification {
+  id: string;
   epoch: string;
   workerSha: string;
   targetSha: string;
@@ -18,6 +22,8 @@ export interface Verification {
   failure?: string;
   changedFiles: string[];
   codeChanged: boolean;
+  existingValidationChanges: string[];
+  reviewContractHash: string;
   result: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
 }
 
@@ -36,10 +42,11 @@ export interface VerifiableSession {
   branch: string;
   baseRef: string;
   status: string;
-  spec?: { scope: string[] };
+  spec?: Pick<DelegationSpec, "scope" | "requirements" | "validation_paths">;
   acceptance?: { files: string[]; command?: string; hashes?: Record<string, string> };
   verification?: Verification;
   integration?: IntegrationRecord;
+  candidateReview?: CandidateReview;
 }
 
 function inside(root: string, target: string): boolean {
@@ -101,11 +108,14 @@ export class IntegrationGate {
     if (meta.status !== "idle" && meta.status !== "stopped") throw new Error("worker must be settled before verification");
     if (!meta.acceptance?.command?.trim()) throw new Error("acceptance_command is required for verification and integration");
     if (!meta.spec?.scope.length) throw new Error("declared scope is required for verification and integration");
+    validateReviewSpec(meta.spec);
+    const contractHash = reviewContractHash(meta);
     if (!(await isWorktreeClean(meta.worktree))) throw new Error("commit worker changes before verification");
     const workerSha = await resolveRef(meta.worktree, "HEAD");
     if (workerSha !== await resolveRef(meta.repo, `refs/heads/${meta.branch}`)) throw new Error("worker HEAD does not match its branch");
     const targetSha = await assertTarget(meta.repo, branch);
     const changedFiles = await checkChanges(meta);
+    const validationChanges = await existingValidationChanges(meta.repo, meta.baseRef, workerSha, meta.spec.validation_paths);
     const temp = await mkdtemp(join(tmpdir(), "pi-coffee-verify-"));
     const candidate = join(temp, "candidate");
     let added = false;
@@ -129,8 +139,10 @@ export class IntegrationGate {
       if (workerSha !== await resolveRef(meta.worktree, "HEAD") || targetSha !== await assertTarget(meta.repo, branch)
         || !(await isWorktreeClean(meta.worktree))) throw new Error("worker or target changed during verification");
       await checkChanges(meta);
-      return { epoch: this.epoch, workerSha, targetSha, targetBranch: branch, candidateTree,
+      if (contractHash !== reviewContractHash(meta)) throw new Error("task contract changed during verification");
+      return { id: randomUUID(), epoch: this.epoch, workerSha, targetSha, targetBranch: branch, candidateTree,
         command: meta.acceptance.command, verifiedAt: Date.now(), passed, failure, changedFiles,
+        existingValidationChanges: validationChanges, reviewContractHash: contractHash,
         codeChanged: changedFiles.some((file) => !meta.acceptance!.files.includes(file)), result };
     } finally {
       if (added) await git(meta.repo, ["worktree", "remove", "--force", candidate]);
@@ -138,12 +150,13 @@ export class IntegrationGate {
     }
   }
 
-  async assertCurrent(meta: VerifiableSession, branch: string, integrated = false): Promise<Verification> {
+  async assertCurrent(meta: VerifiableSession, branch: string, integrated = false, requireReview = true): Promise<Verification> {
     const proof = meta.verification;
     if (!proof?.passed || proof.epoch !== this.epoch || proof.targetBranch !== branch) {
       throw new Error("current successful pi_verify evidence is required");
     }
     if (meta.status !== "idle" && meta.status !== "stopped") throw new Error("worker is still working");
+    if (proof.reviewContractHash !== reviewContractHash(meta)) throw new Error("task contract changed since verification; run pi_verify again");
     if (proof.command !== meta.acceptance?.command || !(await isWorktreeClean(meta.worktree))
       || proof.workerSha !== await resolveRef(meta.worktree, "HEAD")
       || proof.workerSha !== await resolveRef(meta.repo, `refs/heads/${meta.branch}`)) {
@@ -154,6 +167,12 @@ export class IntegrationGate {
     if (!expected || await assertTarget(meta.repo, branch) !== expected) throw new Error("target changed since verification; run pi_verify again");
     if (integrated && (meta.integration?.workerSha !== proof.workerSha
       || meta.integration.candidateTree !== proof.candidateTree)) throw new Error("integration does not match verification");
+    if (requireReview && ((meta.spec?.requirements?.length ?? 0) > 0 || proof.existingValidationChanges.length > 0)) {
+      if (!meta.candidateReview || meta.candidateReview.verificationId !== proof.id) {
+        throw new Error("current pi_review evidence is required for requirements and existing validation changes");
+      }
+      validateCandidateReview(meta.spec, proof.existingValidationChanges, meta.candidateReview);
+    }
     return proof;
   }
 }

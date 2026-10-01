@@ -71,6 +71,8 @@ Codex 一个负责人对结果负责。思路就这么点，下面都是具体�
   测试通过；集成前还会检查内容摘要，文件锁本身不是沙箱。
 - **先验证候选再合并。** `pi_verify` 在 worker 与目标提交形成的候选上跑固定验收；提交变化、
   测试失败或超范围改动都阻止合并。
+- **逐项需求与既有测试审查。** `spec.requirements` 记录硬性要求，`pi_review` 要求逐项证据；
+  修改、删除或重命名既有测试及验证配置时，统筹方须逐文件确认。审查绑定准确的验收候选。
 - **结构化 spec 和可追溯记录。** 每次 spawn 都带 goal 和 scope，范围重叠会在派发阶段就被拒绝。
   任务结束时用 `pi_report` 就能看到有多少活儿是一次就过的。
 
@@ -263,9 +265,15 @@ docker compose down -v                                # 停止并清掉 daemon �
 3. 等 worker 停止工作后读完整 `pi_diff`，按项目与用户授权提交已审查改动；验证要求 worker 分支干净。
 4. 调用 `pi_verify`，从明确的 worker 与目标提交形成隔离候选，运行固定验收。检查退出码、超时、输出、
    提交 SHA 和候选树证据。
-5. `pi_merge` 要求当前候选的有效通过证据。提交变化、验收文件篡改、超范围改动、脏目标工作树、失败
+5. 声明 `spec.requirements: [{id,text}]` 或验收结果的 `existingValidationChanges` 非空时，调用 `pi_review`，
+   传入 `pi_verify` 返回的 `id` 作为 `verification_id`。`requirements` 对每项填写 `{id,met:true,evidence}`，
+   `test_changes` 对每个既有验证文件填写 `{path,approved:true,reason}`。漏项、重复、未知项、负面结论或
+   空证据都不通过。统筹方必须实际审查原始测试与完整 diff；结构完整并不自动证明语义正确。
+   常规测试目录、test/spec 文件及常见测试框架配置自动识别；项目其他验证定义用 `spec.validation_paths`
+   指定（例如 `package.json`、CI 脚本）。旧测试纯追加也需确认，纯新增文件不触发此项门禁。
+6. `pi_merge` 要求当前候选的有效通过证据与必要的审查记录。提交变化、验收文件篡改、超范围改动、脏目标工作树、失败
    或超时都阻止集成；候选变化后重新验收。daemon 重启不会恢复历史合并许可。
-6. 用 `pi_finish` 关闭工作流，查看 `pi_report` / `pi_metrics`。成功结局须有通过的验收；代码改动还须
+7. 用 `pi_finish` 关闭工作流，查看 `pi_report` / `pi_metrics`。成功结局须有通过的验收；代码改动还须
    有集成记录。按授权用 `pi_gc` 回收资源。
 
 `pi_exec` 用于诊断和 worker 检查，通过不代表获得合并许可。最终审查与判断由统筹方负责。
@@ -330,6 +338,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | 工具 | 作用 |
 |---|---|
 | `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
+| `pi_review` | 记录准确候选的统筹方审查。接收 `verification_id`、逐项 `requirements` 和逐文件 `test_changes`；硬性要求或既有验证文件变更未完整确认时，禁止合并。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
 | `pi_wait` | 阻塞到所有会话 `settled`，或任一 worker 提出 `question`。超时控制在两分钟以内，然后重新轮询。 |
 | `pi_status` / `pi_list` | 当前状态：状态、模型、成本、上下文占用、待处理问题。 |

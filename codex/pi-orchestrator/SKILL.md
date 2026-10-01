@@ -80,6 +80,12 @@ Before `pi_spawn`, provide a structured `spec`:
   `spec_override` with a reason; this override does not supply missing user authorization.
 - `purpose`: implementation, review, or investigation. This declares the assigned work, separately
   from its technical `task_type`; review and investigation do not count as implementation delegation.
+- `requirements`: preserve the user's hard requirements as coordinator-authored `{id, text}` items
+  with unique IDs. Include every hard requirement for implementation tasks; this daemon cannot
+  independently establish that the text is a verbatim user quote.
+- `validation_paths`: additional project validation definitions (for example `package.json`, CI
+  scripts or nonstandard test directories) whose existing changes need explicit review. Conventional
+  test directories, test/spec files and common test-runner configurations are detected automatically.
 - `acceptance_command`: fixed at dispatch for code integration; do not change it to match the patch.
 
 Derive acceptance from the requirement before, or independently of, reading the implementation.
@@ -103,7 +109,16 @@ blocker for actual provider checks, never permission to fabricate a successful r
 5. Read the actual exit code, timeout, output, worker SHA, target SHA, and candidate tree evidence.
    Verification failure, changed acceptance files, out-of-scope changes, a dirty checkout, or a
    changed worker or target commit blocks integration. Reverify a changed candidate.
-6. After acceptance and review pass, use `pi_merge` for authorized local integration. The gate
+6. If requirements are declared or `pi_verify.existingValidationChanges` is nonempty, call `pi_review`
+   with that exact verification `id`. Supply one `{id, met:true, evidence}` per requirement and one
+   `{path, approved:true, reason}` per changed existing validation file. Read the original and changed
+   tests; approve only when their coverage remains valid or the user explicitly changed the behavior.
+   Missing, duplicate, unknown or negative verdicts block review. Even append-only existing test edits
+   require review; newly added tests alone do not. Protected coordinator acceptance files remain
+   immutable. Review completeness is a structural gate, not automatic proof of semantic correctness.
+   Reverification, source/target/contract changes, new instructions and daemon restart invalidate
+   the usable review. Read-only workstream acceptance still uses its unchanged-report path below.
+7. After acceptance and review pass, use `pi_merge` for authorized local integration. The gate
    rechecks current evidence; daemon restart does not restore an old merge permit.
 
 For a read-only `review` or `investigation`, inspect the worker report and unchanged worktree,
@@ -126,6 +141,10 @@ Claims are coordination protection, not a security sandbox. Shell variables, dyn
 other arbitrary subprocess writes are not fully contained. Untrusted workers need a separately
 designed OS or container isolation boundary with appropriate credential and filesystem access.
 Never describe locks or candidate tests as full isolation.
+
+Protected workers do not receive global `*` broadcasts, including persisted legacy broadcasts.
+Coordinate by explicitly addressing workers in the same scope; retain legacy broadcast behavior
+only for legacy unprotected sessions.
 
 ## Corrections and integration
 

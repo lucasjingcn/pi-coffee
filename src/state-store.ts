@@ -2,7 +2,8 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { BoardEntry, MailMessage, MessageKind } from "./mailbox.js";
 import type { Outcome, SessionMeta, SessionStatus } from "./manager.js";
 import { validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
-import { WORKSTREAM_PURPOSES } from "./types.js";
+import { WORKSTREAM_PURPOSES, type DelegationSpec } from "./types.js";
+import { validateReviewSpec, validateCandidateReview, type CandidateReviewInput } from "./candidate-review.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
 export interface StateSnapshot {
@@ -195,6 +196,8 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       && !WORKSTREAM_PURPOSES.some((purpose) => purpose === spec.purpose)) {
       fail(file, `${at}.spec.purpose is not a known workstream purpose`);
     }
+    try { validateReviewSpec(spec as unknown as DelegationSpec); }
+    catch (error) { fail(file, `${at}.spec: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
   if (entry.acceptance !== undefined) {
@@ -217,6 +220,24 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       || typeof proof.result.timedOut !== "boolean" || !(proof.result.code === null || Number.isInteger(proof.result.code))) {
       fail(file, `${at}.verification is invalid`);
     }
+    if ((proof.id !== undefined && (typeof proof.id !== "string" || !proof.id.trim()))
+      || (proof.reviewContractHash !== undefined && (typeof proof.reviewContractHash !== "string" || !/^[a-f0-9]{64}$/.test(proof.reviewContractHash)))
+      || (proof.existingValidationChanges !== undefined && (!Array.isArray(proof.existingValidationChanges)
+        || !proof.existingValidationChanges.every(v => typeof v === "string")))) {
+      fail(file, `${at}.verification review fields are invalid`);
+    }
+  }
+  if (entry.candidateReview !== undefined) {
+    const review = entry.candidateReview;
+    if (!isRecord(review) || typeof review.verificationId !== "string" || !review.verificationId.trim()
+      || typeof review.reviewedAt !== "number" || !Number.isFinite(review.reviewedAt)
+      || !isRecord(entry.verification) || review.verificationId !== entry.verification.id) {
+      fail(file, `${at}.candidateReview is invalid`);
+    }
+    try {
+      validateCandidateReview(entry.spec as DelegationSpec | undefined,
+        entry.verification.existingValidationChanges as string[] ?? [], review as unknown as CandidateReviewInput);
+    } catch (error) { fail(file, `${at}.candidateReview: ${error instanceof Error ? error.message : String(error)}`); }
   }
   if (entry.reviewAcceptance !== undefined) {
     const acceptance = entry.reviewAcceptance;

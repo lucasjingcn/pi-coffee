@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Coordinator, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
 import { WORKSTREAM_PURPOSES } from "./types.js";
+import { validateReviewSpec } from "./candidate-review.js";
 import { MCP_INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
 
 function json(value: unknown) {
@@ -46,6 +47,7 @@ function compactMeta(m: SessionMeta) {
     acceptance: m.acceptance ?? null,
     verification: m.verification ?? null,
     reviewAcceptance: m.reviewAcceptance ?? null,
+    candidateReview: m.candidateReview ?? null,
     integration: m.integration ?? null,
     spec: m.spec ?? null,
     pendingQuestions: m.pendingQuestions.map((q) => ({
@@ -76,6 +78,8 @@ export function summaryMeta(m: SessionMeta) {
     instructions_sent: m.instructionsSent ?? 0,
     verified: m.verification?.passed ?? false,
     review_accepted: m.reviewAcceptance !== undefined,
+    candidate_reviewed: !!m.candidateReview && m.candidateReview.verificationId === m.verification?.id,
+    candidate_review_required: !!m.spec?.requirements?.length || !!m.verification?.existingValidationChanges?.length,
     integrated: m.integration !== undefined,
     pendingQuestions: m.pendingQuestions,
     error: m.error,
@@ -176,6 +180,10 @@ export function buildServer(coord: Coordinator): McpServer {
             constraints: z.array(z.string()).optional(),
             task_type: z.enum(TASK_TYPES).optional(),
             purpose: z.enum(WORKSTREAM_PURPOSES).optional().describe("Assigned work: implementation, read-only review, or investigation. Missing purpose is reported as unspecified, never inferred."),
+            requirements: z.array(z.object({id: z.string().trim().min(1), text: z.string().min(1)})).optional()
+              .describe("Coordinator-authored hard requirements with unique IDs; each needs met=true and evidence in pi_review before merge."),
+            validation_paths: z.array(z.string()).optional()
+              .describe("Additional worktree-relative validation files/directories; edits to existing definitions need per-file pi_review approval."),
           })
           .optional()
           .describe("Structured task contract. Required: goal, scope. Rendered into the worker prompt."),
@@ -195,6 +203,7 @@ export function buildServer(coord: Coordinator): McpServer {
     },
     async (args) => {
       const spec = args.spec as DelegationSpec | undefined;
+      validateReviewSpec(spec);
 
       // Spec linter: a structured spec must carry goal + scope, and a delegation
       // must carry either a spec or a prompt.
@@ -567,11 +576,29 @@ export function buildServer(coord: Coordinator): McpServer {
   );
 
   server.registerTool(
+    "pi_review",
+    {
+      title: "Record the orchestrator review of a verified candidate",
+      description: "After reading the complete diff and pi_verify evidence, record every hard requirement verdict and every changed existing validation file decision. Pass the exact pi_verify id. Missing, duplicate, unknown, unmet or unapproved items block review. Review evidence is a coordinator judgment, not an automatic semantic proof.",
+      annotations: { readOnlyHint: false, idempotentHint: false },
+      inputSchema: {
+        session_id: z.string(), control_key: z.string().optional(), verification_id: z.string().min(1),
+        requirements: z.array(z.object({id: z.string().min(1), met: z.boolean(), evidence: z.string().min(1)})),
+        test_changes: z.array(z.object({path: z.string().min(1), approved: z.boolean(), reason: z.string().min(1)})),
+      },
+    },
+    async ({session_id, control_key, verification_id, requirements, test_changes}) => {
+      coord.assertControl(session_id, control_key);
+      return json(await coord.review(session_id, verification_id, {requirements, test_changes}));
+    },
+  );
+
+  server.registerTool(
     "pi_merge",
     {
       title: "Merge a worker branch",
       description:
-        "Merge only with current successful pi_verify evidence into the clean checked-out target. Source/target changes invalidate verification. Successful Git merge alone does not close a task.",
+        "Merge only with current successful pi_verify evidence into the clean checked-out target. Hard requirements and edits to existing validation also require exact-candidate pi_review evidence. Source/target/contract changes invalidate evidence. Successful Git merge alone does not close a task.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
         session_id: z.string(),

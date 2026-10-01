@@ -14,6 +14,7 @@ import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord 
 import { PiRpcClient } from "./rpc-client.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
+import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
 import {
   commitAll,
   createWorktree,
@@ -85,6 +86,8 @@ export interface SessionMeta {
   integration?: IntegrationRecord;
   /** Orchestrator acceptance of a settled, unchanged read-only review/investigation. */
   reviewAcceptance?: { acceptedAt: number; workerSha: string; note: string };
+  /** Structured orchestrator review bound to one exact verification candidate. */
+  candidateReview?: CandidateReview;
   /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
@@ -541,6 +544,7 @@ export class Coordinator {
   }
 
   private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
+    validateReviewSpec(opts.spec);
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_COFFEE_DEFAULT_REPO for the daemon");
@@ -652,7 +656,7 @@ export class Coordinator {
         files: acceptancePaths, command: opts.acceptanceCommand,
         hashes: originalAcceptanceHashes,
       } : undefined,
-      spec: opts.spec,
+      spec: opts.spec ? structuredClone(opts.spec) : undefined,
       status: "starting",
       createdAt: Date.now(),
       lastActivity: Date.now(),
@@ -928,6 +932,7 @@ export class Coordinator {
     this.assertUnfinished(rt);
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
+    rt.meta.candidateReview = undefined;
     if (rt.meta.status === "error" || rt.meta.status === "stopped") {
       throw new Error(`session ${id} is ${rt.meta.status}`);
     }
@@ -1017,7 +1022,24 @@ export class Coordinator {
       await checkChanges(rt.meta);
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
+      rt.meta.candidateReview = undefined;
       return commitAll(rt.meta.worktree, message);
+    });
+  }
+
+  /** Record a complete orchestrator judgment; this does not replace the actual acceptance command. */
+  async review(id: string, verificationId: string, input: CandidateReviewInput): Promise<CandidateReview> {
+    const rt = this.get(id);
+    this.assertUnfinished(rt);
+    return this.withRepoGuard(rt, async () => {
+      if (!verificationId || rt.meta.verification?.id !== verificationId) throw new Error("review verification ID does not match the current candidate");
+      if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle worker and questions before review");
+      const proof = await this.integrationGate.assertCurrent(rt.meta, rt.meta.verification.targetBranch, false, false);
+      validateCandidateReview(rt.meta.spec, proof.existingValidationChanges, input);
+      const record = { ...structuredClone(input), verificationId, reviewedAt: Date.now() };
+      rt.meta.candidateReview = record;
+      this.scheduleSave();
+      return structuredClone(record);
     });
   }
 
@@ -1032,6 +1054,7 @@ export class Coordinator {
     if (rt.meta.status === "stopped" || rt.meta.status === "error") throw new Error("worker is not writable");
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
+    rt.meta.candidateReview = undefined;
   }
 
   private async withRepoGuard<T>(rt: Runtime, fn: () => Promise<T>): Promise<T> {
@@ -1048,6 +1071,7 @@ export class Coordinator {
       if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle the worker and its questions before verification");
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
+      rt.meta.candidateReview = undefined;
       const proof = await this.integrationGate.verify(rt.meta, into ?? await currentBranch(rt.meta.repo),
         (cwd, command) => runCommand(command, cwd, timeoutMs));
       rt.meta.verification = proof;
@@ -1096,6 +1120,7 @@ export class Coordinator {
     return this.withRepoGuard(rt, async () => {
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
+      rt.meta.candidateReview = undefined;
       return runCommand(command, rt.meta.worktree, timeoutMs, login);
     });
   }
@@ -1249,6 +1274,9 @@ export class Coordinator {
       for (const sid of targets) {
         const rt = this.runtimes.get(sid);
         if (!rt || rt.meta.status === "error" || rt.meta.status === "stopped") continue;
+        // Global broadcasts have no scope identity. Protected workers receive only
+        // explicitly addressed messages, including when old callers still broadcast.
+        if (to === "*" && rt.meta.controlKeyHash) continue;
 
         const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
         if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
@@ -1265,7 +1293,8 @@ export class Coordinator {
   }
 
   inbox(sessionId: string, unreadOnly = false) {
-    return this.mailbox.inbox(sessionId, { unreadOnly });
+    const meta = this.runtimes.get(sessionId)?.meta ?? this.history.find(s => s.id === sessionId);
+    return this.mailbox.inbox(sessionId, { unreadOnly }).filter(message => !meta?.controlKeyHash || message.to !== "*");
   }
 
   markRead(ids: string[], sessionId?: string): void {
@@ -1420,6 +1449,8 @@ export class Coordinator {
           reasons.push("read-only acceptance on non-review workstream");
         }
         if (session.verification?.codeChanged && !session.integration) reasons.push("missing integration");
+        if (!session.reviewAcceptance && (session.spec?.requirements?.length || session.verification?.existingValidationChanges?.length)
+          && (!session.candidateReview || session.candidateReview.verificationId !== session.verification?.id)) reasons.push("missing candidate review");
         if (session.status === "starting" || session.status === "working") reasons.push("worker still active");
         if (reasons.length) inconsistentOutcomes.push({ id: session.id, reasons });
       }
@@ -1438,6 +1469,7 @@ export class Coordinator {
         note: session.outcomeNote,
         tests_owned_by_codex: session.testsOwnedByCodex ?? null,
         review_accepted: session.reviewAcceptance !== undefined,
+        candidate_reviewed: !!session.candidateReview && session.candidateReview.verificationId === session.verification?.id,
         cost: session.cost,
         output_tokens: session.tokens?.output ?? 0,
       };
@@ -1506,6 +1538,8 @@ function renderSpec(spec?: DelegationSpec): string {
   if (spec.constraints?.length) lines.push(`Constraints: ${spec.constraints.join("; ")}`);
   if (spec.task_type) lines.push(`Task type: ${spec.task_type}`);
   if (spec.purpose) lines.push(`Workstream purpose: ${spec.purpose}`);
+  if (spec.requirements?.length) lines.push(`Hard requirements (preserve each one): ${JSON.stringify(spec.requirements)}`);
+  if (spec.validation_paths?.length) lines.push(`Additional validation definitions: ${JSON.stringify(spec.validation_paths)}`);
   return lines.join("\n");
 }
 

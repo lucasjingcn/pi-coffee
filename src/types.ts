@@ -92,4 +92,8 @@ export interface DelegationSpec {
   task_type?: TaskType;
   /** Distinguish writing code from reviewing it or gathering evidence. Omitted history is unknown. */
   purpose?: WorkstreamPurpose;
+  /** Hard requirements, authored by the coordinator and reviewed one by one. */
+  requirements?: { id: string; text: string }[];
+  /** Additional project validation definitions requiring review if existing bytes change. */
+  validation_paths?: string[];
 }

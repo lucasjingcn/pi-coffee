@@ -80,3 +80,19 @@ test('persisted capability hashes reject malformed state',()=>{
   const snapshot={counter:0,mailbox:[],board:[],history:[meta('a','not-a-hash')]};
   assert.throws(()=>validateSnapshot(snapshot,'fixture'),/controlKeyHash/);
 });
+
+test('protected workers never receive legacy global broadcasts, including immediate injection',()=>fixture(async c=>{
+  const received=[];
+  for (const id of ['a','legacy']) {
+    const m=c.snapshot(id);m.status='idle';
+    c.runtimes.set(id,{meta:m,repoIdentity:'fixture',lastNotifiedQuestionIds:new Set(),
+      client:{isStreaming:false,followUp:async text=>received.push({id,text}),stop:async()=>{},getState:async()=>{throw new Error('offline');}}});
+  }
+  c.postMessage('legacy','*','global task details','broadcast',false);
+  assert.equal(c.inbox('a').length,0);assert.equal(c.inbox('legacy').length,1);
+  c.postMessage('codex','*','new global broadcast','broadcast',true);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(received.map(r=>r.id),['legacy']);
+  c.postMessage('codex','a','explicitly addressed','note',false);
+  assert.deepEqual(c.inbox('a').map(m=>m.text),['explicitly addressed']);
+}));
