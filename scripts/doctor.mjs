@@ -31,7 +31,8 @@ function check(name, ok, detail, hint) {
 
 // Load the generated env file first so its provider/model/pi settings are visible.
 const envFile = envFilePath();
-const { loaded } = loadEnvFile(envFile);
+const { loaded, values } = loadEnvFile(envFile, { override: true });
+const background = process.argv.includes("--background");
 
 // --- Node ---
 const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
@@ -65,13 +66,14 @@ check(
 const provider = process.env.PI_COFFEE_PROVIDER || "deepseek";
 const keyVar = apiKeyVarFor(provider);
 const authPath = join(homedir(), ".pi", "agent", "auth.json");
-const hasEnvKey = Boolean(process.env[keyVar]);
+// Background installers cannot inherit transient API keys from this shell.
+const hasEnvKey = Boolean(process.env[keyVar]) && (!background || Boolean(values[keyVar]));
 const hasAuth = existsSync(authPath);
 check(
   `credentials for ${provider}`,
   hasEnvKey || hasAuth,
   hasEnvKey ? `${keyVar} is set` : hasAuth ? `pi auth.json found at ${authPath}` : `no ${keyVar} and no ${authPath}`,
-  "run `npm run setup` to store an API key",
+  background ? "store credentials in the private env file with `npm run setup`, or configure pi auth.json" : "run `npm run setup` to store an API key",
 );
 
 // --- data directory ---

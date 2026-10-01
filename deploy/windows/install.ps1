@@ -23,7 +23,7 @@ if (-not $env:PI_COFFEE_SKIP_SETUP -and -not [Console]::IsInputRedirected) {
   & $node (Join-Path $root 'scripts\setup.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Provider setup failed.' }
 }
-& $node (Join-Path $root 'scripts\doctor.mjs')
+& $node (Join-Path $root 'scripts\doctor.mjs') --background
 if ($LASTEXITCODE -ne 0) { throw 'Preflight failed. Fix the reported requirement and rerun npm run install:local.' }
 
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }

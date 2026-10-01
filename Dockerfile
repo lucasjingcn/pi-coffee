@@ -29,6 +29,7 @@ COPY src ./src
 COPY extensions ./extensions
 # The runtime orchestration policy is loaded from the authoritative skill.
 COPY codex ./codex
+COPY scripts/container-health.mjs ./scripts/container-health.mjs
 
 ENV NODE_ENV=production \
     PI_COFFEE_HOST=0.0.0.0 \
@@ -41,6 +42,6 @@ VOLUME ["/data"]
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PI_COFFEE_PORT||8787)+'/internal/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node scripts/container-health.mjs
 
 CMD ["node", "dist/index.js"]

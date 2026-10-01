@@ -5,18 +5,28 @@
  *   node scripts/status.mjs             # one snapshot
  *   watch -n2 'node scripts/status.mjs' # live
  */
-const BASE = process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}`;
+import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+
+loadEnvFile(envFilePath(), { override: true });
+const endpoint = new URL(process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}`);
+const BASE = endpoint.origin;
+const headers = process.env.PI_COFFEE_TOKEN ? { "x-pi-coord-token": process.env.PI_COFFEE_TOKEN } : {};
 
 async function get(path) {
-  try {
-    const r = await fetch(`${BASE}${path}`);
-    return r.ok ? await r.json() : { error: r.status };
-  } catch (e) {
-    return { error: String(e) };
-  }
+  const response = await fetch(`${BASE}${path}`, { headers, signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${path}`);
+  return response.json();
 }
 
-const [sessions, locks] = await Promise.all([get("/internal/sessions"), get("/internal/locks")]);
+let sessions, locks;
+try {
+  [sessions, locks] = await Promise.all([get("/internal/sessions"), get("/internal/locks")]);
+  if (!Array.isArray(sessions.sessions) || !Array.isArray(locks.locks)) throw new Error("invalid daemon status response");
+} catch (error) {
+  console.error(`pi-coffee status unavailable: ${error.message}`);
+  process.exit(1);
+}
+
 const list = sessions.sessions || [];
 const active = list.filter((s) => ["starting", "idle", "working"].includes(s.status)).length;
 const working = list.filter((s) => s.status === "working").length;

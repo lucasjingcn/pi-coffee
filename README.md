@@ -490,8 +490,9 @@ Everything is configured through environment variables.
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
-For unattended installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through the
-environment or an existing env file. The doctor check must pass before background startup is installed.
+For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through
+the private env file or pi auth.json. Transient shell credentials are not inherited by background
+services; `doctor --background` checks persisted credentials before startup is installed.
 
 Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
 caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least

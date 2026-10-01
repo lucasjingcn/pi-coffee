@@ -67,7 +67,7 @@ fi
 
 # --- verify ----------------------------------------------------------------
 echo "==> doctor"
-node "$DIR/scripts/doctor.mjs"
+node "$DIR/scripts/doctor.mjs" --background
 
 echo "==> install current-user background startup"
 case "$(uname -s)" in
