@@ -152,7 +152,10 @@ export class PiRpcClient extends EventEmitter {
       await Promise.race([
         this.getState(),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`readiness probe timed out after ${timeoutMs}ms`)), timeoutMs);
+          // get_state already has a 20s command timeout; cap this timer as well
+          // so very large finite startup budgets cannot overflow Node's timers.
+          const probeMs = Math.min(timeoutMs, 20_000);
+          timer = setTimeout(() => reject(new Error(`readiness probe timed out after ${probeMs}ms`)), probeMs);
         }),
       ]);
     } finally {

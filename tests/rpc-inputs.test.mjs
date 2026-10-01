@@ -231,7 +231,8 @@ test('auto ids skip explicit ids already issued', {timeout: 8000}, async () => {
 // --- startup failure -------------------------------------------------------
 
 test('invalid startup budgets reject before spawning a process', {timeout: 8000}, async () => {
-  const marker = join(tmpdir(), `pi-rpc-inputs-spawn-${process.pid}-${Date.now()}`);
+  const markerDir = await mkdtemp(join(tmpdir(), 'pi-rpc-inputs-marker-'));
+  const marker = join(markerDir, 'spawned');
   const {dir, bin} = await makeFakePi(
     ECHO,
     `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'spawned');\n`,
@@ -253,6 +254,7 @@ test('invalid startup budgets reject before spawning a process', {timeout: 8000}
   } finally {
     await c.stop().catch(() => {});
     await rm(dir, {recursive: true, force: true});
+    await rm(markerDir, {recursive: true, force: true});
   }
 });
 
@@ -297,6 +299,19 @@ test('a child that exits during startup fails start promptly and stays terminal'
     await assert.rejects(bound(c.start(2000), 2500), /did not become ready/);
     assert.equal(c.hasExited, true);
     assert.equal(c.pending.size, 0);
+  } finally {
+    await c.stop().catch(() => {});
+    await rm(dir, {recursive: true, force: true});
+  }
+});
+
+
+test('large finite startup budgets do not overflow Node readiness timers', {timeout: 4000}, async () => {
+  const {dir, bin} = await makeFakePi(`setTimeout(() => { ${ECHO} }, 40);`);
+  const c = new PiRpcClient({cwd: dir, piBin: bin});
+  try {
+    await bound(c.start(2 ** 40), 1500);
+    assert.equal(c.hasExited, false);
   } finally {
     await c.stop().catch(() => {});
     await rm(dir, {recursive: true, force: true});
