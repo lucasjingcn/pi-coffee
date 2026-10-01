@@ -157,6 +157,11 @@ cd pi-coffee
 npm run install:local
 ```
 
+安装程序也会将固定版本的 pi CLI 独立安装到 `~/.local/share/pi-cli`，在 `~/.local/bin`
+注册 `pi` 命令并配置 shell PATH（Windows 为用户 PATH）。打开新终端后，可在任意项目中
+直接运行 `pi`；它保留当前工作目录，沿用 `~/.pi-coffee/env` 配置，显式 provider/model
+参数优先。只安装或修复 CLI、不重启 daemon 时，运行 `npm run install:cli`。
+
 这条命令在 macOS/Linux 终端或 Windows 10+ PowerShell 中都可用。它会：
 
 - 跑 `npm install` 和 `npm run build`；

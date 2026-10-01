@@ -191,6 +191,12 @@ Then:
 npm run install:local
 ```
 
+The installer also installs the pinned pi CLI independently under `~/.local/share/pi-cli`,
+registers `pi` in `~/.local/bin`, and configures your shell PATH (Windows: user PATH).
+Open a new terminal and run `pi` from any project. It keeps your current directory and
+uses settings from `~/.pi-coffee/env`; explicit provider/model options override those defaults.
+To install or repair only this command without restarting the daemon, run `npm run install:cli`.
+
 This one command works in a macOS/Linux shell or Windows PowerShell. It:
 
 - runs `npm install` and `npm run build`;

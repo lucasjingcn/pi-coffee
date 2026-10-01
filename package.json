@@ -27,7 +27,8 @@
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
-    "verify": "npm run typecheck && npm run typecheck:extensions && npm test && node scripts/sync-playbook.mjs --check"
+    "verify": "npm run typecheck && npm run typecheck:extensions && npm test && node scripts/sync-playbook.mjs --check",
+    "install:cli": "node scripts/install-cli.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

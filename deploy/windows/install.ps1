@@ -19,6 +19,9 @@ if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
 & $npm run build
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 
+& $npm run install:cli
+if ($LASTEXITCODE -ne 0) { throw 'User pi CLI installation failed.' }
+
 if (-not $env:PI_COFFEE_SKIP_SETUP -and -not [Console]::IsInputRedirected) {
   & $node (Join-Path $root 'scripts\setup.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Provider setup failed.' }

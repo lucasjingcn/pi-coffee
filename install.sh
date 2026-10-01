@@ -55,7 +55,8 @@ fi
 codex mcp remove pi >/dev/null 2>&1 || true
 codex mcp add pi -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
 
-# pi is a pinned local development dependency installed above.
+echo "==> install user pi command"
+npm run install:cli
 
 # --- provider credentials --------------------------------------------------
 # pi reads API keys from the environment, so storing a key and a model id here
