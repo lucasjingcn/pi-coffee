@@ -32,6 +32,9 @@ await import(cli.href);
 
 export function installCli({home = homedir(), platform = process.platform, nodePath = process.execPath,
   npmCli = process.env.npm_execpath, configurePath = true, shell = process.env.SHELL || '/bin/sh'} = {}) {
+  const nodeVersion = execFileSync(nodePath, ['-p', 'process.versions.node'], {encoding: 'utf8'}).trim();
+  const [major, minor] = nodeVersion.split('.').map(Number);
+  if (!(major > 22 || (major === 22 && minor >= 19))) throw new Error(`pi requires Node >=22.19.0; installer is using ${nodeVersion}`);
   const prefix = join(home, '.local', 'share', 'pi-cli');
   const binDir = join(home, '.local', 'bin');
   const launcher = join(prefix, 'launch.mjs');
@@ -51,17 +54,24 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
   }
   mkdirSync(binDir, {recursive: true});
   mkdirSync(prefix, {recursive: true});
+  // Keep the runtime independent of disposable installer/cache paths.
+  const runtimeDir = join(prefix, 'runtime');
+  const runtime = join(runtimeDir, platform === 'win32' ? 'node.exe' : 'node');
+  mkdirSync(runtimeDir, {recursive: true});
+  if (nodePath !== runtime) copyFileSync(nodePath, runtime);
+  if (platform !== 'win32') chmodSync(runtime, 0o755);
+  if (execFileSync(runtime, ['-p', 'process.versions.node'], {encoding: 'utf8'}).trim() !== nodeVersion) throw new Error('Private Node runtime verification failed');
   copyFileSync(join(root, 'scripts', 'lib', 'env.mjs'), join(prefix, 'env.mjs'));
   writeFileSync(launcher, launcherSource);
   if (platform === 'win32') {
-    writeFileSync(entry, `@echo off\r\n@rem ${marker}\r\n@${cmdQuote(nodePath)} ${cmdQuote(launcher)} %*\r\n`, {mode: 0o755});
+    writeFileSync(entry, `@echo off\r\n@rem ${marker}\r\n@${cmdQuote(runtime)} ${cmdQuote(launcher)} %*\r\n`, {mode: 0o755});
     if (configurePath) {
       const literal = `'${binDir.replace(/'/g, "''")}'`;
       const script = `$bin=${literal}; $p=[Environment]::GetEnvironmentVariable('Path','User'); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path',($bin+';'+$p),'User') }`;
       execFileSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {stdio: 'inherit'});
     }
   } else {
-    writeFileSync(entry, `#!/bin/sh\n${marker}\nexec ${shellQuote(nodePath)} ${shellQuote(launcher)} "$@"\n`, {mode: 0o755});
+    writeFileSync(entry, `#!/bin/sh\n${marker}\nnode=$(command -v node 2>/dev/null || true)\nif [ -n "$node" ] && "$node" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' >/dev/null 2>&1; then\n  exec "$node" ${shellQuote(launcher)} "$@"\nfi\nexec ${shellQuote(runtime)} ${shellQuote(launcher)} "$@"\n`, {mode: 0o755});
     chmodSync(entry, 0o755);
     if (configurePath) {
       const line = 'export PATH="$HOME/.local/bin:$PATH"';
@@ -76,7 +86,7 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
     }
   }
   // Verify from outside the checkout, without shell initialization or a model call.
-  const result = execFileSync(nodePath, [launcher, '--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim();
+  const result = platform === 'win32' ? execFileSync(runtime, [launcher, '--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim() : execFileSync(entry, ['--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim();
   if (result !== version) throw new Error(`Unexpected installed pi version: ${result}`);
   return {entry, binDir, version};
 }

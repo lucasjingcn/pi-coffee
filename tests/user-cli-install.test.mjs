@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,realpathSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,realpathSync,copyFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {installCli} from '../scripts/install-cli.mjs';
@@ -50,7 +50,7 @@ test('installer refuses to overwrite an unrelated pi command',()=>fixture(home=>
 test('Windows creates a quoted user command with percent escaping',()=>fixture(home=>{
  const {entry}=installCli({home,platform:'win32',nodePath:process.execPath,configurePath:false});
  const cmd=readFileSync(entry,'utf8');
- assert.ok(entry.endsWith('pi.cmd'));assert.match(cmd,/@echo off/);assert.ok(cmd.includes('"'+process.execPath+'"'));assert.match(cmd,/%\*/);assert.ok(cmd.includes(home.replace(/%/g,'%%')));
+ assert.ok(entry.endsWith('pi.cmd'));assert.match(cmd,/@echo off/);assert.ok(cmd.includes('runtime'));assert.match(cmd,/%\*/);assert.ok(cmd.includes(home.replace(/%/g,'%%')));
 }));
 test('all installation entry points include user CLI setup',()=>{
  assert.match(readFileSync('install.sh','utf8'),/npm run install:cli/);
@@ -80,4 +80,18 @@ test('PATH setup touches only the selected shell startup files',()=>fixture(home
  installCli({home,platform:'linux',shell:'/bin/bash'});
  assert.match(readFileSync(join(home,'.bash_profile'),'utf8'),/\.local\/bin/);
  assert.match(readFileSync(join(home,'.bashrc'),'utf8'),/\.local\/bin/);
+}));
+
+test('user command survives removal of the install-time Node path with no PATH runtime',()=>fixture(home=>{
+ const transient=join(home,'temporary-node');copyFileSync(process.execPath,transient);chmodSync(transient,0o755);
+ const {entry}=installCli({home,platform:'linux',nodePath:transient,configurePath:false});
+ rmSync(transient);
+ assert.equal(execFileSync(entry,['--version'],{cwd:tmpdir(),env:{...process.env,PATH:'/usr/bin:/bin'},encoding:'utf8'}).trim(),version);
+ assert.ok(!readFileSync(entry,'utf8').includes(transient));
+}));
+
+test('installer rejects a runtime below the pi engine requirement',()=>fixture(home=>{
+ const oldNode=join(home,'old-node');
+ writeFileSync(oldNode,'#!/bin/sh\necho 22.17.1\n',{mode:0o755});
+ assert.throws(()=>installCli({home,platform:'linux',nodePath:oldNode,configurePath:false}),/requires Node >=22\.19\.0/);
 }));

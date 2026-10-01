@@ -195,7 +195,7 @@ The installer also installs the pinned pi CLI independently under `~/.local/shar
 registers `pi` in `~/.local/bin`, and configures your shell PATH (Windows: user PATH).
 Open a new terminal and run `pi` from any project. It keeps your current directory and
 uses settings from `~/.pi-coffee/env`; explicit provider/model options override those defaults.
-To install or repair only this command without restarting the daemon, run `npm run install:cli`.
+To install or repair only this command without restarting the daemon, run `npm run install:cli`. The installer keeps a private Node runtime in the CLI prefix, so removing an installer cache does not break `pi`. On Unix, a supported Node on `PATH` takes precedence.
 
 This one command works in a macOS/Linux shell or Windows PowerShell. It:
 
