@@ -16,6 +16,8 @@ export interface PiRpcClientOptions {
 }
 
 interface PendingCommand {
+  /** Request type that a correlated response must echo back in `command`. */
+  command: string;
   resolve: (r: RpcResponse) => void;
   reject: (e: Error) => void;
 }
@@ -34,6 +36,8 @@ export class PiRpcClient extends EventEmitter {
   private stdoutBuf = Buffer.alloc(0);
   private seq = 0;
   private pending = new Map<string, PendingCommand>();
+  /** Every id ever issued, so a settled/timed-out id can never be reused. */
+  private usedIds = new Set<string>();
   private waiters = new Set<{ reject: (e: Error) => void }>();
   private stderr = "";
   private disposed = false;
@@ -66,7 +70,10 @@ export class PiRpcClient extends EventEmitter {
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  async start(): Promise<void> {
+  async start(timeoutMs = 30_000): Promise<void> {
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error(`invalid start timeout '${String(timeoutMs)}': expected a finite positive number`);
+    }
     if (this.disposed) throw new Error("pi rpc client has been disposed");
     if (this.proc) throw new Error("pi rpc client already started");
 
@@ -110,20 +117,47 @@ export class PiRpcClient extends EventEmitter {
     });
 
     // Wait until the process is actually accepting work (probe get_state).
-    const deadline = Date.now() + 30_000;
+    // All probes share one total startup deadline, so a wedged child cannot
+    // hold start() open past the configured budget.
+    const deadline = Date.now() + timeoutMs;
     let lastErr: unknown;
-    while (Date.now() < deadline) {
-      if (this.exited) break;
-      try {
-        await this.getState();
-        return;
-      } catch (e) {
-        lastErr = e;
+    try {
+      while (Date.now() < deadline) {
         if (this.exited) break;
-        await sleep(200);
+        try {
+          await this.probeState(deadline - Date.now());
+          return;
+        } catch (e) {
+          lastErr = e;
+          if (this.exited) break;
+          const pause = Math.min(200, deadline - Date.now());
+          if (pause > 0) await sleep(pause);
+        }
       }
+      if (!lastErr && !this.exited) lastErr = new Error(`startup deadline of ${timeoutMs}ms exceeded`);
+      throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")}`);
+    } catch (e) {
+      // A failed start must not leak the child or leave probe work pending.
+      const child = this.proc;
+      this.terminate(e as Error);
+      if (child && child.pid != null) await waitForExit(child, 2000);
+      throw e;
     }
-    throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")}`);
+  }
+
+  /** Probe get_state without outliving the remaining startup budget. */
+  private async probeState(timeoutMs: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.getState(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`readiness probe timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async stop(): Promise<void> {
@@ -186,22 +220,23 @@ export class PiRpcClient extends EventEmitter {
     }
   }
 
-  private dispatch(record: any): void {
+  private dispatch(record: unknown): void {
+    // JSONL framing can surface arbitrary JSON values; only objects with a
+    // non-empty string `type` are protocol records. Ignore anything else and
+    // keep parsing subsequent frames.
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return;
+    const type = (record as { type?: unknown }).type;
+    if (typeof type !== "string" || type.length === 0) return;
+
     // UI request sub-protocol
-    if (record?.type === "extension_ui_request") {
+    if (type === "extension_ui_request") {
       this.emit("ui_request", record as UiRequest);
       return;
     }
 
     // Command response
-    if (record?.type === "response") {
-      const response = record as RpcResponse;
-      if (response.id && this.pending.has(response.id)) {
-        const pending = this.pending.get(response.id)!;
-        this.pending.delete(response.id);
-        pending.resolve(response);
-      }
-      this.emit("response", response);
+    if (type === "response") {
+      this.dispatchResponse(record as Record<string, unknown>);
       return;
     }
 
@@ -210,6 +245,33 @@ export class PiRpcClient extends EventEmitter {
     if (event.type === "agent_start") this.streaming = true;
     if (event.type === "agent_settled") this.streaming = false;
     this.emit("event", event);
+  }
+
+  /**
+   * Settle a pending command only when the response is well-formed:
+   * `success` must be a boolean and, when `command` is present, it must match
+   * the request. Minimal fixtures without `command` remain compatible.
+   */
+  private dispatchResponse(record: Record<string, unknown>): void {
+    const response = record as unknown as RpcResponse;
+    const id = response.id;
+    const pending = typeof id === "string" ? this.pending.get(id) : undefined;
+
+    if (pending) {
+      this.pending.delete(id as string);
+      if (typeof response.success !== "boolean") {
+        pending.reject(new Error(`malformed response for command '${pending.command}': success must be boolean`));
+      } else if (response.command !== undefined && response.command !== pending.command) {
+        pending.reject(
+          new Error(
+            `malformed response for command '${pending.command}': command '${String(response.command)}' does not match`,
+          ),
+        );
+      } else {
+        pending.resolve(response);
+      }
+    }
+    this.emit("response", response);
   }
 
   // -------------------------------------------------------------------------
@@ -252,14 +314,33 @@ export class PiRpcClient extends EventEmitter {
 
   /** Send a raw command and await the correlated response. */
   command<T = any>(cmd: Record<string, any>, timeoutMs = 120_000): Promise<RpcResponse & { data: T }> {
-    if (!this.proc || this.disposed || this.exited) return Promise.reject(new Error("pi rpc not running"));
-
-    const id = cmd.id ?? `c${++this.seq}`;
-    // Never let a duplicate id overwrite (and thereby orphan) an in-flight command.
-    if (this.pending.has(id)) {
-      return Promise.reject(new Error(`duplicate in-flight command id '${id}'`));
+    const explicitId = cmd.id !== undefined ? cmd.id : undefined;
+    if (explicitId !== undefined && (typeof explicitId !== "string" || explicitId.length === 0)) {
+      return Promise.reject(new Error(`invalid command id '${String(explicitId)}': expected a non-empty string`));
     }
 
+    if (!this.proc || this.disposed || this.exited) return Promise.reject(new Error("pi rpc not running"));
+
+    let id: string;
+    if (explicitId !== undefined) {
+      id = explicitId;
+      // Retain the historical diagnostic before checking reuse of settled ids.
+      if (this.pending.has(id)) {
+        return Promise.reject(new Error(`duplicate in-flight command id '${id}'`));
+      }
+      // An issued id is single-use even after its command settled or timed out.
+      if (this.usedIds.has(id)) {
+        return Promise.reject(new Error(`command id '${id}' has already been used`));
+      }
+    } else {
+      // Auto ids must never collide with an already issued explicit id.
+      do {
+        id = `c${++this.seq}`;
+      } while (this.usedIds.has(id) || this.pending.has(id));
+    }
+    this.usedIds.add(id);
+
+    const command = typeof cmd.type === "string" ? cmd.type : "";
     const payload = { ...cmd, id };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -268,6 +349,7 @@ export class PiRpcClient extends EventEmitter {
       }, timeoutMs);
 
       const entry: PendingCommand = {
+        command,
         resolve: (response: RpcResponse) => {
           clearTimeout(timer);
           this.pending.delete(id);
@@ -485,4 +567,20 @@ export class PiRpcClient extends EventEmitter {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Resolve once a spawned child has exited, or after `timeoutMs`. */
+function waitForExit(proc: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      proc.removeListener("exit", done);
+      proc.removeListener("close", done);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    proc.once("exit", done);
+    proc.once("close", done);
+  });
 }
