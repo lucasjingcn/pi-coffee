@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,dirname} from 'node:path';
 import {Coordinator} from '../dist/manager.js';
 import {loadConfig} from '../dist/config.js';
 import {acceptanceHashes} from '../dist/integration.js';
@@ -133,11 +133,19 @@ test('prototype-named files and renames cannot bypass scope checks',()=>fixture(
 }));
 
 test('changes arriving during verification do not produce reusable evidence',()=>fixture(async({c,meta,repo,git,head})=>{
-  meta.acceptance.command='sleep 0.3';const pending=c.verify('s1');
-  await new Promise((resolve)=>setTimeout(resolve,150));
-  await writeFile(join(repo,'src/target.txt'),'concurrent');git(repo,'add','src/target.txt');git(repo,'commit','-qm','concurrent target');
-  const before=head();await assert.rejects(pending,/changed during verification/);
-  await assert.rejects(c.merge('s1'),/pi_verify/);assert.equal(head(),before);
+  const ready=join(dirname(repo),'verification-ready');const release=join(dirname(repo),'verification-release');
+  meta.acceptance.command=`printf ready > '${ready}'; while test ! -f '${release}'; do sleep 0.02; done`;
+  const pending=c.verify('s1');pending.catch(()=>{});
+  try {
+    const deadline=Date.now()+10000;
+    while(!(await readFile(ready,'utf8').catch(()=>''))) {
+      assert.ok(Date.now()<deadline,'candidate acceptance did not start');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    await writeFile(join(repo,'src/target.txt'),'concurrent');git(repo,'add','src/target.txt');git(repo,'commit','-qm','concurrent target');
+    const before=head();await writeFile(release,'release');await assert.rejects(pending,/changed during verification/);
+    await assert.rejects(c.merge('s1'),/pi_verify/);assert.equal(head(),before);
+  } finally {await writeFile(release,'release');await pending.catch(()=>{});}
 }));
 
 test('candidate conflicts are isolated and never leave a merge in the target',()=>fixture(async({c,repo,git,head})=>{

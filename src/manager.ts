@@ -12,6 +12,7 @@ import { StateStore } from "./state-store.js";
 import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, type Verification, type IntegrationRecord } from "./integration.js";
 import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { PiRpcClient } from "./rpc-client.js";
+import { prepareWorkerAgentDir } from "./worker-agent-dir.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
@@ -664,6 +665,7 @@ export class Coordinator {
     };
 
     const workerToken = randomBytes(32).toString("base64url");
+    const workerAgentDir = join(this.config.dataDir, "sessions", id, "agent");
     const client = new PiRpcClient({
       cwd: wt.dir,
       piBin: this.config.piBin,
@@ -674,6 +676,7 @@ export class Coordinator {
       sessionDir: join(this.config.dataDir, "sessions", id),
       extensionPath: this.config.extensionPath,
       env: {
+        PI_CODING_AGENT_DIR: workerAgentDir,
         PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
         PI_COORD_TOKEN: workerToken,
@@ -690,6 +693,7 @@ export class Coordinator {
     this.wireEvents(rt);
 
     try {
+      await prepareWorkerAgentDir(workerAgentDir);
       await client.start();
       if (meta.status === "stopped") throw new Error(`session ${id} stopped during startup`);
       meta.status = "idle";

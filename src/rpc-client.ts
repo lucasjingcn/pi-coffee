@@ -43,6 +43,8 @@ export class PiRpcClient extends EventEmitter {
   private disposed = false;
   private streaming = false;
   private exited = false;
+  private exitCode: number | null = null;
+  private exitSignal: NodeJS.Signals | null = null;
 
   constructor(opts: PiRpcClientOptions) {
     super();
@@ -112,6 +114,8 @@ export class PiRpcClient extends EventEmitter {
       this.terminate(err);
     });
     proc.on("exit", (code, signal) => {
+      this.exitCode = code;
+      this.exitSignal = signal;
       const err = new Error(`pi rpc exited (code=${code ?? "null"} signal=${signal ?? "null"})`);
       this.terminate(err, code, signal);
     });
@@ -126,16 +130,25 @@ export class PiRpcClient extends EventEmitter {
         if (this.exited) break;
         try {
           await this.probeState(deadline - Date.now());
+          // pi may accept RPC after falling back to defaults on a configuration
+          // read error. That is not a usable worker with the requested contract.
+          if (/Invalid settings file/i.test(this.stderr)) throw new Error("pi configuration load failed");
           return;
         } catch (e) {
           lastErr = e;
+          if (/Invalid settings file/i.test(this.stderr)) break;
           if (this.exited) break;
           const pause = Math.min(200, deadline - Date.now());
           if (pause > 0) await sleep(pause);
         }
       }
       if (!lastErr && !this.exited) lastErr = new Error(`startup deadline of ${timeoutMs}ms exceeded`);
-      throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")}`);
+      const reason = /Lock file is already being held|ELOCKED/i.test(this.stderr)
+        ? "settings_lock_contention"
+        : /Invalid settings file/i.test(this.stderr) ? "configuration_load_failed"
+        : this.exited ? "process_exited" : "readiness_timeout";
+      // Do not attach raw stderr: extensions can print credentials or prompts.
+      throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")} [reason=${reason}, code=${this.exitCode}, signal=${this.exitSignal}]`);
     } catch (e) {
       // A failed start must not leak the child or leave probe work pending.
       const child = this.proc;

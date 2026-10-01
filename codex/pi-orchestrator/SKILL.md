@@ -61,6 +61,14 @@ If pi tools, model credentials, or paid-call authorization are missing, report t
 and continue independently authorized local implementation and checks. Do not stall all work merely
 because a skill mentions a tool.
 
+For a startup or configuration failure, report the worker ID, failure category and whether the
+initial task reached the worker. A failed launch is not delivered implementation. Diagnose transient
+runtime failures separately from missing authorization; never treat an old startup failure as a
+permanent exemption from delegation. After runtime recovery, reassess the remaining independent
+implementation slices before further substantial edits and dispatch worthwhile ones under the
+existing quality, size and authorization gates. Close or preserve failed workstreams explicitly;
+do not replace this step with an unrelated read-only investigation or claim successful delivery.
+
 Keep architecture, ambiguous product decisions, security, permissions, billing, difficult debugging,
 final review, and final acceptance with the orchestrator. Workers may gather evidence for these
 areas; their reports do not replace the orchestrator's judgment.

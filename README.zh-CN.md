@@ -436,6 +436,13 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 ## 状态与恢复
 
+每个 worker 在私有的 `sessions/<id>/agent` 目录保留全局 pi 配置快照（目录 0700，复制文件 0600）。
+读取 settings 和凭据时使用 pi 相同的锁协议及有界异步重试；worker 的配置、认证与模型文件彼此独立。
+已安装的资源目录仍指向相同内容，扩展、技能、提示词、主题与包的相对路径保持原目标，不为启动加速
+禁用能力或上下文。全局默认设置或登录凭据的变化作用于新启动的 worker。配置加载失败会明确停止，
+不会接受 pi 回退到默认配置后的“启动成功”。`/internal/health` 的 `workerStartupPolicy` 为
+`private-agent-config-v1` 时，说明后台已加载这项启动策略，而非仅完成本地构建。
+
 daemon 状态存在 `PI_COFFEE_DATA_DIR` 下的 `state.json`。写入是串行且原子的：先写唯一临时文件再 rename，
 上一份通过校验的快照留在 `state.json.bak`。
 

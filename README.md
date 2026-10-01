@@ -507,6 +507,15 @@ or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and
 
 ## State and recovery
 
+Each worker snapshots the global pi agent configuration into a private `sessions/<id>/agent`
+directory (0700; copied files 0600). Settings and credentials are read with pi's lock protocol and
+bounded asynchronous retries. Worker settings/auth/model files are independent; installed resource
+directories remain linked, and relative extension/skill/prompt/theme/package paths retain their
+original targets. No extensions or context are disabled to accelerate startup. Changes to global
+defaults or login credentials apply to newly spawned workers. A configuration-load error fails
+startup explicitly instead of accepting pi's fallback defaults. `/internal/health` identifies this
+policy as `private-agent-config-v1` so an old running daemon can be distinguished from a rebuilt one.
+
 Daemon state lives in `state.json` inside `PI_COFFEE_DATA_DIR`. Writes are serialized and atomic: a
 unique temp file is renamed into place, and the previous validated snapshot is kept as
 `state.json.bak`.

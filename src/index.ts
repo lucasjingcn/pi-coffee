@@ -5,6 +5,7 @@ import { Coordinator } from "./manager.js";
 import { buildServer } from "./mcp-server.js";
 import type { LockMode } from "./locks.js";
 import { z } from "zod";
+import { WORKER_STARTUP_POLICY } from "./worker-agent-dir.js";
 
 const config = loadConfig();
 const coord = new Coordinator(config);
@@ -156,7 +157,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
   try {
     switch (url.pathname) {
       case "/internal/health":
-        return sendJson(res, 200, { ok: true, sessions: coord.list().length });
+        return sendJson(res, 200, { ok: true, sessions: coord.list().length, workerStartupPolicy: WORKER_STARTUP_POLICY });
 
       case "/internal/hello": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
