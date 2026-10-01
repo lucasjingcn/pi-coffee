@@ -31,6 +31,9 @@ test('user pi runs outside checkout, preserves cwd/arguments and loads configure
  assert.deepEqual(normal.args,['--provider','fixture-provider','--model','fixture-model','--thinking','xhigh','message with spaces',"quote's",'$literal']);
  assert.deepEqual(run(['--model','other/model:high','hello']).args,['--model','other/model:high','hello']);
  assert.deepEqual(run(['--provider','other','--thinking','off']).args,['--provider','other','--thinking','off']);
+ // Subcommands must never receive injected defaults in front, or pi treats them as prompts.
+ assert.deepEqual(run(['mcp','list']).args,['mcp','list']);
+ assert.deepEqual(run(['list']).args,['list']);
  const shell=execFileSync('/bin/sh',['-c','pi --version'],{cwd:outside,env:{...env,PATH:binDir+':'+env.PATH},encoding:'utf8'}).trim();
  assert.equal(shell,version);
  const first=readFileSync(join(home,'.zshrc'),'utf8');

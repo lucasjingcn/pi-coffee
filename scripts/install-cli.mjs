@@ -18,14 +18,19 @@ import {envFilePath,loadEnvFile} from './env.mjs';
 loadEnvFile(envFilePath());
 const cli = new URL('./node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js', import.meta.url);
 const args = process.argv.slice(2);
+// A subcommand must stay the first argument or pi treats it as an agent prompt
+// and can recursively invoke itself (e.g. "pi mcp list" -> prompt "mcp" ->
+// agent runs bash "pi mcp list" -> ...). Never inject default flags in front.
+const commands = new Set(['install', 'remove', 'uninstall', 'update', 'list', 'config', 'auth', 'mcp']);
+const isCommand = args.length > 0 && commands.has(args[0]);
 const options = args.slice(0, args.indexOf('--') < 0 ? args.length : args.indexOf('--'));
 const has = flag => options.some(arg => arg === flag || arg.startsWith(flag + '='));
 const defaults = [];
-if (!has('--provider') && !has('--model')) {
+if (!isCommand && !has('--provider') && !has('--model')) {
   if (process.env.PI_COFFEE_PROVIDER) defaults.push('--provider', process.env.PI_COFFEE_PROVIDER);
   if (process.env.PI_COFFEE_MODEL) defaults.push('--model', process.env.PI_COFFEE_MODEL);
 }
-if (!has('--thinking') && !has('--model') && process.env.PI_COFFEE_THINKING) defaults.push('--thinking', process.env.PI_COFFEE_THINKING);
+if (!isCommand && !has('--thinking') && !has('--model') && process.env.PI_COFFEE_THINKING) defaults.push('--thinking', process.env.PI_COFFEE_THINKING);
 process.argv = [process.execPath, fileURLToPath(cli), ...defaults, ...args];
 await import(cli.href);
 `;
