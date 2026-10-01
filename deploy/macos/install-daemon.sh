@@ -24,10 +24,17 @@ chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true
 
 # launchd has a minimal PATH; make sure the daemon can find git + node + pi.
 DAEMON_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.pi/agent/bin:$HOME/.bun/bin"
+
+# Escape a value for XML text content. Plist strings are element text, so the
+# five predefined entities are enough and a local parser decodes them back to
+# the exact original bytes.
+xml_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 ENV_FILE_KEY=""
 if [ -n "${PI_COFFEE_ENV_FILE:-}" ]; then
-  ESCAPED_ENV_FILE="$(printf '%s' "$PI_COFFEE_ENV_FILE" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g')"
-  ENV_FILE_KEY="    <key>PI_COFFEE_ENV_FILE</key><string>$ESCAPED_ENV_FILE</string>"
+  ENV_FILE_KEY="    <key>PI_COFFEE_ENV_FILE</key><string>$(printf '%s' "$PI_COFFEE_ENV_FILE" | xml_escape)</string>"
 fi
 
 cat > "$PLIST" <<EOF
@@ -35,23 +42,23 @@ cat > "$PLIST" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$(printf '%s' "$LABEL" | xml_escape)</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN</string>
-    <string>$PROJECT_DIR/scripts/start.mjs</string>
+    <string>$(printf '%s' "$NODE_BIN" | xml_escape)</string>
+    <string>$(printf '%s' "$PROJECT_DIR/scripts/start.mjs" | xml_escape)</string>
   </array>
-  <key>WorkingDirectory</key><string>$PROJECT_DIR</string>
+  <key>WorkingDirectory</key><string>$(printf '%s' "$PROJECT_DIR" | xml_escape)</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>$DAEMON_PATH</string>
-    <key>HOME</key><string>$HOME</string>
+    <key>PATH</key><string>$(printf '%s' "$DAEMON_PATH" | xml_escape)</string>
+    <key>HOME</key><string>$(printf '%s' "$HOME" | xml_escape)</string>
 $ENV_FILE_KEY
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$LOG_DIR/daemon.out.log</string>
-  <key>StandardErrorPath</key><string>$LOG_DIR/daemon.err.log</string>
+  <key>StandardOutPath</key><string>$(printf '%s' "$LOG_DIR/daemon.out.log" | xml_escape)</string>
+  <key>StandardErrorPath</key><string>$(printf '%s' "$LOG_DIR/daemon.err.log" | xml_escape)</string>
 </dict>
 </plist>
 EOF

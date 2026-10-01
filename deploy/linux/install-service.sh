@@ -22,10 +22,29 @@ fi
 
 DAEMON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/.pi/agent/bin"
 
-ENV_BLOCK="Environment=PATH=$DAEMON_PATH"
+# systemd expands '%' specifiers in unit values, so a literal percent sign must
+# be written as '%%'. ExecStart= and Environment= split unquoted values on
+# whitespace and process C-style escapes inside double quotes; ExecStart= also
+# substitutes variables at runtime. The ':' executable prefix disables that
+# expansion for these fixed paths, preserving literal dollar signs in both the
+# executable and its arguments. WorkingDirectory= is taken verbatim, so only
+# its percent specifiers need escaping.
+systemd_path_escape() {
+  printf '%s' "$1" | sed -e 's/%/%%/g'
+}
+
+systemd_quote() {
+  printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g')"
+}
+
+SYSTEMD_WORKDIR="$(systemd_path_escape "$DIR")"
+SYSTEMD_NODE="$(systemd_quote "$NODE_BIN")"
+SYSTEMD_START="$(systemd_quote "$DIR/scripts/start.mjs")"
+
+ENV_BLOCK="Environment=$(systemd_quote "PATH=$DAEMON_PATH")"
 if [ -n "${PI_COFFEE_ENV_FILE:-}" ]; then
   ENV_BLOCK="$ENV_BLOCK
-Environment=PI_COFFEE_ENV_FILE=$PI_COFFEE_ENV_FILE"
+Environment=$(systemd_quote "PI_COFFEE_ENV_FILE=$PI_COFFEE_ENV_FILE")"
 fi
 
 if [ "$(id -u)" = "0" ]; then
@@ -38,9 +57,9 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$DIR
+WorkingDirectory=$SYSTEMD_WORKDIR
 $ENV_BLOCK
-ExecStart=$NODE_BIN $DIR/scripts/start.mjs
+ExecStart=:$SYSTEMD_NODE $SYSTEMD_START
 Restart=on-failure
 RestartSec=3
 
@@ -64,9 +83,9 @@ Description=pi-coffee - Codex-as-manager MCP for parallel pi workers
 
 [Service]
 Type=simple
-WorkingDirectory=$DIR
+WorkingDirectory=$SYSTEMD_WORKDIR
 $ENV_BLOCK
-ExecStart=$NODE_BIN $DIR/scripts/start.mjs
+ExecStart=:$SYSTEMD_NODE $SYSTEMD_START
 Restart=on-failure
 RestartSec=3
 
