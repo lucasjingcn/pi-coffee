@@ -691,15 +691,17 @@ export class Coordinator {
 
     try {
       await client.start();
+      if (meta.status === "stopped") throw new Error(`session ${id} stopped during startup`);
       meta.status = "idle";
     } catch (e) {
-      meta.status = "error";
-      meta.error = String(e);
+      if (meta.status !== "stopped") {
+        meta.status = "error";
+        meta.error = String(e);
+      }
       // A failed startup must not leak the child process or any reservations.
       await client.stop().catch(() => {});
       this.workerTokens.delete(workerToken);
-      this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
-      rt.acceptanceReserved = false;
+      this.releaseRuntimeReservations(rt);
       this.scheduleSave();
       this.notifyWaiters();
       throw e;
@@ -755,6 +757,7 @@ export class Coordinator {
     });
 
     rt.client.on("ui_request", (request: UiRequest) => {
+      if (rt.meta.status === "stopped" || rt.meta.status === "error" || rt.meta.outcome !== undefined) return;
       // Fire-and-forget UI updates never block the conversation.
       if (
         request.method === "notify" ||
@@ -776,7 +779,9 @@ export class Coordinator {
         rt.meta.status = "error";
         rt.meta.error = rt.client.getStderr().slice(-2000) || "pi rpc exited";
       }
-      this.locks.releaseAll(rt.meta.id, rt.repoIdentity);
+      rt.meta.pendingQuestions = [];
+      this.releaseRuntimeReservations(rt);
+      for (const [token, sid] of this.workerTokens) if (sid === rt.meta.id) this.workerTokens.delete(token);
       this.notifyWaiters();
       this.scheduleSave();
     });
@@ -843,6 +848,13 @@ export class Coordinator {
     this.locks.releaseAll(id, repoIdentity);
     if (acceptanceReserved && acceptancePaths.length) this.locks.release("codex", acceptancePaths, repoIdentity);
     this.scheduleSave();
+  }
+
+  /** Drop live reservations once, before a later worker can acquire the same codex paths. */
+  private releaseRuntimeReservations(rt: Runtime): void {
+    const reserved = Boolean(rt.acceptanceReserved);
+    rt.acceptanceReserved = false;
+    this.releaseSpawnReservations(rt.meta.id, rt.meta.acceptance?.files ?? [], reserved, rt.repoIdentity);
   }
 
   markExtension(sessionId: string): void {
@@ -1128,6 +1140,10 @@ export class Coordinator {
   async answer(sessionId: string, requestId: string, response: Partial<UiResponse>): Promise<void> {
     const rt = this.get(sessionId);
     this.assertRepoAvailable(rt.repoIdentity);
+    this.assertUnfinished(rt);
+    if (rt.meta.status === "stopped" || rt.meta.status === "error" || rt.client.hasExited) {
+      throw new Error(`session ${sessionId} is ${rt.meta.status} or exited`);
+    }
     const index = rt.meta.pendingQuestions.findIndex((q) => q.id === requestId);
     if (index === -1) throw new Error(`no pending question ${requestId} for session ${sessionId}`);
 
@@ -1146,22 +1162,16 @@ export class Coordinator {
   async stop(id: string, opts: { removeWorktree?: boolean; deleteBranch?: boolean } = {}): Promise<void> {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
+    // Block new work before the first await, and suppress normal-exit error reporting.
+    rt.meta.status = "stopped";
+    rt.meta.pendingQuestions = [];
+    this.notifyWaiters();
     await this.refreshStats(rt, true);
     await rt.client.stop();
     for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
     rt.meta.status = "stopped";
     rt.meta.lastActivity = Date.now();
-    this.locks.releaseAll(id, rt.repoIdentity);
-
-    // Also drop the Codex-held locks on this worker's acceptance files, or they
-    // leak forever. Scoped to this worker's repository namespace so stopping A
-    // never releases B's codex locks. Only release once: a failed startup already
-    // released them, and a newer worker may have since re-acquired the same path
-    // under "codex".
-    if (rt.acceptanceReserved && rt.meta.acceptance?.files?.length) {
-      this.locks.release("codex", rt.meta.acceptance.files, rt.repoIdentity);
-      rt.acceptanceReserved = false;
-    }
+    this.releaseRuntimeReservations(rt);
 
     this.archive(rt.meta);
 

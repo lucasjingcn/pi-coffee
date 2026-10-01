@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {createHash} from 'node:crypto';
@@ -73,3 +73,35 @@ test('protected sessions close unauthenticated internal mutation bypass and reda
     assert.equal(JSON.stringify(status).includes(hash),false);
   },'',history);
 });
+
+
+test('invalid internal payloads cannot poison mailbox, board or persisted state', {timeout: 10000}, async () => daemon(async (base, port, dir) => {
+  const post = (path, body) => fetch(base + path, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  const bad = [
+    ['/internal/send', {to: '*', text: {bad: true}}],
+    ['/internal/send', {to: '*', text: 'hello', kind: 'invalid'}],
+    ['/internal/send', {from: [], to: '*', text: 'hello'}],
+    ['/internal/send', {to: '*', text: 'hello', deliver: 'false'}],
+    ['/internal/board/post', {board: {}, key: 'a', value: 'x'}],
+    ['/internal/board/post', {board: 'audit', key: [], value: 'x'}],
+    ['/internal/board/post', {board: 'audit', key: 'a', value: 'x', from: {bad: true}}],
+    ['/internal/read', {ids: 'not-an-array'}],
+    ['/internal/read', {ids: [], sessionId: {bad: true}}],
+    ['/internal/claim', {sessionId: 'one', paths: [42]}],
+    ['/internal/claim', {sessionId: 'one', paths: [], mode: 'invalid'}],
+    ['/internal/release', {sessionId: 'one', paths: 'bad'}],
+    ['/internal/send', []], ['/internal/send', null], ['/internal/send', 'bad'],
+    ['/internal/inbox', {sessionId: {bad: true}}],
+  ];
+  for (const [path, body] of bad) assert.equal((await post(path, body)).status, 400, path + ' ' + JSON.stringify(body));
+  assert.equal((await (await fetch(base + '/internal/inbox?sessionId=one')).json()).messages.length, 0);
+  assert.equal((await (await fetch(base + '/internal/board/get?board=audit')).json()).entries.length, 0);
+  assert.equal((await post('/internal/send', {to: '*', text: 'valid', deliver: false})).status, 200);
+  assert.equal((await post('/internal/board/post', {board: 'audit', key: 'a', value: {x: 1}})).status, 200);
+  await new Promise(r => setTimeout(r, 750));
+  const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+  assert.equal(state.mailbox.length, 1);
+  assert.equal(state.mailbox[0].text, 'valid');
+  assert.equal(state.board.length, 1);
+  assert.equal(state.board[0].board, 'audit');
+}));

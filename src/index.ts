@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import { Coordinator } from "./manager.js";
 import { buildServer } from "./mcp-server.js";
 import type { LockMode } from "./locks.js";
+import { z } from "zod";
 
 const config = loadConfig();
 const coord = new Coordinator(config);
@@ -105,6 +106,23 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
 // Internal API (used by the worker extension and stdio proxy)
 // ---------------------------------------------------------------------------
 
+const internalString = z.string().min(1);
+const internalSchemas: Record<string, z.ZodTypeAny> = {
+  "/internal/hello": z.object({ sessionId: internalString.optional() }),
+  "/internal/status": z.object({ sessionId: internalString.optional() }),
+  "/internal/claim": z.object({ sessionId: internalString, paths: z.array(internalString),
+    mode: z.enum(["rw", "ro"]).optional(), repo: internalString.optional() }),
+  "/internal/authorize-write": z.object({ sessionId: internalString }),
+  "/internal/release": z.object({ sessionId: internalString, paths: z.array(internalString).optional(), repo: internalString.optional() }),
+  "/internal/inbox": z.object({ sessionId: internalString.optional(), unreadOnly: z.boolean().optional() }),
+  "/internal/read": z.object({ ids: z.array(internalString).optional(), sessionId: internalString.optional() }),
+  "/internal/send": z.object({ from: internalString.optional(), to: internalString, text: internalString,
+    kind: z.enum(["note", "question", "answer", "broadcast"]).optional(), deliver: z.boolean().optional() }),
+  "/internal/board/get": z.object({ board: internalString.optional(), key: internalString.optional(), latest: z.boolean().optional() }),
+  "/internal/board/post": z.object({ board: internalString, key: internalString,
+    value: z.unknown().refine(value => value !== undefined, "value required"), from: internalString.optional() }),
+};
+
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const token = requestToken(req);
   const workerSid = token ? coord.workerSessionForToken(token) : undefined;
@@ -117,7 +135,16 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
 
   let body: any = {};
   try {
-    if (req.method === "POST" || req.method === "PATCH") body = (await readBody(req)) ?? {};
+    if (req.method === "POST" || req.method === "PATCH") {
+      const parsed = await readBody(req);
+      body = parsed === undefined ? {} : parsed;
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "expected a JSON object" });
+      }
+      const result = (internalSchemas[url.pathname] ?? z.object({})).safeParse(body);
+      if (!result.success) return sendJson(res, 400, { error: "invalid endpoint payload" });
+      body = result.data;
+    }
   } catch (error) {
     return sendJson(res, 400, { error: String(error instanceof Error ? error.message : error) });
   }

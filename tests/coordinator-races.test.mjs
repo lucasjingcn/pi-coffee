@@ -141,3 +141,64 @@ test('unresolvable baseRef propagates the error and releases all reservations', 
     PiRpcClient.prototype.start = original;
   }
 }));
+
+
+test('worker exit releases acceptance locks exactly once', async () => fixture(async c => {
+  const first = await c.spawn({spec: {goal: 'one', scope: ['a']}, acceptanceFiles: [{path: 'tests/shared', content: 'first'}]});
+  const client = c.get(first.id).client;
+  client.emit('exit', {code: 1, signal: null});
+  assert.equal(c.snapshot(first.id).status, 'error');
+  assert.deepEqual(c.locksList(), [], 'dead worker cannot retain acceptance reservations');
+  const second = await c.spawn({spec: {goal: 'two', scope: ['b']}, acceptanceFiles: [{path: 'tests/shared', content: 'second'}]});
+  client.emit('exit', {code: 1, signal: null});
+  await c.stop(first.id);
+  assert.equal(c.locksList().filter(l => l.sessionId === 'codex').length, 1, 'old exit or stop cannot release the newer reservation');
+  assert.equal(c.snapshot(second.id).status, 'idle');
+}));
+
+test('normal stop rejects new work before stats finish and records no false exit error', async () => fixture(async c => {
+  const worker = await c.spawn({spec: {goal: 'one', scope: ['a']}});
+  const client = c.get(worker.id).client;
+  let releaseStats;
+  const gate = new Promise(r => { releaseStats = r; });
+  client.getState = async () => { await gate; return {isStreaming: false}; };
+  client.stop = async () => { client.emit('exit', {code: 0, signal: null}); };
+  const stopping = c.stop(worker.id);
+  try {
+    assert.equal(c.snapshot(worker.id).status, 'stopped');
+    await assert.rejects(c.send(worker.id, 'late message'), /stopped/);
+    assert.throws(() => c.authorizeWrite(worker.id), /not writable/);
+  } finally { releaseStats(); await stopping; }
+  assert.equal(c.snapshot(worker.id).error, undefined);
+}));
+
+test('answers cannot silently succeed after exit or completion', async () => fixture(async c => {
+  const worker = await c.spawn({spec: {goal: 'one', scope: ['a']}});
+  const rt = c.get(worker.id);
+  rt.client.emit('ui_request', {type: 'extension_ui_request', id: 'q', method: 'confirm'});
+  rt.client.emit('exit', {code: 1, signal: null});
+  await assert.rejects(c.answer(worker.id, 'q', {confirmed: true}), /error|exited/);
+  await c.stop(worker.id);
+  assert.deepEqual(c.snapshot(worker.id).pendingQuestions, []);
+  rt.meta.outcome = 'abandoned';
+  await assert.rejects(c.answer(worker.id, 'q', {confirmed: true}), /finished/);
+}));
+
+
+test('stop during startup cannot resurrect the session', async () => fixture(async c => {
+  const original = PiRpcClient.prototype.start;
+  let started = false, release;
+  const gate = new Promise(r => { release = r; });
+  PiRpcClient.prototype.start = async function () { started = true; await gate; };
+  try {
+    const spawning = c.spawn({spec: {goal: 'one', scope: ['a']}});
+    const rejected = assert.rejects(spawning, /stopped during startup/);
+    await until(() => started);
+    const id = c.list()[0].id;
+    await c.stop(id);
+    release();
+    await rejected;
+    assert.equal(c.snapshot(id).status, 'stopped');
+    assert.deepEqual(c.locksList(), []);
+  } finally { release?.(); PiRpcClient.prototype.start = original; }
+}));
