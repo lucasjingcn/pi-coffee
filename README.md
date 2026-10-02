@@ -526,6 +526,8 @@ theme directories remain linked, and relative extension/skill/prompt/theme/packa
 their original targets. Global plugins are inherited only when `PI_COFFEE_WORKER_PLUGINS` allows
 them: packages, external extension entries, and MCP servers are denied by default, so an
 interactive-only extension cannot change worker behavior or let a worker spawn nested sessions.
+Workers also start with `--no-skills`, so globally installed skills (including orchestrator
+policies) cannot steer them; the task contract comes from the spec and the copied `AGENTS.md`.
 Core `builtin:` extensions, credentials, and context are never filtered for speed. Changes to
 global defaults or login credentials apply to newly spawned workers. A configuration-load error
 fails startup explicitly instead of accepting pi's fallback defaults. `/internal/health` identifies

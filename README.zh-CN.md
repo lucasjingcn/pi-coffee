@@ -450,8 +450,9 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 读取 settings 和凭据时使用 pi 相同的锁协议及有界异步重试；worker 的配置、认证与模型文件彼此独立。
 技能、提示词、主题目录仍指向相同内容，扩展、技能、提示词、主题与包的相对路径保持原目标。全局插件
 仅当 `PI_COFFEE_WORKER_PLUGINS` 允许时才继承：包、外部扩展条目和 MCP 服务器默认一律不继承，
-避免只在交互会话使用的插件改变 worker 行为，或让 worker 再开嵌套会话。pi 自带的 `builtin:` 扩展、
-凭据与上下文不会为启动速度被裁掉。全局默认设置或登录凭据的变化作用于新启动的 worker。配置加载
+避免只在交互会话使用的插件改变 worker 行为，或让 worker 再开嵌套会话。worker 同时以 `--no-skills`
+启动，全局安装的 skill（包括编排策略）无法影响它；任务契约来自 spec 和复制的 `AGENTS.md`。
+pi 自带的 `builtin:` 扩展、凭据与上下文不会为启动速度被裁掉。全局默认设置或登录凭据的变化作用于新启动的 worker。配置加载
 失败会明确停止，不会接受 pi 回退到默认配置后的“启动成功”。`/internal/health` 的 `workerStartupPolicy` 为
 `private-agent-config-v1` 时，说明后台已加载这项启动策略，而非仅完成本地构建。
 

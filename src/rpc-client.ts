@@ -89,6 +89,10 @@ export class PiRpcClient extends EventEmitter {
     if (this.opts.thinking) args.push("--thinking", this.opts.thinking);
     if (this.opts.sessionDir) args.push("--session-dir", this.opts.sessionDir);
     if (this.opts.extensionPath) args.push("--extension", this.opts.extensionPath);
+    // Workers get their contract from the spec and the copied AGENTS.md. Skill
+    // discovery stays off so globally installed skills (for example the
+    // orchestrator policy) cannot steer a worker session.
+    args.push("--no-skills");
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
 
     const piBin = this.opts.piBin ?? "pi";
