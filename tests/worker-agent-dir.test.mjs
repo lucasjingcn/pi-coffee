@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, writeFile, readFile, rm, stat, realpath, readdir} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, rm, stat, realpath, readdir, lstat} from 'node:fs/promises';
 import {join, dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareWorkerAgentDir} from '../dist/worker-agent-dir.js';
@@ -120,4 +120,32 @@ test('plugin policy mirrors only allowlisted packages, extension entries and MCP
   assert.deepEqual(JSON.parse(await readFile(join(target,'mcp.json'),'utf8')).mcpServers,{keep:{command:'x'}});
   assert.deepEqual(await readdir(join(target,'extensions')),['keep.js']);
   await assert.rejects(stat(join(target,'extensions','drop.js')));
+}));
+
+test('plugin policy edge cases: verbatim allow-all, malformed MCP, package objects, whole extension dir', async () => fixture(async ({root,source}) => {
+  // allow-all keeps the legacy behavior, including unrelated MCP servers
+  const mcp=JSON.stringify({mcpServers:{daemon:{command:'x'},safe:{command:'y'}}});
+  await put(join(source,'mcp.json'),mcp);
+  await put(join(source,'settings.json'),JSON.stringify({packages:['npm:@scope/plugin'],extensions:['extensions'],skills:['skills']}));
+  await put(join(source,'extensions','a.js'),'export default () => {};');
+  const all=await prepareWorkerAgentDir(join(root,'worker-all'),source,['*']);
+  assert.equal(await readFile(join(all,'mcp.json'),'utf8'),mcp);
+  assert.ok((await lstat(join(all,'extensions'))).isSymbolicLink());
+  assert.deepEqual(JSON.parse(await readFile(join(all,'settings.json'),'utf8')).packages,['npm:@scope/plugin']);
+
+  // malformed MCP is denied without failing startup
+  await put(join(source,'settings.json'),'{}');
+  await put(join(source,'mcp.json'),'not-json');
+  const denied=await prepareWorkerAgentDir(join(root,'worker-deny'),source);
+  await assert.rejects(stat(join(denied,'mcp.json')));
+
+  // allowlisted package objects keep every declared field
+  await put(join(source,'settings.json'),JSON.stringify({packages:[{source:'npm:@scope/keep',extensions:['index.js']},{source:'npm:@scope/drop'}]}));
+  const kept=await prepareWorkerAgentDir(join(root,'worker-keep'),source,['npm:@scope/keep']);
+  assert.deepEqual(JSON.parse(await readFile(join(kept,'settings.json'),'utf8')).packages,[{source:'npm:@scope/keep',extensions:['index.js']}]);
+
+  // allowing the directory name mirrors the whole extension dir
+  await put(join(source,'settings.json'),JSON.stringify({extensions:['extensions']}));
+  const dirAllowed=await prepareWorkerAgentDir(join(root,'worker-ext'),source,['extensions']);
+  assert.ok((await lstat(join(dirAllowed,'extensions'))).isSymbolicLink());
 }));

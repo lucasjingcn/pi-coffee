@@ -134,7 +134,7 @@ function resolvePlugins(overrides: Partial<Config>, field: "workerPlugins", key:
     if (!Array.isArray(override) || override.some(value => typeof value !== "string" || value.trim() === "")) {
       invalid(field, key, "expected a list of non-empty pattern strings");
     }
-    return (override as string[]).map(value => value.trim());
+    return [...new Set((override as string[]).map(value => value.trim()))];
   }
 
   const raw = env(key);
