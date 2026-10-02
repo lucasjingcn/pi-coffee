@@ -14,6 +14,11 @@ const run = promisify(execFile);
 function gitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
+    // Pin git's message locale so stderr text and command wording stay parseable
+    // and stable on every machine; callers surface these strings as failure reasons.
+    LC_ALL: "C",
+    LANG: "C",
+    LANGUAGE: "C",
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "safe.directory",
     GIT_CONFIG_VALUE_0: "*",

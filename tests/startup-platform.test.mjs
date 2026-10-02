@@ -20,8 +20,15 @@ async function freePort() {
 }
 
 test("pinned local pi CLI resolves on this platform", () => {
-  const pi = resolvePiBin();
-  assert.ok(pi && pi.endsWith("cli.js"), `unexpected pi binary: ${pi}`);
+  const saved = process.env.PI_COFFEE_PI_BIN;
+  delete process.env.PI_COFFEE_PI_BIN;
+  try {
+    const pi = resolvePiBin();
+    assert.ok(pi && pi.endsWith("cli.js"), `unexpected pi binary: ${pi}`);
+  } finally {
+    if (saved === undefined) delete process.env.PI_COFFEE_PI_BIN;
+    else process.env.PI_COFFEE_PI_BIN = saved;
+  }
 });
 
 test("npm start loads the private env file before binding the daemon", async () => {
