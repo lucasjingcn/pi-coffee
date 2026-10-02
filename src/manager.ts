@@ -6,8 +6,10 @@ import { isAbsolute, join, relative } from "node:path";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
-import { LockManager, type ClaimResult, type LockMode } from "./locks.js";
+import { LockManager, type ClaimResult, type LockMode, type Lock } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
+import { captureWorkerProcess, stopOwnedWorker, type WorkerProcessIdentity } from "./worker-process.js";
+import { ControlVault } from "./control-vault.js";
 import { StateStore } from "./state-store.js";
 import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, type Verification, type IntegrationRecord } from "./integration.js";
 import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
@@ -48,9 +50,19 @@ const FINISHED_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["success_first
 // Types
 // ---------------------------------------------------------------------------
 
-export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopped";
+export type SessionStatus = "starting" | "idle" | "working" | "error" | "stopping" | "stopped";
 
 export type Outcome = "success_first" | "success_second" | "taken_over" | "abandoned";
+
+export const HANDOFF_KINDS = ["provider_wait", "provider_timeout", "provider_error", "worker_exited", "shutdown_failed", "awaiting_acceptance", "owner_timeout"] as const;
+export interface WorkerHandoff {
+  id: string;
+  kind: typeof HANDOFF_KINDS[number];
+  at: number;
+  safeToTakeOver: boolean;
+  locksReleased: boolean;
+  action: "wait_or_stop" | "accept_and_finish" | "take_over" | "resolve_shutdown";
+}
 
 export interface SessionMeta {
   id: string;
@@ -96,13 +108,23 @@ export interface SessionMeta {
   /** Set once the worker-side coordinator extension checked in. */
   extension?: boolean;
   extensionAt?: number;
-  /** SHA-256 of the one-time control key returned by pi_spawn; absent for legacy sessions. */
+  handoff?: WorkerHandoff;
+  /** True until the owned process group/tree is proven stopped. Survives daemon crashes. */
+  shutdownUnconfirmed?: boolean;
+  workerProcess?: WorkerProcessIdentity;
+  lockRepoIdentity?: string;
+  heldLocks?: Lock[];
+  /** SHA-256 of the control key; credentials remain separate from reports/history. */
   controlKeyHash?: string;
   /** Shared scope capability hash for workers intentionally grouped by one chat. */
   scopeKeyHash?: string;
 }
 
 interface Runtime {
+  lastProgressAt?: number;
+  activeTools?: Set<string>;
+  providerFailed?: boolean;
+  stopping?: Promise<void>;
   meta: SessionMeta;
   client: PiRpcClient;
   lastNotifiedQuestionIds: Set<string>;
@@ -130,6 +152,8 @@ export interface SpawnOptions {
   spec?: DelegationSpec;
   controlKeyHash?: string;
   scopeKeyHash?: string;
+  controlKey?: string;
+  scopeKey?: string;
 }
 
 export interface WaitResult {
@@ -153,6 +177,9 @@ export class Coordinator {
   private workerTokens = new Map<string, string>();
   private saveTimer: NodeJS.Timeout | null = null;
   private sweeper: NodeJS.Timeout | null = null;
+  private healthTimer: NodeJS.Timeout | null = null;
+  private healthChecking = false;
+  private vault: ControlVault;
   private waiters = new Set<() => void>();
   /** Concurrency slots reserved by in-flight spawns that have not yet registered a runtime. */
   private reserved = 0;
@@ -167,6 +194,7 @@ export class Coordinator {
 
   constructor(config: Config) {
     this.config = config;
+    this.vault = new ControlVault(config.dataDir);
     this.store = new StateStore(join(config.dataDir, "state.json"));
   }
 
@@ -178,6 +206,9 @@ export class Coordinator {
     // Sessions never survive a daemon restart, so any leftover worktree is an orphan.
     await this.sweepOnStartup();
     this.startSweeper();
+    this.healthTimer = setInterval(() => void this.checkWorkerHealth().catch(() => {}),
+      Math.min(5000, this.config.workerWarnMs));
+    this.healthTimer.unref?.();
   }
 
   // -------------------------------------------------------------------------
@@ -239,6 +270,7 @@ export class Coordinator {
    * Dirty or unrecorded work remains available for recovery. Branch deletion is gc-only.
    */
   private async cleanMeta(meta: SessionMeta): Promise<boolean> {
+    if (meta.handoff && meta.handoff.kind !== "awaiting_acceptance") return false;
     const isFinished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
     if ((!isFinished && !(await this.emptyAbandoned(meta))) || meta.status !== "stopped"
       || !meta.worktree || !existsSync(meta.worktree)) return false;
@@ -419,19 +451,35 @@ export class Coordinator {
     const { state } = await this.store.load();
     this.counter = state.counter;
     this.orchestratorCosts = state.orchestratorCosts;
-    // Locks are held by live sessions, and sessions never survive a daemon
-    // restart. Drop any persisted locks instead of resurrecting orphaned locks
-    // that would block new spawns.
     this.locks = new LockManager();
     this.mailbox.import(state.mailbox);
     this.board.import(state.board);
-    // Any snapshot that was live when the daemon died is now stopped history;
-    // completed outcomes and tests-ownership metadata on it are preserved as-is.
-    this.history = state.history.map((entry) =>
-      entry.status === "starting" || entry.status === "idle" || entry.status === "working"
-        ? { ...entry, status: "stopped", pendingQuestions: [] }
-        : entry,
-    );
+    this.history = [];
+    for (const original of state.history) {
+      const entry = { ...original, pendingQuestions: [] };
+      if (entry.shutdownUnconfirmed) {
+        try {
+          if (!entry.workerProcess) throw new Error("missing process ownership proof");
+          await stopOwnedWorker(entry.workerProcess);
+          entry.shutdownUnconfirmed = false;
+          entry.heldLocks = [];
+          entry.status = "stopped";
+          entry.handoff = { id: randomBytes(12).toString("hex"), kind: "worker_exited", at: Date.now(),
+            safeToTakeOver: true, locksReleased: true, action: "take_over" };
+        } catch {
+          entry.status = "error";
+          entry.error = "orphan worker shutdown unconfirmed; scope locks retained";
+          entry.handoff = { id: randomBytes(12).toString("hex"), kind: "shutdown_failed", at: Date.now(),
+            safeToTakeOver: false, locksReleased: false, action: "resolve_shutdown" };
+          this.locks.import([...this.locks.export(), ...(entry.heldLocks ?? [])]);
+          // Also reconstruct declared scope if the last snapshot missed a dynamic lock update.
+          if (entry.lockRepoIdentity) {
+            this.locks.claim(entry.id, normalizedScope(entry.spec?.scope ?? []), "rw", entry.lockRepoIdentity);
+          }
+        }
+      } else if (["starting", "idle", "working", "stopping"].includes(entry.status)) entry.status = "stopped";
+      this.history.push(entry);
+    }
   }
 
   private scheduleSave(): void {
@@ -482,7 +530,9 @@ export class Coordinator {
     const byId = new Map<string, SessionMeta>();
     for (const entry of this.history) byId.set(entry.id, entry);
     for (const rt of this.runtimes.values()) {
-      byId.set(rt.meta.id, { ...rt.meta, pendingQuestions: [] });
+      byId.set(rt.meta.id, { ...rt.meta, pendingQuestions: [], heldLocks: this.locks.list().filter(lock =>
+        lock.sessionId === rt.meta.id || (lock.sessionId === "codex" && rt.acceptanceReserved
+          && lock.repo === rt.repoIdentity && normalizedScope(rt.meta.acceptance?.files ?? []).includes(lock.path))) });
     }
 
     return [...byId.values()];
@@ -684,6 +734,11 @@ export class Coordinator {
     });
 
     const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
+    // Persist before the first prompt; never return a live worker whose control credential was lost.
+    if (opts.controlKey && opts.scopeKey) {
+      try { await this.vault.save(id, opts.controlKey, opts.scopeKey); }
+      catch { this.releaseRuntimeReservations(rt); throw new Error("worker control credential persistence failed"); }
+    }
     this.runtimes.set(id, rt);
     this.workerTokens.set(workerToken, id);
     // The runtime now occupies the slot: stop counting it in `reserved` so it is
@@ -694,7 +749,13 @@ export class Coordinator {
 
     try {
       await prepareWorkerAgentDir(workerAgentDir);
+      meta.shutdownUnconfirmed = true;
+      meta.lockRepoIdentity = repoIdentity;
+      // Durable ownership precedes spawn; a crash before PID capture fails closed on recovery.
+      await this.flush();
       await client.start();
+      if (client.pid !== undefined) meta.workerProcess = await captureWorkerProcess(client.pid);
+      await this.flush();
       if (meta.status === "stopped") throw new Error(`session ${id} stopped during startup`);
       meta.status = "idle";
     } catch (e) {
@@ -703,7 +764,9 @@ export class Coordinator {
         meta.error = String(e);
       }
       // A failed startup must not leak the child process or any reservations.
-      await client.stop().catch(() => {});
+      try { await client.stop(); }
+      catch { this.publishHandoff(rt, "shutdown_failed", false); throw new Error("worker startup failed and shutdown is unconfirmed; locks retained"); }
+      meta.shutdownUnconfirmed = false;
       this.workerTokens.delete(workerToken);
       this.releaseRuntimeReservations(rt);
       this.scheduleSave();
@@ -728,24 +791,59 @@ export class Coordinator {
     }
 
     const first = parts.join("\n\n");
-    if (first) await this.send(id, first, "prompt");
+    if (first) {
+      try { await this.send(id, first, "prompt"); }
+      catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
+    }
     return meta;
   }
 
   private wireEvents(rt: Runtime): void {
     rt.client.on("event", (event: PiEvent) => {
+      if (rt.meta.status === "stopped" || rt.meta.status === "stopping" || rt.stopping) return;
       rt.meta.lastActivity = Date.now();
       switch (event.type) {
         case "agent_start":
-          if (rt.meta.outcome === undefined && rt.meta.status !== "stopped") rt.meta.status = "working";
+          rt.lastProgressAt ??= Date.now();
+          rt.activeTools ??= new Set();
+          rt.meta.handoff = undefined;
+          if (rt.meta.outcome === undefined) rt.meta.status = "working";
           break;
         case "agent_settled":
-          if (rt.meta.outcome === undefined && rt.meta.status !== "stopped") rt.meta.status = "idle";
+          if (rt.stopping) break;
+          if (rt.providerFailed) { void this.failWorker(rt, "provider_error"); break; }
+          if (rt.meta.outcome === undefined) rt.meta.status = "idle";
+          if (rt.meta.outcome === undefined && rt.meta.lastText?.trim()) this.publishHandoff(rt, "awaiting_acceptance", false);
           void this.refreshStats(rt, true);
+          break;
+        case "message_update":
+          if (["text_delta", "thinking_delta", "toolcall_delta"].includes(event.assistantMessageEvent?.type)) {
+            rt.lastProgressAt = Date.now();
+            if (rt.meta.handoff?.kind === "provider_wait") rt.meta.handoff = undefined;
+          }
+          break;
+        case "tool_execution_start":
+          (rt.activeTools ??= new Set()).add(event.toolCallId);
+          rt.lastProgressAt = Date.now();
+          break;
+        case "tool_execution_end":
+          rt.activeTools?.delete(event.toolCallId);
+          rt.lastProgressAt = Date.now();
+          break;
+        case "auto_retry_start":
+          rt.providerFailed = false;
+          break;
+        case "auto_retry_end":
+          if (event.success === false) {
+            rt.providerFailed = true;
+            void this.failWorker(rt, "provider_error");
+          }
           break;
         case "message_end": {
           const msg = event.message;
           if (msg?.role === "assistant") {
+            rt.providerFailed = msg.stopReason === "error" || msg.stopReason === "aborted";
+            if (!rt.providerFailed) rt.lastProgressAt = Date.now();
             const text = textOf(msg);
             if (text) rt.meta.lastText = text;
           }
@@ -761,7 +859,7 @@ export class Coordinator {
     });
 
     rt.client.on("ui_request", (request: UiRequest) => {
-      if (rt.meta.status === "stopped" || rt.meta.status === "error" || rt.meta.outcome !== undefined) return;
+      if (rt.meta.status === "stopped" || rt.meta.status === "error" || rt.meta.status === "stopping" || rt.meta.outcome !== undefined) return;
       // Fire-and-forget UI updates never block the conversation.
       if (
         request.method === "notify" ||
@@ -778,17 +876,75 @@ export class Coordinator {
       this.notifyWaiters();
     });
 
+    rt.client.on("shutdown_failed", () => {
+      rt.meta.status = "error";
+      rt.meta.error = "worker shutdown could not be confirmed; locks retained";
+      this.publishHandoff(rt, "shutdown_failed", false);
+    });
     rt.client.on("exit", () => {
-      if (rt.meta.status !== "stopped") {
+      if (rt.meta.status !== "stopped" && !rt.stopping) {
         rt.meta.status = "error";
-        rt.meta.error = rt.client.getStderr().slice(-2000) || "pi rpc exited";
+        rt.meta.error = "pi rpc exited";
       }
+      rt.meta.shutdownUnconfirmed = false;
       rt.meta.pendingQuestions = [];
       this.releaseRuntimeReservations(rt);
+      if (!rt.stopping && rt.meta.outcome === undefined) this.publishHandoff(rt, "worker_exited", true);
       for (const [token, sid] of this.workerTokens) if (sid === rt.meta.id) this.workerTokens.delete(token);
       this.notifyWaiters();
       this.scheduleSave();
     });
+  }
+
+  private publishHandoff(rt: Runtime, kind: WorkerHandoff["kind"], safe: boolean): void {
+    rt.meta.handoff = { id: randomBytes(12).toString("hex"), kind, at: Date.now(),
+      safeToTakeOver: safe, locksReleased: safe,
+      action: kind === "provider_wait" ? "wait_or_stop" : kind === "awaiting_acceptance" ? "accept_and_finish"
+        : safe ? "take_over" : "resolve_shutdown" };
+    this.scheduleSave();
+    this.notifyWaiters();
+  }
+
+  /** The daemon owns this watchdog; it never asks the stalled model to report its own failure. */
+  private async checkWorkerHealth(now = Date.now()): Promise<void> {
+    if (this.healthChecking) return;
+    this.healthChecking = true;
+    try {
+      for (const rt of this.runtimes.values()) {
+        if (rt.stopping || rt.meta.outcome !== undefined || rt.meta.pendingQuestions.length) continue;
+        if (rt.meta.status === "working" && !rt.activeTools?.size) {
+          const quiet = now - (rt.lastProgressAt ?? rt.meta.lastActivity);
+          if (quiet >= this.config.workerStallMs) await this.failWorker(rt, "provider_timeout");
+          else if (quiet >= this.config.workerWarnMs && rt.meta.handoff?.kind !== "provider_wait")
+            this.publishHandoff(rt, "provider_wait", false);
+        } else if (rt.meta.status === "idle" && now - rt.meta.lastActivity >= this.config.workerIdleMs) {
+          await this.failWorker(rt, "owner_timeout");
+        }
+      }
+    } finally { this.healthChecking = false; }
+  }
+
+  private async failWorker(rt: Runtime, reason: WorkerHandoff["kind"]): Promise<void> {
+    try {
+      await this.stop(rt.meta.id, { preserveWorktree: true });
+      this.publishHandoff(rt, reason, true);
+      this.archive(rt.meta);
+      this.scheduleSave();
+    } catch {
+      rt.meta.status = "error";
+      rt.meta.error = "worker shutdown could not be confirmed; locks retained";
+      this.publishHandoff(rt, "shutdown_failed", false);
+    }
+  }
+
+  async recoverControl(id: string, scopeKey: string): Promise<{ controlKey: string; scopeKey: string }> {
+    const meta = this.snapshot(id);
+    if (!meta.scopeKeyHash || createHash("sha256").update(scopeKey).digest("hex") !== meta.scopeKeyHash)
+      throw new Error("invalid scope_key for worker recovery");
+    const keys = await this.vault.read(id);
+    if (!keys || createHash("sha256").update(keys.controlKey).digest("hex") !== meta.controlKeyHash
+      || keys.scopeKey !== scopeKey) throw new Error("worker credentials unavailable; use authorized local administration");
+    return keys;
   }
 
   private async refreshStats(rt: Runtime, includeCost = false): Promise<void> {
@@ -820,8 +976,10 @@ export class Coordinator {
   private activeCount(): number {
     let n = 0;
     for (const rt of this.runtimes.values()) {
-      if (rt.meta.status === "starting" || rt.meta.status === "idle" || rt.meta.status === "working") n++;
+      if (rt.meta.status === "starting" || rt.meta.status === "idle" || rt.meta.status === "working"
+        || rt.meta.status === "stopping" || (rt.meta.status === "error" && !rt.client.hasExited)) n++;
     }
+    n += this.history.filter(entry => entry.shutdownUnconfirmed && !this.runtimes.has(entry.id)).length;
     return n;
   }
 
@@ -870,7 +1028,8 @@ export class Coordinator {
   }
 
   list(): SessionMeta[] {
-    return [...this.runtimes.values()].map((rt) => this.snapshotOf(rt));
+    return [...this.runtimes.values()].map((rt) => this.snapshotOf(rt))
+      .concat(this.history.filter(meta => meta.shutdownUnconfirmed && !this.runtimes.has(meta.id)));
   }
 
   snapshot(id: string): SessionMeta {
@@ -934,6 +1093,8 @@ export class Coordinator {
 
   private assertUnfinished(rt: Runtime): void {
     if (rt.meta.outcome !== undefined) throw new Error(`session ${rt.meta.id} is finished`);
+    if (rt.meta.status === "stopping") throw new Error("session is stopping; worker is not writable");
+    if (rt.meta.handoff?.kind === "shutdown_failed") throw new Error("worker shutdown is unconfirmed; resolve shutdown before further mutations");
   }
 
   async send(
@@ -954,6 +1115,11 @@ export class Coordinator {
     }
 
     const previousStatus = rt.meta.status;
+    if (previousStatus !== "working") {
+      rt.lastProgressAt = Date.now();
+      rt.meta.handoff = undefined;
+      rt.providerFailed = false;
+    }
     rt.meta.status = "working"; // Reserve the pending instruction before the first RPC await.
     try {
       if (opts.model) {
@@ -977,19 +1143,20 @@ export class Coordinator {
     this.notifyWaiters();
   }
 
-  async wait(ids: string[], until: "settled" | "idle" | "question", timeoutMs: number): Promise<WaitResult> {
+  async wait(ids: string[], until: "settled" | "idle" | "question", timeoutMs: number, afterNoticeIds: string[] = []): Promise<WaitResult> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const sessions = ids.map((id) => this.snapshot(id));
       const done =
         until === "question"
           ? sessions.some((s) => s.pendingQuestions.length > 0)
-          : sessions.every((s) => s.status !== "working" && s.status !== "starting");
+          : sessions.every((s) => s.status !== "working" && s.status !== "starting" && s.status !== "stopping");
       const terminal = sessions.some((s) => s.status === "error" || s.status === "stopped");
 
-      if (done || terminal) {
+      const attention = sessions.some((s) => s.handoff && !afterNoticeIds.includes(s.handoff.id));
+      if (done || terminal || attention) {
         // Make sure fresh cost/context is reflected in the returned snapshot.
-        await Promise.all(sessions.map((s) => this.refreshStats(this.get(s.id), true)));
+        await Promise.all(sessions.filter((s) => this.runtimes.has(s.id) && s.status !== "stopped").map((s) => this.refreshStats(this.get(s.id), true)));
         return { sessions: ids.map((id) => this.snapshot(id)), timedOut: false };
       }
       if (Date.now() >= deadline) return { sessions, timedOut: true };
@@ -1067,7 +1234,7 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
     this.assertUnfinished(rt);
-    if (rt.meta.status === "stopped" || rt.meta.status === "error") throw new Error("worker is not writable");
+    if (rt.meta.status === "stopped" || rt.meta.status === "error" || rt.meta.status === "stopping") throw new Error("worker is not writable");
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
     rt.meta.candidateReview = undefined;
@@ -1163,45 +1330,78 @@ export class Coordinator {
     this.notifyWaiters();
   }
 
-  async stop(id: string, opts: { removeWorktree?: boolean; deleteBranch?: boolean } = {}): Promise<void> {
-    const rt = this.get(id);
-    this.assertRepoAvailable(rt.repoIdentity);
-    // Block new work before the first await, and suppress normal-exit error reporting.
-    rt.meta.status = "stopped";
-    rt.meta.pendingQuestions = [];
-    this.notifyWaiters();
-    await this.refreshStats(rt, true);
-    await rt.client.stop();
-    for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
-    rt.meta.status = "stopped";
-    rt.meta.lastActivity = Date.now();
-    this.releaseRuntimeReservations(rt);
-
-    this.archive(rt.meta);
-
-    if (opts.removeWorktree) {
-      // Explicit request: remove even if dirty.
-      const deleteBranch = opts.deleteBranch ?? this.config.deleteBranches;
-      await removeWorktree(rt.meta.repo, rt.meta.worktree, deleteBranch ? rt.meta.branch : undefined).catch(() => {});
-    } else if (this.config.autoClean) {
-      // Safe auto-clean: only finished + clean worktrees, branch kept.
-      await this.cleanMeta(rt.meta).catch(() => {});
+  async stop(id: string, opts: { removeWorktree?: boolean; deleteBranch?: boolean; preserveWorktree?: boolean } = {}): Promise<void> {
+    if (!this.runtimes.has(id)) {
+      const meta = this.history.find(entry => entry.id === id);
+      if (!meta) throw new Error(`unknown session: ${id}`);
+      if (meta.shutdownUnconfirmed) {
+        if (!meta.workerProcess) throw new Error("orphan worker lacks process ownership proof; locks retained");
+        await stopOwnedWorker(meta.workerProcess);
+        meta.shutdownUnconfirmed = false;
+        this.locks.releaseAll(id, meta.lockRepoIdentity);
+        for (const lock of meta.heldLocks ?? []) this.locks.release(lock.sessionId, [lock.path], lock.repo);
+        meta.heldLocks = [];
+        meta.status = "stopped";
+        meta.handoff = { id: randomBytes(12).toString("hex"), kind: "worker_exited", at: Date.now(),
+          safeToTakeOver: true, locksReleased: true, action: "take_over" };
+        this.scheduleSave();
+        this.notifyWaiters();
+      }
+      return;
     }
-
-    this.notifyWaiters();
-    this.scheduleSave();
+    const rt = this.get(id);
+    if (rt.stopping) return rt.stopping;
+    this.assertRepoAvailable(rt.repoIdentity);
+    // Block writes before the first await; only confirmed shutdown releases ownership.
+    rt.meta.status = "stopping";
+    rt.meta.pendingQuestions = [];
+    const stopping = Promise.resolve().then(async () => {
+      await rt.client.stop();
+      rt.meta.shutdownUnconfirmed = false;
+      for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
+      rt.meta.status = "stopped";
+      rt.meta.handoff = undefined;
+      rt.meta.lastActivity = Date.now();
+      this.releaseRuntimeReservations(rt);
+      this.archive(rt.meta);
+      if (opts.removeWorktree) {
+        const deleteBranch = opts.deleteBranch ?? this.config.deleteBranches;
+        await removeWorktree(rt.meta.repo, rt.meta.worktree, deleteBranch ? rt.meta.branch : undefined);
+      } else if (!opts.preserveWorktree && this.config.autoClean) {
+        await this.cleanMeta(rt.meta).catch(() => {});
+      }
+      this.notifyWaiters();
+      this.scheduleSave();
+    });
+    rt.stopping = stopping;
+    try { await stopping; }
+    catch (error) {
+      if (rt.meta.shutdownUnconfirmed === false) {
+        rt.meta.error = "worker stopped; requested cleanup failed";
+        this.publishHandoff(rt, "worker_exited", true);
+      } else {
+        rt.meta.status = "error";
+        this.publishHandoff(rt, "shutdown_failed", false);
+      }
+      throw error;
+    }
+    finally { rt.stopping = undefined; }
   }
 
   async stopAll(): Promise<void> {
+    if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
     // Stop periodic work first so no timer can re-dirty state after the final flush.
     if (this.sweeper) {
       clearInterval(this.sweeper);
       this.sweeper = null;
     }
-    for (const id of [...this.runtimes.keys()]) {
-      await this.stop(id).catch(() => {});
+    let shutdownFailed = false;
+    const ids = new Set([...this.runtimes.keys(), ...this.history.filter(meta => meta.shutdownUnconfirmed).map(meta => meta.id)]);
+    for (const id of ids) {
+      try { await this.stop(id); } catch { shutdownFailed = true; }
     }
     await this.flush();
+    if (shutdownFailed) throw new Error("worker shutdown unconfirmed; persisted reservations retained");
   }
 
   // -------------------------------------------------------------------------
@@ -1217,7 +1417,11 @@ export class Coordinator {
   }
 
   releaseLocks(sessionId: string, paths?: string[], repo?: string): number {
+    const meta = this.runtimes.get(sessionId)?.meta ?? this.history.find(entry => entry.id === sessionId);
+    if (meta?.handoff?.kind === "shutdown_failed") throw new Error("worker shutdown unconfirmed; locks retained");
     const namespace = this.namespaceFor(sessionId, repo);
+    if (this.history.some(entry => entry.shutdownUnconfirmed && entry.heldLocks?.some(lock =>
+      lock.sessionId === sessionId && lock.repo === namespace))) throw new Error("orphan reservation shutdown unconfirmed; locks retained");
     const released = this.locks.release(
       sessionId,
       paths ? this.normalizeLockPaths(sessionId, paths) : undefined,
@@ -1338,6 +1542,7 @@ export class Coordinator {
     if (!rt) {
       const historic = this.history.find((entry) => entry.id === id);
       if (!historic) throw new Error(`unknown session: ${id}`);
+      if (historic.shutdownUnconfirmed) throw new Error("orphan worker shutdown unconfirmed; stop it before recording outcomes");
       if (historic.outcome !== undefined) throw new Error(`session ${id} is already finished`);
       if (outcome !== "abandoned") {
         throw new Error("archived sessions without a live verification gate can only be marked abandoned");

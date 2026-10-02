@@ -154,6 +154,44 @@ Protected workers do not receive global `*` broadcasts, including persisted lega
 Coordinate by explicitly addressing workers in the same scope; retain legacy broadcast behavior
 only for legacy unprotected sessions.
 
+## Worker failure and handoff
+
+While workers run, keep a scoped `pi_wait` outstanding. The daemon watchdog does not depend on
+model output: a new `handoff` notice wakes the wait even before the worker settles. Consume notices
+from `pi_wait`, `pi_status` and `pi_list`; pass consumed notice IDs as `after_notice_ids` on later
+waits to avoid replaying a warning. The current stateless MCP transport cannot push into a chat that
+has stopped executing; these notices persist and remain visible when the owner returns.
+
+A `provider_wait` notice means no observable generation progress, not a proven provider-wide outage.
+The default warning is 60 seconds; the default terminal silence deadline is 10 minutes. Model
+text/thinking/tool-call deltas count as progress. Local tool execution and pending user questions
+are excluded. A settled provider error, exhausted retries, unexpected worker exit, or silence
+deadline triggers safe shutdown and a takeover notice. Never treat HTTP success or SSE keep-alive
+as generated output, lower the configured quality, switch models, or launch extra paid retries.
+
+Take over only after `handoff.safeToTakeOver` and `handoff.locksReleased` are both true. Review the
+preserved worktree, report (`pi_status(detail=full).lastText`) and task contract before continuing
+within existing user authorization. On restart the daemon stops only provably owned survivor process groups; missing or mismatched identity
+retains scope/acceptance reservations. Windows crash-orphan recovery requires local administration.
+A `shutdown_failed` notice retains locks and blocks worker
+writes; resolve actual process termination first. Notifications alone do not establish acceptance.
+
+An `awaiting_acceptance` notice requires owner review: inspect an unchanged investigation/review
+and finish it with the normal accepted-report path; verify/review/integrate implementation before
+finishing successfully. Do not leave a delivered worker idle indefinitely. After 30 minutes idle
+without a pending question the daemon stops it, releases locks only after confirmed exit, preserves
+files/branch/report, and reports `owner_timeout`; it does not invent a success or takeover outcome.
+The timer settings are configurable; changing a deadline never changes the documented output
+quality floor or supplies permission for retries, cleanup or integration.
+
+New spawns persist control credentials in a local directory with owner-only permissions, separate
+from status/history. If the worker key was lost but this chat's `scope_key` remains, explicitly use
+`pi_recover_control(session_id, scope_key)`; another scope cannot recover it. If both were lost,
+use the authorized local `scripts/worker-control.mjs` CLI. Its default output is metadata only;
+`--stop` safely closes that worker with files and branch preserved. Do not print credentials into
+user-facing output. Existing pre-upgrade sessions without a credential record are not recoverable
+through this mechanism, and there is no keyless MCP control bypass.
+
 ## Corrections and integration
 
 A workstream receives the initial task and at most one correction. `pi_send` refuses a third

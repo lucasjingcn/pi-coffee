@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { PiEvent, PiSessionState, PiSessionStats, RpcResponse, UiRequest, UiResponse } from "./types.js";
 
@@ -43,6 +43,9 @@ export class PiRpcClient extends EventEmitter {
   private disposed = false;
   private streaming = false;
   private exited = false;
+  private stopPromise: Promise<void> | null = null;
+  private shutdownConfirmed = false;
+  private processGroup = false;
   private exitCode: number | null = null;
   private exitSignal: NodeJS.Signals | null = null;
 
@@ -61,7 +64,7 @@ export class PiRpcClient extends EventEmitter {
   }
 
   get hasExited(): boolean {
-    return this.exited;
+    return this.shutdownConfirmed;
   }
 
   getStderr(): string {
@@ -94,8 +97,11 @@ export class PiRpcClient extends EventEmitter {
       cwd: this.opts.cwd,
       env: { ...process.env, ...(this.opts.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],
+      // Own a separate group so cancellation also stops tools spawned by pi.
+      detached: process.platform !== "win32",
     });
     this.proc = proc;
+    this.processGroup = process.platform !== "win32";
 
     proc.stdout.on("data", (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr.on("data", (chunk: Buffer) => {
@@ -151,9 +157,8 @@ export class PiRpcClient extends EventEmitter {
       throw new Error(`pi rpc did not become ready: ${String(lastErr ?? "process exited")} [reason=${reason}, code=${this.exitCode}, signal=${this.exitSignal}]`);
     } catch (e) {
       // A failed start must not leak the child or leave probe work pending.
-      const child = this.proc;
       this.terminate(e as Error);
-      if (child && child.pid != null) await waitForExit(child, 2000);
+      await this.stop();
       throw e;
     }
   }
@@ -178,34 +183,84 @@ export class PiRpcClient extends EventEmitter {
 
   async stop(): Promise<void> {
     this.disposed = true;
-    const proc = this.proc;
-
-    // Reject any outstanding work immediately, even before the child exits.
     this.failAll(new Error("pi rpc stopped"));
-    if (!proc || this.exited) return;
-
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.stopProcess();
     try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
+      await this.stopPromise;
+    } catch (err) {
+      // Allow an operator to retry; never claim successful shutdown on timeout.
+      this.stopPromise = null;
+      throw err;
     }
+  }
 
-    await new Promise<void>((resolve) => {
-      if (this.exited) {
-        resolve();
-        return;
+  private async stopProcess(): Promise<void> {
+    const proc = this.proc;
+    if (!proc || proc.pid === undefined) {
+      this.shutdownConfirmed = true;
+      return;
+    }
+    const pid = proc.pid;
+    if (process.platform === "win32") {
+      // taskkill /T captures the descendant tree while its root still exists.
+      // If the root already exited, that evidence is unavailable: retain locks.
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        throw new Error("pi rpc cannot confirm Windows tool tree after root exit; retain locks");
       }
-      const timer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          /* ignore */
-        }
-        resolve();
-      }, 5000);
-      proc.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
+      await this.killWindowsTree(pid);
+      const deadline = Date.now() + 3000;
+      while (proc.exitCode === null && proc.signalCode === null && Date.now() < deadline) await sleep(25);
+      if (proc.exitCode === null && proc.signalCode === null) {
+        throw new Error("pi rpc Windows tree termination did not confirm root exit; retain locks");
+      }
+      this.shutdownConfirmed = true;
+      return;
+    }
+    const alive = (): boolean => {
+      if (!this.processGroup) return proc.exitCode === null && proc.signalCode === null;
+      try { process.kill(-pid, 0); return true; }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+        // EPERM is not proof of absence (and can be transient during reap).
+        if ((err as NodeJS.ErrnoException).code === "EPERM") return true;
+        throw err;
+      }
+    };
+    const signal = (value: NodeJS.Signals): void => {
+      try {
+        if (this.processGroup) process.kill(-pid, value);
+        else proc.kill(value);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+      }
+    };
+    const wait = async (ms: number): Promise<boolean> => {
+      const deadline = Date.now() + ms;
+      do {
+        if (!alive() && (proc.exitCode !== null || proc.signalCode !== null)) return true;
+        await sleep(25);
+      } while (Date.now() < deadline);
+      return !alive() && (proc.exitCode !== null || proc.signalCode !== null);
+    };
+    try { proc.stdin.end(); } catch { /* termination below still applies */ }
+    if (!await wait(1000)) {
+      signal("SIGTERM");
+      if (!await wait(1000)) {
+        signal("SIGKILL");
+        if (!await wait(3000)) throw new Error("pi rpc shutdown could not confirm worker and tool process exit; retain locks");
+      }
+    }
+    this.shutdownConfirmed = true;
+  }
+
+  private killWindowsTree(pid: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true }, (err) => {
+        // Do not expose command output: only successful native tree termination
+        // establishes descendant shutdown. Any failure must retain the locks.
+        if (err) reject(new Error("pi rpc Windows tool tree termination failed; retain locks"));
+        else resolve();
       });
     });
   }
@@ -311,11 +366,14 @@ export class PiRpcClient extends EventEmitter {
     if (this.exited) return;
     this.exited = true;
 
-    // A pipe failure is terminal for RPC even if the child is still alive.
-    if (this.proc?.exitCode === null && this.proc.signalCode === null) this.proc.kill("SIGKILL");
-
     this.failAll(err);
-    this.emit("exit", { code, signal });
+    // A protocol/pipe failure is not proof of process exit. Publish exit only
+    // after cancellation has also confirmed that the owned tools are gone.
+    void this.stop().then(() => {
+      this.emit("exit", { code, signal });
+    }, (stopError: Error) => {
+      this.emit("shutdown_failed", { message: stopError.message });
+    });
   }
 
   private rejectWaiters(err: Error): void {
@@ -583,20 +641,4 @@ export class PiRpcClient extends EventEmitter {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Resolve once a spawned child has exited, or after `timeoutMs`. */
-function waitForExit(proc: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
-      proc.removeListener("exit", done);
-      proc.removeListener("close", done);
-      resolve();
-    };
-    const timer = setTimeout(done, timeoutMs);
-    proc.once("exit", done);
-    proc.once("close", done);
-  });
 }

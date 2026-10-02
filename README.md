@@ -562,7 +562,7 @@ write locking. Run one daemon per state directory.
 | A worker starts and immediately errors out | Provider credentials are missing or invalid | Run `npm run doctor`, then update them with `npm run setup`. |
 | Acceptance commands fail on Windows | Git Bash is unavailable | Install Git for Windows and rerun `npm run doctor`. |
 | `git` complains about "dubious ownership" | The daemon user differs from the repo owner | The daemon already passes `safe.directory=*` to its own git calls; if you see this elsewhere, check your git version. |
-| Sessions show `stopped` after a restart | Workers do not survive a daemon restart | This is expected. Spawn new sessions; the transcript files are still on disk. |
+| Sessions show `stopped` or `error` after a restart | Shutdown confirmed or survivor ownership unresolved | Inspect handoff; respawn only after safe transfer. Transcript files are preserved. |
 | The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port. |
 | `codex mcp add` is not found | `codex` is not on the daemon user's `PATH` | Register the server manually in `~/.codex/config.toml`. |
 | A worker is blocked by a file claim | Another worker holds a conflicting claim | Use `coord_send` to coordinate, or `pi_release` if the claim is stale. |
@@ -668,3 +668,35 @@ Copyright 2026 lucasjing.
 pi (`@earendil-works/pi-coding-agent`) is a separate MIT-licensed program by Mario Zechner. This
 repository invokes it as an external tool rather than redistributing its code; the Docker image
 installs it from npm at build time. pi is not affiliated with, and does not endorse, this project.
+
+### Failure notices and safe handoff
+
+The daemon watchdog warns after 60 seconds without observable generation progress and stops a worker
+at the 10-minute silence deadline. Provider failures after retries settle and unexpected worker exits
+also produce a durable `handoff` notice. Local tools and pending questions are excluded. Model quality,
+model selection and user authorization remain unchanged; no extra paid retry is launched.
+
+A new notice wakes `pi_wait`, and status/list responses include it. Pass consumed `after_notice_ids`
+to avoid replaying a warning. Stateless MCP cannot wake a chat that is no longer executing; its owner
+must keep a scoped wait outstanding or read the persisted notice on return. `provider_wait` does not
+prove a provider-wide outage. Only take over when both `safeToTakeOver` and `locksReleased` are true.
+`stopping` is not a confirmed exit. Failed shutdown retains locks and blocks writes. POSIX owns a worker
+process group; Windows uses native tree termination. Processes escaping that group/tree are outside
+this guarantee; advisory coordination is not an OS sandbox.
+
+Delivered reports trigger `awaiting_acceptance`; review and finish read-only work promptly, and use the
+existing verification/integration gates for implementation. An idle worker without pending questions
+stops after 30 minutes with `owner_timeout`, preserving worktree, branch and report without claiming
+success. Configure `PI_COFFEE_WORKER_WARN_MS` (60000), `PI_COFFEE_WORKER_STALL_MS` (600000), and
+`PI_COFFEE_WORKER_IDLE_MS` (1800000); stall deadline must exceed warning deadline.
+
+New worker credentials persist separately in `~/.pi-coffee/control-credentials/` (directory0700,
+files0600), never in status/history. `pi_recover_control` requires the matching scope key. If both
+chat capabilities were lost, authorized local administration can use
+`node scripts/worker-control.mjs s<N>` (metadata only), or `--stop` (preserve files and branch).
+`--show-key` explicitly reveals sensitive credentials; never share them. Pre-upgrade workers with
+already-lost credentials have no automatic recovery or keyless MCP bypass.
+
+On restart, new worker PID/start-time/group ownership is checked before stopping survivors and releasing
+reservations. Missing/mismatched identity or orphan tools retain scope and acceptance locks. Windows
+crash-orphan recovery retains locks for local administration. Legacy sessions lack this new ownership proof.

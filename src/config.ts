@@ -38,6 +38,10 @@ export interface Config {
   worktreeTtlMin: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
+  /** Model silence warning, terminal silence deadline and owner idle deadline (milliseconds). */
+  workerWarnMs: number;
+  workerStallMs: number;
+  workerIdleMs: number;
 }
 
 /** Empty env vars count as unset so an exported "" doesn't shadow the default. */
@@ -78,7 +82,7 @@ function validateNumber(field: string, key: string, value: number, rules: Number
  */
 function resolveNumber(
   overrides: Partial<Config>,
-  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin",
+  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs",
   key: string,
   fallback: number,
   rules: NumberRules,
@@ -172,9 +176,16 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       max: Number.MAX_SAFE_INTEGER / 60000,
       description: "a finite number between 1 and MAX_SAFE_INTEGER/60000",
     }),
+    workerWarnMs: resolveNumber(overrides, "workerWarnMs", "PI_COFFEE_WORKER_WARN_MS", 60_000,
+      { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
+    workerStallMs: resolveNumber(overrides, "workerStallMs", "PI_COFFEE_WORKER_STALL_MS", 600_000,
+      { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
+    workerIdleMs: resolveNumber(overrides, "workerIdleMs", "PI_COFFEE_WORKER_IDLE_MS", 1_800_000,
+      { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
   };
 
+  if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");
   // Apply caller overrides last; undefined means "keep the default".
   const defined = Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined));
   return { ...base, ...defined };

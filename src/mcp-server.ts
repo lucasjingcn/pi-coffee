@@ -42,7 +42,7 @@ function compactMeta(m: SessionMeta) {
     tests_owned_by_codex: m.testsOwnedByCodex ?? null,
     output_tokens: m.tokens?.output ?? 0,
     lastEntryId: m.lastEntryId,
-    lastText: m.lastText?.slice(0, 800),
+    lastText: m.lastText,
     extension: m.extension ?? false,
     acceptance: m.acceptance ?? null,
     verification: m.verification ?? null,
@@ -58,6 +58,9 @@ function compactMeta(m: SessionMeta) {
       options: q.options,
     })),
     error: m.error,
+    handoff: m.handoff,
+    shutdown_unconfirmed: m.shutdownUnconfirmed ?? false,
+    recovery: m.handoff ? { worktree: m.worktree, branch: m.branch, report_available: !!m.lastText } : undefined,
   };
 }
 
@@ -83,6 +86,9 @@ export function summaryMeta(m: SessionMeta) {
     integrated: m.integration !== undefined,
     pendingQuestions: m.pendingQuestions,
     error: m.error,
+    handoff: m.handoff,
+    shutdown_unconfirmed: m.shutdownUnconfirmed ?? false,
+    recovery: m.handoff ? { worktree: m.worktree, branch: m.branch, report_available: !!m.lastText } : undefined,
   };
 }
 
@@ -290,6 +296,8 @@ export function buildServer(coord: Coordinator): McpServer {
         acceptanceCommand: args.acceptance_command,
         controlKeyHash: createHash("sha256").update(controlKey).digest("hex"),
         scopeKeyHash: scopeHash,
+        controlKey,
+        scopeKey,
       });
 
       const out: Record<string, unknown> = { ...compactMeta(meta), control_key: controlKey, scope_key: scopeKey };
@@ -379,19 +387,29 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Wait for workers",
       description:
-        "Block until all listed sessions settle (until=settled), or until any worker asks a question (until=question). Returns concise snapshots by default. Prefer timeouts <= 120000ms and re-poll.",
+        "Block until all listed sessions settle (until=settled), any worker asks a question (until=question), or a new daemon handoff notice requires attention. Returns concise snapshots by default. Prefer timeouts <= 120000ms and re-poll.",
       inputSchema: {
         session_ids: z.array(z.string()).min(1),
         until: z.enum(["settled", "question"]).optional(),
         timeout_ms: z.number().int().min(0).max(120_000).optional(),
         detail: z.enum(["summary", "full"]).optional(),
+        after_notice_ids: z.array(z.string()).optional().describe("Previously consumed handoff notice IDs; new notices wake this wait even if workers are still working"),
       },
     },
-    async ({ session_ids, until, timeout_ms, detail }) => {
-      const res = await coord.wait(session_ids, until ?? "settled", Math.min(timeout_ms ?? 60_000, 120_000));
+    async ({ session_ids, until, timeout_ms, detail, after_notice_ids }) => {
+      const res = await coord.wait(session_ids, until ?? "settled", Math.min(timeout_ms ?? 60_000, 120_000), after_notice_ids);
       return json({ timedOut: res.timedOut, sessions: res.sessions.map((m) => sessionView(m, detail ?? "summary")) });
     },
   );
+
+  server.registerTool("pi_recover_control", {
+    title: "Recover this scope's worker control",
+    description: "Explicitly recover a persisted worker control key using this chat's scope_key. Does not expose other scopes or legacy credentials; if both keys were lost, use the protected local worker-control CLI. Never display recovered keys to users.",
+    inputSchema: { session_id: z.string(), scope_key: z.string().min(1) },
+  }, async ({ session_id, scope_key }) => {
+    const keys = await coord.recoverControl(session_id, scope_key);
+    return json({ session_id, control_key: keys.controlKey, scope_key: keys.scopeKey });
+  });
 
   server.registerTool(
     "pi_stop",
@@ -402,6 +420,7 @@ export function buildServer(coord: Coordinator): McpServer {
         session_id: z.string(),
         control_key: z.string().optional(),
         remove_worktree: z.boolean().optional(),
+        preserve_worktree: z.boolean().optional().describe("Preserve files and checkout even when automatic cleanup is enabled"),
         delete_branch: z.boolean().optional().describe("Also delete the worker branch (default false: keep it)"),
         outcome: z
           .enum(["success_first", "success_second", "taken_over", "abandoned"])
@@ -410,11 +429,11 @@ export function buildServer(coord: Coordinator): McpServer {
         note: z.string().optional(),
       },
     },
-    async ({ session_id, control_key, remove_worktree, delete_branch, outcome, note }) => {
+    async ({ session_id, control_key, remove_worktree, preserve_worktree, delete_branch, outcome, note }) => {
       coord.assertControl(session_id, control_key);
       if (outcome) await coord.setOutcome(session_id, outcome, note);
       if (!outcome || remove_worktree) {
-        await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch });
+        await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch, preserveWorktree: preserve_worktree });
       }
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
     },

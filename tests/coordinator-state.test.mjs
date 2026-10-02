@@ -34,9 +34,9 @@ test('an empty abandoned worker auto-cleans its stopped worktree',async()=>fixtu
  assert.equal(existsSync(s.worktree),false);
  assert.equal(c.snapshot(s.id).outcome,'abandoned');
 }));
-test('restart clears locks belonging to workers that cannot survive daemon restart',async()=>fixture(async(c,config)=>{
+test('restart clears locks only after worker shutdown has been confirmed',async()=>fixture(async(c,config)=>{
  const s=await c.spawn({spec:{goal:'one',scope:['a']},acceptanceFiles:[{path:'tests/one',content:'test'}]});
- c.claim(s.id,['extra'],'rw');await delay(650);
+ c.claim(s.id,['extra'],'rw');await c.stop(s.id);await c.flush();
  const restarted=new Coordinator(config);await restarted.init();
  try{assert.deepEqual(restarted.locksList(),[]);}finally{await restarted.stopAll();}
 }));

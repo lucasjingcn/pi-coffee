@@ -482,7 +482,7 @@ daemon。
 | worker 一起来就报错退出 | provider 凭据缺失或无效 | 运行 `npm run doctor`，再用 `npm run setup` 更新凭据。 |
 | Windows 上验收命令失败 | 找不到 Git Bash | 安装 Git for Windows，再运行 `npm run doctor`。 |
 | git 抱怨 "dubious ownership" | daemon 用户和仓库属主不一致 | daemon 给自己的 git 调用已经加了 `safe.directory=*`；如果在别处看到，检查 git 版本。 |
-| 重启后会话变成 `stopped` | worker 不会跨 daemon 重启存活 | 这是预期行为，重新 spawn；会话记录文件还在。 |
+| 重启后会话变成 `stopped` 或 `error` | 已确认停止，或遗留执行尚未确认停止 | 检查 handoff；只有安全移交后才重新派发，会话记录保留。 |
 | daemon 启动时报 `EADDRINUSE` | 端口被占用 | 把 `PI_COFFEE_PORT` 换成一个空闲端口。 |
 | 找不到 `codex mcp add` | `codex` 不在 daemon 用户的 `PATH` 里 | 手动写 `~/.codex/config.toml`。 |
 | worker 被文件声明挡住 | 另一个 worker 占着冲突的声明 | 用 `coord_send` 协调，声明确实过期就用 `pi_release`。 |
@@ -568,8 +568,8 @@ daemon 状态，删除前先保留需要的数据。
 
 ## 已知限制
 
-- worker 不会跨 daemon 重启存活。关闭 daemon 就会把它们停掉，重启后不会自动拉起。会话文件会留着，
-  但需要你重新 spawn。
+- daemon 重启不恢复模型会话。正常关闭会停止 worker；崩溃遗留执行须核对所有权并确认停止，
+  否则保留锁。会话文件保留，安全收尾后重新派发。
 - 文件声明是建议性的，而且只覆盖能识别出来的字面量目标。
 - worktree 模型假设一个分支只对应一个 worker。把同一个分支强行塞进两个 worktree 不在支持范围内。
 
@@ -582,3 +582,32 @@ Apache License 2.0，见 [LICENSE](LICENSE)。
 pi（`@earendil-works/pi-coding-agent`）是 Mario Zechner 的独立 MIT 项目。本仓库只是把它当作外部
 程序调用，不再分发其代码；Docker 镜像在构建时从 npm 安装它。pi 与本项目没有隶属关系，也不为本项目
 背书。
+
+### 故障通知与安全接管
+
+worker 静默不会无限占用范围：默认 60 秒没有生成进展发出 `provider_wait`，10 分钟仍无进展
+则停止执行并通知主 agent 接管。服务方报错、重试耗尽、意外退出也会触发收尾。本地工具执行
+及待回答问题不计为服务方静默；不换模型、不降低质量，也不自动发起额外付费重试。
+
+`pi_wait` 会被新 `handoff` 通知唤醒，`pi_status` / `pi_list` 也返回通知。后续等待可传
+`after_notice_ids` 跳过已处理的通知。当前无常驻推送通道，已经停止执行的 Codex 聊天不会被
+主动唤醒；通知会持久化供恢复后读取。`provider_wait` 只证明暂无生成进展，不证明服务方全站故障。
+
+只有 `safeToTakeOver=true` 且 `locksReleased=true` 才可接管。`stopping` 表示停止尚未确认；
+停止失败时返回 `shutdown_failed`，保留锁并禁止 worker 写入。POSIX 停止整个 worker 进程组；
+Windows 使用原生进程树停止。主动脱离进程组/进程树的程序不在此保证范围内，这不是 OS 沙箱。
+
+完成的调查会提示 `awaiting_acceptance`，主 agent 应验收并调用 `pi_finish`；实现仍需原有验证
+与整合门禁。没有待回答问题的 worker 空闲 30 分钟后停止并释放锁，标记 `owner_timeout`，
+保留工作树、分支、报告和诊断，不自动算成功。可配置 `PI_COFFEE_WORKER_WARN_MS`（60000）、
+`PI_COFFEE_WORKER_STALL_MS`（600000）、`PI_COFFEE_WORKER_IDLE_MS`（1800000）；静默期限须大于提醒期限。
+
+新会话的控制凭据保存于 `~/.pi-coffee/control-credentials/`，目录权限 0700、文件权限 0600，
+不进入状态或报告。仍持有本聊天 `scope_key` 时可用 `pi_recover_control` 恢复 worker 控制；
+两者都丢失时，本机管理员可运行 `node scripts/worker-control.mjs s<N>` 查看恢复文件位置，或
+加 `--stop` 结束指定 worker 并保留文件和分支。`--show-key` 才会显式输出敏感凭据，禁止分享。
+升级前已丢失凭据的旧会话不会自动恢复，也没有免密控制入口。
+
+重启恢复会核对新 worker 的 PID、启动时间与进程组，再停止已确认属于该 worker 的遗留执行。
+所有权不符、只有孤儿工具、或尚未持久化进程身份时保留范围及验收锁，拒绝不安全接管；
+Windows 的崩溃后孤儿恢复目前保留锁并要求本机管理员处理。旧会话没有新进程记录，不能获得这项证明。

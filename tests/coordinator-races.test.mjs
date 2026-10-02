@@ -156,7 +156,7 @@ test('worker exit releases acceptance locks exactly once', async () => fixture(a
   assert.equal(c.snapshot(second.id).status, 'idle');
 }));
 
-test('normal stop rejects new work before stats finish and records no false exit error', async () => fixture(async c => {
+test('normal stop blocks writes while stopping and records no false exit error', async () => fixture(async c => {
   const worker = await c.spawn({spec: {goal: 'one', scope: ['a']}});
   const client = c.get(worker.id).client;
   let releaseStats;
@@ -165,8 +165,8 @@ test('normal stop rejects new work before stats finish and records no false exit
   client.stop = async () => { client.emit('exit', {code: 0, signal: null}); };
   const stopping = c.stop(worker.id);
   try {
-    assert.equal(c.snapshot(worker.id).status, 'stopped');
-    await assert.rejects(c.send(worker.id, 'late message'), /stopped/);
+    assert.equal(c.snapshot(worker.id).status, 'stopping');
+    await assert.rejects(c.send(worker.id, 'late message'), /stopping/);
     assert.throws(() => c.authorizeWrite(worker.id), /not writable/);
   } finally { releaseStats(); await stopping; }
   assert.equal(c.snapshot(worker.id).error, undefined);

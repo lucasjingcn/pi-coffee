@@ -150,6 +150,8 @@ test('terminal error is emitted at most once even if pipes fail repeatedly', {ti
     c.proc.stdin.emit('error', new Error('EPIPE'));
     c.proc.stdout.emit('error', new Error('EIO'));
     c.proc.stdin.emit('error', new Error('EPIPE again'));
+    await c.stop();
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(exits, 1);
   });
 });

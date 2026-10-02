@@ -1,6 +1,6 @@
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { BoardEntry, MailMessage, MessageKind } from "./mailbox.js";
-import type { Outcome, SessionMeta, SessionStatus } from "./manager.js";
+import { HANDOFF_KINDS, type Outcome, type SessionMeta, type SessionStatus } from "./manager.js";
 import { validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { WORKSTREAM_PURPOSES, type DelegationSpec } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReviewInput } from "./candidate-review.js";
@@ -21,7 +21,7 @@ export interface LoadResult {
 }
 
 const MESSAGE_KINDS = new Set<MessageKind>(["note", "question", "answer", "broadcast"]);
-const STATUSES = new Set<SessionStatus>(["starting", "idle", "working", "error", "stopped"]);
+const STATUSES = new Set<SessionStatus>(["starting", "idle", "working", "error", "stopping", "stopped"]);
 const OUTCOMES = new Set<Outcome>(["success_first", "success_second", "taken_over", "abandoned"]);
 
 type ReadResult = { kind: "ok"; raw: string } | { kind: "missing" } | { kind: "error"; error: unknown };
@@ -187,6 +187,32 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
   if (entry.scopeKeyHash !== undefined
     && (typeof entry.scopeKeyHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.scopeKeyHash))) {
     fail(file, `${at}.scopeKeyHash is invalid`);
+  }
+
+  if (entry.shutdownUnconfirmed !== undefined && typeof entry.shutdownUnconfirmed !== "boolean")
+    fail(file, `${at}.shutdownUnconfirmed is invalid`);
+  if (entry.lockRepoIdentity !== undefined && (typeof entry.lockRepoIdentity !== "string" || !entry.lockRepoIdentity))
+    fail(file, `${at}.lockRepoIdentity is invalid`);
+  if (entry.workerProcess !== undefined) {
+    const process = entry.workerProcess;
+    if (!isRecord(process) || !Number.isSafeInteger(process.pid) || (process.pid as number) <= 1
+      || typeof process.platform !== "string" || !process.platform || typeof process.started !== "string" || !process.started.trim())
+      fail(file, `${at}.workerProcess is invalid`);
+  }
+  if (entry.heldLocks !== undefined && (!Array.isArray(entry.heldLocks) || !entry.heldLocks.every(lock =>
+    isRecord(lock) && typeof lock.path === "string" && typeof lock.sessionId === "string"
+    && ["rw", "ro"].includes(lock.mode as string) && typeof lock.ts === "number" && Number.isFinite(lock.ts)
+    && (lock.repo === undefined || typeof lock.repo === "string")))) fail(file, `${at}.heldLocks is invalid`);
+
+  if (entry.handoff !== undefined) {
+    const notice = entry.handoff;
+    if (!isRecord(notice) || typeof notice.id !== "string" || !/^[a-f0-9]{24}$/.test(notice.id)
+      || !HANDOFF_KINDS.includes(notice.kind as typeof HANDOFF_KINDS[number])
+      || typeof notice.at !== "number" || !Number.isFinite(notice.at)
+      || typeof notice.safeToTakeOver !== "boolean" || typeof notice.locksReleased !== "boolean"
+      || !["wait_or_stop", "accept_and_finish", "take_over", "resolve_shutdown"].includes(notice.action as string)
+      || (notice.safeToTakeOver && (!notice.locksReleased || !["stopped", "error"].includes(entry.status as string))))
+      fail(file, `${at}.handoff is invalid`);
   }
 
   if (entry.spec !== undefined) {
