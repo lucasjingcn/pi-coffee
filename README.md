@@ -503,6 +503,7 @@ Everything is configured through environment variables.
 | `PI_COFFEE_AUTO_CLEAN` | `1` | Remove finished workers' worktrees automatically (branches are kept). |
 | `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | Minutes a finished, idle worker is kept before the sweeper cleans it. |
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
+| `PI_COFFEE_WORKER_PLUGINS` | *(empty)* | Comma-separated glob allowlist of global plugins a worker may inherit: npm/git package sources, external extension entries, and MCP server names. Empty means none; `*` restores full inheritance. Core `builtin:` extensions always survive. |
 | `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
@@ -520,12 +521,16 @@ or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and
 
 Each worker snapshots the global pi agent configuration into a private `sessions/<id>/agent`
 directory (0700; copied files 0600). Settings and credentials are read with pi's lock protocol and
-bounded asynchronous retries. Worker settings/auth/model files are independent; installed resource
-directories remain linked, and relative extension/skill/prompt/theme/package paths retain their
-original targets. No extensions or context are disabled to accelerate startup. Changes to global
-defaults or login credentials apply to newly spawned workers. A configuration-load error fails
-startup explicitly instead of accepting pi's fallback defaults. `/internal/health` identifies this
-policy as `private-agent-config-v1` so an old running daemon can be distinguished from a rebuilt one.
+bounded asynchronous retries. Worker settings/auth/model files are independent; skill, prompt, and
+theme directories remain linked, and relative extension/skill/prompt/theme/package paths retain
+their original targets. Global plugins are inherited only when `PI_COFFEE_WORKER_PLUGINS` allows
+them: packages, external extension entries, and MCP servers are denied by default, so an
+interactive-only extension cannot change worker behavior or let a worker spawn nested sessions.
+Core `builtin:` extensions, credentials, and context are never filtered for speed. Changes to
+global defaults or login credentials apply to newly spawned workers. A configuration-load error
+fails startup explicitly instead of accepting pi's fallback defaults. `/internal/health` identifies
+this policy as `private-agent-config-v1` so an old running daemon can be distinguished from a
+rebuilt one.
 
 Daemon state lives in `state.json` inside `PI_COFFEE_DATA_DIR`. Writes are serialized and atomic: a
 unique temp file is renamed into place, and the previous validated snapshot is kept as

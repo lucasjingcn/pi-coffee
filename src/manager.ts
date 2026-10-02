@@ -748,7 +748,7 @@ export class Coordinator {
     this.wireEvents(rt);
 
     try {
-      await prepareWorkerAgentDir(workerAgentDir);
+      await prepareWorkerAgentDir(workerAgentDir, undefined, this.config.workerPlugins);
       meta.shutdownUnconfirmed = true;
       meta.lockRepoIdentity = repoIdentity;
       // Durable ownership precedes spawn; a crash before PID capture fails closed on recovery.

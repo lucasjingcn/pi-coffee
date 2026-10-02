@@ -38,6 +38,12 @@ export interface Config {
   worktreeTtlMin: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
+  /**
+   * Glob allowlist of global plugins workers may inherit: npm/git package sources,
+   * external extension entries, and MCP server names. Empty denies all; `["*"]`
+   * inherits everything. Core `builtin:` extensions always survive.
+   */
+  workerPlugins: string[];
   /** Model silence warning, terminal silence deadline and owner idle deadline (milliseconds). */
   workerWarnMs: number;
   workerStallMs: number;
@@ -121,6 +127,23 @@ function resolveBoolean(
   invalid(field, key, "expected 0 or 1");
 }
 
+/** Plugin allowlist env var: comma-separated globs; `*` allows everything. */
+function resolvePlugins(overrides: Partial<Config>, field: "workerPlugins", key: string, fallback: string[]): string[] {
+  const override = overrides[field];
+  if (override !== undefined) {
+    if (!Array.isArray(override) || override.some(value => typeof value !== "string" || value.trim() === "")) {
+      invalid(field, key, "expected a list of non-empty pattern strings");
+    }
+    return (override as string[]).map(value => value.trim());
+  }
+
+  const raw = env(key);
+  if (raw === undefined) return fallback;
+  const patterns = raw.split(",").map(value => value.trim()).filter(value => value !== "");
+  if (patterns.length === 0) invalid(field, key, "expected comma-separated patterns (use * to allow all)");
+  return [...new Set(patterns)];
+}
+
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   // dataDir is resolved first because workspaceRoot defaults to a subdirectory of it.
   const dataDir =
@@ -183,6 +206,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     workerIdleMs: resolveNumber(overrides, "workerIdleMs", "PI_COFFEE_WORKER_IDLE_MS", 1_800_000,
       { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
+    workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),
   };
 
   if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");

@@ -433,6 +433,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `PI_COFFEE_AUTO_CLEAN` | `1` | 自动移除已完成 worker 的 worktree（保留分支）。 |
 | `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | 已完成且空闲的 worker 在被清理前保留多少分钟。 |
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | 显式 `pi_stop` 的 `delete_branch` 默认值。`pi_gc` 不看这个。 |
+| `PI_COFFEE_WORKER_PLUGINS` | *(空)* | worker 可继承的全局插件白名单（逗号分隔 glob）：npm/git 包、外部扩展条目、MCP 服务器名。留空表示一律不继承；`*` 恢复全部继承。pi 自带的 `builtin:` 扩展始终保留。 |
 | `PI_COFFEE_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
@@ -447,9 +448,11 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 每个 worker 在私有的 `sessions/<id>/agent` 目录保留全局 pi 配置快照（目录 0700，复制文件 0600）。
 读取 settings 和凭据时使用 pi 相同的锁协议及有界异步重试；worker 的配置、认证与模型文件彼此独立。
-已安装的资源目录仍指向相同内容，扩展、技能、提示词、主题与包的相对路径保持原目标，不为启动加速
-禁用能力或上下文。全局默认设置或登录凭据的变化作用于新启动的 worker。配置加载失败会明确停止，
-不会接受 pi 回退到默认配置后的“启动成功”。`/internal/health` 的 `workerStartupPolicy` 为
+技能、提示词、主题目录仍指向相同内容，扩展、技能、提示词、主题与包的相对路径保持原目标。全局插件
+仅当 `PI_COFFEE_WORKER_PLUGINS` 允许时才继承：包、外部扩展条目和 MCP 服务器默认一律不继承，
+避免只在交互会话使用的插件改变 worker 行为，或让 worker 再开嵌套会话。pi 自带的 `builtin:` 扩展、
+凭据与上下文不会为启动速度被裁掉。全局默认设置或登录凭据的变化作用于新启动的 worker。配置加载
+失败会明确停止，不会接受 pi 回退到默认配置后的“启动成功”。`/internal/health` 的 `workerStartupPolicy` 为
 `private-agent-config-v1` 时，说明后台已加载这项启动策略，而非仅完成本地构建。
 
 daemon 状态存在 `PI_COFFEE_DATA_DIR` 下的 `state.json`。写入是串行且原子的：先写唯一临时文件再 rename，

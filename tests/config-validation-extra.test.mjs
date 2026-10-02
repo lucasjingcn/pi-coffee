@@ -58,3 +58,24 @@ test("overriding dataDir derives default workspaceRoot under effective dataDir",
     }
   }
 });
+
+test("workerPlugins parses env and overrides; empty denies by default", () => {
+  const key = "PI_COFFEE_WORKER_PLUGINS";
+  const saved = process.env[key];
+  delete process.env[key];
+  try {
+    assert.deepEqual(loadConfig().workerPlugins, []);
+    process.env[key] = "npm:@scope/a, extensions/keep.js , npm:@scope/a";
+    assert.deepEqual(loadConfig().workerPlugins, ["npm:@scope/a", "extensions/keep.js"]);
+    process.env[key] = ",";
+    assert.throws(() => loadConfig(), new RegExp(key + "|workerPlugins"));
+    delete process.env[key];
+    process.env[key] = "bogus";
+    assert.deepEqual(loadConfig({ workerPlugins: ["*"] }).workerPlugins, ["*"]);
+    assert.throws(() => loadConfig({ workerPlugins: [""] }), new RegExp(key + "|workerPlugins"));
+    delete process.env[key];
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});

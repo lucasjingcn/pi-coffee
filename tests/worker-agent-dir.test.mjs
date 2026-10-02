@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, writeFile, readFile, rm, stat, realpath} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, rm, stat, realpath, readdir} from 'node:fs/promises';
 import {join, dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareWorkerAgentDir} from '../dist/worker-agent-dir.js';
@@ -56,7 +56,7 @@ test('relative, external and filtered resources resolve to the same installed co
   await put(join(root,'package','index.js'),'export default () => {};');
   await put(join(source,'AGENTS.md'),'preserve full instructions');
   await put(join(source,'settings.json'),JSON.stringify({extensions:['extensions','../external/extra.js','!extensions/omit.js','-builtin:fixture'],packages:[{source:'../package',extensions:['index.js']}],skills:['skills'],prompts:['prompts'],themes:['themes']}));
-  const target=await prepareWorkerAgentDir(join(root,'worker'),source);
+  const target=await prepareWorkerAgentDir(join(root,'worker'),source,['*']);
   async function resources(agentDir) {
     const settingsManager=SettingsManager.create(cwd,agentDir);
     const paths=await new DefaultPackageManager({cwd,agentDir,settingsManager,builtinExtensions:['fixture']}).resolve();
@@ -83,4 +83,41 @@ test('startup refuses configuration fallback and classifies locks without exposi
   const client=new PiRpcClient({cwd,piBin:bin});
   try { await assert.rejects(client.start(1500),e=>e.message.includes('settings_lock_contention')&&!e.message.includes('secret-fixture')); }
   finally { await client.stop(); }
+}));
+
+test('plugin policy denies global packages, extension entries and MCP servers by default', async () => fixture(async ({root,source}) => {
+  await put(join(source,'extensions','ext.js'),'export default () => {};');
+  await put(join(source,'skills','s','SKILL.md'),'---\nname: s\ndescription: fixture\n---\nx');
+  await put(join(source,'settings.json'),JSON.stringify({
+    packages:['npm:@scope/plugin',{source:'git:github.com/a/b'}],
+    extensions:['extensions','!builtin:fixture'],
+    skills:['skills'],
+  }));
+  await put(join(source,'mcp.json'),JSON.stringify({mcpServers:{daemon:{command:'x'},safe:{command:'y'}}}));
+  const target=await prepareWorkerAgentDir(join(root,'worker'),source);
+  const settings=JSON.parse(await readFile(join(target,'settings.json'),'utf8'));
+  assert.deepEqual(settings.packages,[]);
+  assert.deepEqual(settings.extensions,['!builtin:fixture']);
+  assert.deepEqual(settings.skills,[join(target,'skills')]);
+  await assert.rejects(stat(join(target,'mcp.json')));
+  assert.deepEqual(await readdir(join(target,'extensions')),[]);
+  assert.equal(await readFile(join(target,'skills','s','SKILL.md'),'utf8'),'---\nname: s\ndescription: fixture\n---\nx');
+}));
+
+test('plugin policy mirrors only allowlisted packages, extension entries and MCP servers', async () => fixture(async ({root,source}) => {
+  await put(join(source,'extensions','keep.js'),'export default () => {};');
+  await put(join(source,'extensions','drop.js'),'export default () => {};');
+  await put(join(source,'settings.json'),JSON.stringify({
+    packages:['npm:@scope/keep','npm:@scope/drop'],
+    extensions:['extensions/keep.js','extensions/drop.js'],
+  }));
+  await put(join(source,'mcp.json'),JSON.stringify({mcpServers:{keep:{command:'x'},drop:{command:'y'}}}));
+  const target=await prepareWorkerAgentDir(join(root,'worker'),source,['npm:@scope/keep','extensions/keep.js','keep']);
+  const settings=JSON.parse(await readFile(join(target,'settings.json'),'utf8'));
+  assert.deepEqual(settings.packages,['npm:@scope/keep']);
+  assert.equal(settings.extensions.length,1);
+  assert.ok(settings.extensions[0].endsWith('keep.js'));
+  assert.deepEqual(JSON.parse(await readFile(join(target,'mcp.json'),'utf8')).mcpServers,{keep:{command:'x'}});
+  assert.deepEqual(await readdir(join(target,'extensions')),['keep.js']);
+  await assert.rejects(stat(join(target,'extensions','drop.js')));
 }));
