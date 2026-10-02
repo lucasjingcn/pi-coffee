@@ -200,9 +200,10 @@ To install or repair only this command without restarting the daemon, run `npm r
 This one command works in a macOS/Linux shell or Windows PowerShell. It:
 
 - runs `npm install` and `npm run build`;
-- installs the `pi-orchestrator` skill for Codex;
-- registers the **stdio proxy** as the Codex MCP server (the proxy forwards to the HTTP daemon and
-  reconnects on its own, so restarting the daemon does not break the Codex session);
+- installs the `pi-orchestrator` skill for Codex and other Agent Skills clients (`~/.agents/skills`);
+- registers the **stdio proxy** as the MCP server with Codex and the installed pi CLI (the proxy
+  forwards to the HTTP daemon and reconnects on its own, so restarting the daemon does not break
+  the session);
 - asks for your provider, API key, and model, and stores them in the user's `.pi-coffee/env` file;
 - installs and starts a background daemon for the current user at login (LaunchAgent, systemd user service, or Windows Scheduled Task), then checks its health.
 
@@ -224,7 +225,10 @@ node scripts/check-health.mjs
 ```
 
 Restart Codex. It connects, picks up the orchestration instructions, loads the `pi-orchestrator`
-skill, and the `pi_*` tools appear. On Windows the background process starts when this user signs in; it does not run before login.
+skill, and the `pi_*` tools appear. A new pi session gets the same skill from `~/.agents/skills`
+and the `pi_*` tools from the MCP server the installer registered there; other Agent Skills clients
+load the skill after a reload or a new session. On Windows the background process starts when this
+user signs in; it does not run before login.
 
 ## Pointing Codex at the daemon
 
@@ -235,6 +239,13 @@ add the server in `~/.codex/config.toml` and restart Codex. The local proxy read
 [mcp_servers.pi]
 command = "node"            # an absolute path to node is recommended
 args = ["/absolute/path/to/pi-coffee/scripts/proxy.mjs"]
+```
+
+For pi, the installer registers the same server; repair or add it manually with:
+
+```bash
+pi mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolated pi coding workers" \
+  -- /absolute/path/to/node /absolute/path/to/pi-coffee/scripts/proxy.mjs
 ```
 
 If the daemon runs on another machine, connect to it directly and pass a token:
@@ -586,9 +597,10 @@ not evidence of a passing Windows installation. The pinned pi dependency is also
 worker CLI. CI does not log in to or call a model provider.
 
 The orchestration policy lives only in `codex/pi-orchestrator/SKILL.md`: the runtime prompt loads
-its body and the installer copies the same file. Keep `codex/` with `src/` and `dist/` in deployments.
+its body and the installer copies the same file into the Codex skill directory and the shared
+`~/.agents/skills` location. Keep `codex/` with `src/` and `dist/` in deployments.
 Rerunning `npm run install:local` after workers finish updates the installed skill and background
-startup; restart Codex to load the updated policy.
+startup; restart Codex (or reload the other client) to load the updated policy.
 
 ### Repository layout
 
@@ -598,7 +610,7 @@ extensions/        worker-side pi extension (claims, inbox, coord_* tools)
 tests/             offline test suite (node --test)
 scripts/           setup, startup, health, smoke, and status helpers
 deploy/            systemd, launchd, and Windows task installers
-codex/             Codex skill installed by npm run install:local
+codex/             orchestrator skill installed by npm run install:local (Codex + ~/.agents/skills)
 Dockerfile         image with Node, git, and pi bundled
 docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker

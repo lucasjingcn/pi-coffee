@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install pi-coffee: build it, install the Codex skill, register the MCP server, and
+# Install pi-coffee: build it, install the orchestrator skill, register the MCP server, and
 # set up pi so workers can authenticate without a separate `/login` step.
 # Run this as the same user that runs your MCP client.
 set -euo pipefail
@@ -40,10 +40,21 @@ npm install
 echo "==> build"
 npm run build
 
-# --- Codex skill -----------------------------------------------------------
+# --- agent skills ----------------------------------------------------------
+# Codex reads its own directory; pi and other Agent Skills clients read the shared
+# ~/.agents/skills location. Install the canonical file for both.
 echo "==> install Codex skill -> $CODEX_HOME_DIR/skills/pi-orchestrator"
 mkdir -p "$CODEX_HOME_DIR/skills/pi-orchestrator"
 cp "$DIR/codex/pi-orchestrator/SKILL.md" "$CODEX_HOME_DIR/skills/pi-orchestrator/SKILL.md"
+
+AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+echo "==> install shared agent skill -> $AGENTS_SKILLS_DIR/pi-orchestrator"
+# Replace a linked directory with a real copy so the file copy below stays safe.
+if [ -L "$AGENTS_SKILLS_DIR/pi-orchestrator" ]; then
+  rm "$AGENTS_SKILLS_DIR/pi-orchestrator"
+fi
+mkdir -p "$AGENTS_SKILLS_DIR/pi-orchestrator"
+cp "$DIR/codex/pi-orchestrator/SKILL.md" "$AGENTS_SKILLS_DIR/pi-orchestrator/SKILL.md"
 
 # --- register the MCP server ----------------------------------------------
 echo "==> register MCP server with Codex (stdio proxy reads the same setup file as the daemon)"
@@ -57,6 +68,12 @@ codex mcp add pi -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
 
 echo "==> install user pi command"
 npm run install:cli
+
+# The installer ships pi, so register the same MCP server there too.
+echo "==> register MCP server with pi"
+PI_BIN="$HOME/.local/bin/pi"
+"$PI_BIN" mcp remove pi >/dev/null 2>&1 || true
+"$PI_BIN" mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolated pi coding workers" -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
 
 # --- provider credentials --------------------------------------------------
 # pi reads API keys from the environment, so storing a key and a model id here
@@ -78,4 +95,4 @@ case "$(uname -s)" in
 esac
 
 node "$DIR/scripts/check-health.mjs"
-echo "Done. Restart Codex to load the pi_* tools."
+echo "Done. Restart Codex or start a new pi session to load the pi_* tools."

@@ -165,9 +165,9 @@ npm run install:local
 这条命令在 macOS/Linux 终端或 Windows 10+ PowerShell 中都可用。它会：
 
 - 跑 `npm install` 和 `npm run build`；
-- 给 Codex 安装 `pi-orchestrator` skill；
-- 把 **stdio 代理**注册成 Codex 的 MCP server（代理转发到 HTTP daemon 并自动重连，所以重启 daemon
-  不会弄断 Codex 会话）；
+- 给 Codex 及其他 Agent Skills 客户端安装 `pi-orchestrator` skill（共享目录 `~/.agents/skills`）；
+- 把 **stdio 代理**注册成 Codex 和已安装 pi CLI 的 MCP server（代理转发到 HTTP daemon 并自动重连，
+  所以重启 daemon 不会弄断会话）；
 - 从 npm 安装固定版本的 pi；
 - 问你要 provider、API key 和 model，写进当前用户的 `.pi-coffee/env`；
 - 安装并启动当前用户的登录后台任务（macOS LaunchAgent、Linux systemd 用户服务或 Windows 计划任务），再检查健康状态。
@@ -189,6 +189,8 @@ node scripts/check-health.mjs
 ```
 
 然后重启 Codex。它会连上来、拿到编排说明、加载 `pi-orchestrator` skill，`pi_*` 工具随即出现。
+新的 pi 会话会从 `~/.agents/skills` 拿到同一份 skill，并从安装器注册的 MCP server 拿到 `pi_*` 工具；
+其他 Agent Skills 客户端会在重载或新会话时加载 skill。
 Windows 后台任务在当前用户登录后启动；未登录时不会运行。
 
 ## 让 Codex 连上 daemon
@@ -200,6 +202,13 @@ Windows 后台任务在当前用户登录后启动；未登录时不会运行。
 [mcp_servers.pi]
 command = "node"            # 建议写成 node 的绝对路径
 args = ["/absolute/path/to/pi-coffee/scripts/proxy.mjs"]
+```
+
+pi 端安装器会注册同一个 server；手工修复或补装：
+
+```bash
+pi mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolated pi coding workers" \
+  -- /absolute/path/to/node /absolute/path/to/pi-coffee/scripts/proxy.mjs
 ```
 
 daemon 在别的机器上，就直接连，并带上 token：
@@ -504,9 +513,9 @@ GitHub Actions 在 Linux/macOS 上用 Node 22.19.0/24 跑 `npm ci` 和 `npm run 
 workflow 文件存在不代表 Windows 安装已通过。固定版本的 pi 也是本地 worker 默认 CLI；CI 不登录、
 也不调用任何模型提供方。
 
-编排正文只维护在 `codex/pi-orchestrator/SKILL.md`；运行时直接加载正文，安装程序复制同一个文件。
+编排正文只维护在 `codex/pi-orchestrator/SKILL.md`；运行时直接加载正文，安装程序把同一个文件复制到 Codex skill 目录和共享的 `~/.agents/skills`。
 部署时保留 `codex/`、`src/` 和 `dist/`。活跃 worker 结束后重跑 `npm run install:local`，会更新已安装
-的 skill 和后台启动配置；再重启 Codex 加载新策略。
+的 skill 和后台启动配置；再重启 Codex（或其他客户端重载）加载新策略。
 
 ### 仓库结构
 
@@ -516,7 +525,7 @@ extensions/        worker 端 pi 扩展（文件声明、信箱、coord_* 工具
 tests/             离线测试套件（node --test）
 scripts/           setup、启动、健康检查、冒烟和状态辅助脚本
 deploy/            systemd、launchd 和 Windows 计划任务安装脚本
-codex/             npm run install:local 安装的 Codex skill
+codex/             npm run install:local 安装的编排 skill（Codex + ~/.agents/skills）
 Dockerfile         内置 Node、git、pi 的镜像
 docker-compose.yml 面向用户的 compose 文件
 .env.example       Docker 用的 provider 密钥 / model 模板

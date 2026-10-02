@@ -59,6 +59,10 @@ test('all installation entry points include user CLI setup',()=>{
  assert.match(readFileSync('install.sh','utf8'),/npm run install:cli/);
  assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$npm run install:cli/);
 });
+test('all installation entry points register the MCP server with pi',()=>{
+ assert.match(readFileSync('install.sh','utf8'),/\$PI_BIN" mcp add pi/);
+ assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$piCmd mcp add pi/);
+});
 
 test('fresh installation requests the repository pinned pi package in the independent prefix',()=>fixture(home=>{
  const packageDir=join(home,'.local/share/pi-cli/node_modules/@earendil-works/pi-coding-agent');

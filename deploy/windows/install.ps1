@@ -34,6 +34,11 @@ $skillDir = Join-Path $codexHome 'skills\pi-orchestrator'
 New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
 Copy-Item (Join-Path $root 'codex/pi-orchestrator/SKILL.md') (Join-Path $skillDir 'SKILL.md') -Force
 
+# Codex reads its own directory; pi and other Agent Skills clients read the shared location.
+$agentsSkillDir = Join-Path $env:USERPROFILE '.agents\skills\pi-orchestrator'
+New-Item -ItemType Directory -Path $agentsSkillDir -Force | Out-Null
+Copy-Item (Join-Path $root 'codex/pi-orchestrator/SKILL.md') (Join-Path $agentsSkillDir 'SKILL.md') -Force
+
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try { & $codex mcp remove pi 2>$null | Out-Null }
@@ -41,7 +46,15 @@ finally { $ErrorActionPreference = $previousErrorAction }
 & $codex mcp add pi -- $node (Join-Path $root 'scripts\proxy.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Codex MCP registration failed.' }
 
+# The installer ships pi, so register the same MCP server there too.
+$piCmd = Join-Path $env:USERPROFILE '.local\bin\pi.cmd'
+$ErrorActionPreference = 'Continue'
+try { & $piCmd mcp remove pi 2>$null | Out-Null }
+finally { $ErrorActionPreference = $previousErrorAction }
+& $piCmd mcp add pi --description 'pi-coffee: spawn, review, verify, and merge isolated pi coding workers' -- $node (Join-Path $root 'scripts\proxy.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'pi MCP registration failed.' }
+
 & (Join-Path $root 'deploy\windows\install-task.ps1') -NodePath $node
 & $node (Join-Path $root 'scripts\check-health.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Background daemon did not become healthy.' }
-Write-Host 'Done. Restart Codex to load the pi_* tools.'
+Write-Host 'Done. Restart Codex or start a new pi session to load the pi_* tools.'
