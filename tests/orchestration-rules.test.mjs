@@ -61,6 +61,16 @@ test("polling rules distinguish wait windows from worker failures and outer dead
   assert.match(MCP_INSTRUCTIONS, /not worker failure/);
 });
 
+test("client-side tool timeouts are documented as outer limits, not worker failure", () => {
+  assert.match(PLAYBOOK, /pi_verify` and `pi_exec`[\s\S]*tool_timeout_sec/);
+  assert.match(PLAYBOOK, /client-side timeout cancels nothing/);
+  for (const readme of ["../README.md", "../README.zh-CN.md"]) {
+    const text = readFileSync(new URL(readme, import.meta.url), "utf8");
+    assert.match(text, /tool_timeout_sec = 600/);
+    assert.match(text, /"timeout": 600/);
+  }
+});
+
 test("runtime policy location does not depend on the daemon working directory", () => {
   const runtimeUrl = new URL("../dist/playbook.js", import.meta.url).href;
   const output = execFileSync(process.execPath, ["--input-type=module", "-e", `const { PLAYBOOK } = await import(${JSON.stringify(runtimeUrl)}); process.stdout.write(PLAYBOOK);`], { cwd: tmpdir(), encoding: "utf8" });

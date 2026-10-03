@@ -211,6 +211,28 @@ pi mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolate
   -- /absolute/path/to/node /absolute/path/to/pi-coffee/scripts/proxy.mjs
 ```
 
+### 客户端每次调用的超时
+
+`pi_verify` 和 `pi_exec` 会跑最长 10 分钟的固定验收，`pi_wait` 会阻塞整个等待窗口。多数 MCP
+客户端默认把单次工具调用限制在 60 秒，这类调用会被掐断并报传输错误。每个客户端设一次：
+
+```toml
+[mcp_servers.pi]
+# ...上面的 command/args...
+tool_timeout_sec = 600
+```
+
+```json
+// ~/.pi/agent/mcp.json
+{ "mcpServers": { "pi": { "timeout": 600 } } }
+```
+
+客户端超时不会停掉任何东西：daemon 继续等待，worker 继续干活，验收结果也不会失效。把它理解成
+"调用方不再等了"，而不是 worker 失败，然后用 `pi_status` / `pi_list` 读实际状态。`pi_wait` 默认
+窗口已经是 30 秒，所以 60 秒的客户端上限足够轮询；调大上限主要是为了慢测试套件上的 `pi_verify`
+和 `pi_exec`。两个 CLI 都不能代设（`codex mcp add` 和 `pi mcp add` 都没有超时参数），需要直接改
+客户端配置。
+
 daemon 在别的机器上，就直接连，并带上 token：
 
 ```toml
@@ -489,6 +511,7 @@ daemon。
 | 重启后会话变成 `stopped` 或 `error` | 已确认停止，或遗留执行尚未确认停止 | 检查 handoff；只有安全移交后才重新派发，会话记录保留。 |
 | daemon 启动时报 `EADDRINUSE` | 端口被占用 | 把 `PI_COFFEE_PORT` 换成一个空闲端口。 |
 | 找不到 `codex mcp add` | `codex` 不在 daemon 用户的 `PATH` 里 | 手动写 `~/.codex/config.toml`。 |
+| `pi_wait` / `pi_verify` 报传输或请求超时 | 客户端单次调用超时短于这次调用 | 调大（Codex 用 `tool_timeout_sec`，pi 用 `timeout`），再用 `pi_status` 读状态；worker 从没被停过。 |
 | worker 被文件声明挡住 | 另一个 worker 占着冲突的声明 | 用 `coord_send` 协调，声明确实过期就用 `pi_release`。 |
 
 ## 开发

@@ -248,6 +248,30 @@ pi mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolate
   -- /absolute/path/to/node /absolute/path/to/pi-coffee/scripts/proxy.mjs
 ```
 
+### Client per-tool timeout
+
+`pi_verify` and `pi_exec` run the fixed acceptance command for up to 10 minutes, and `pi_wait` blocks
+for its whole window. Most MCP clients cap each tool call at 60 seconds by default, which cuts such a
+call off with a transport error. Raise that limit once per client:
+
+```toml
+[mcp_servers.pi]
+# ...command/args as shown above...
+tool_timeout_sec = 600
+```
+
+```json
+// ~/.pi/agent/mcp.json
+{ "mcpServers": { "pi": { "timeout": 600 } } }
+```
+
+A client timeout stops nothing: the daemon keeps the wait, the worker keeps working, and no
+acceptance result is invalidated. Treat it as "the caller stopped listening", not as a worker
+failure, then read the real state with `pi_status` / `pi_list`. `pi_wait` already defaults to a
+30-second window, so a 60-second client cap is enough for polling; the raised limit matters for
+`pi_verify` and `pi_exec` on slow suites. Neither CLI can set this for you (`codex mcp add` and
+`pi mcp add` have no timeout option), so edit the client configuration directly.
+
 If the daemon runs on another machine, connect to it directly and pass a token:
 
 ```toml
@@ -572,6 +596,7 @@ write locking. Run one daemon per state directory.
 | Sessions show `stopped` or `error` after a restart | Shutdown confirmed or survivor ownership unresolved | Inspect handoff; respawn only after safe transfer. Transcript files are preserved. |
 | The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port. |
 | `codex mcp add` is not found | `codex` is not on the daemon user's `PATH` | Register the server manually in `~/.codex/config.toml`. |
+| `pi_wait` / `pi_verify` ends in a transport or request timeout | The client's per-tool timeout is shorter than the call | Raise it (`tool_timeout_sec` for Codex, `timeout` for pi) and re-read state with `pi_status`; the worker was never stopped. |
 | A worker is blocked by a file claim | Another worker holds a conflicting claim | Use `coord_send` to coordinate, or `pi_release` if the claim is stale. |
 
 ## Development

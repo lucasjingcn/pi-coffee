@@ -176,6 +176,12 @@ Do not stop, re-spawn or take over solely because a wait window expired. After a
 use scoped `pi_status` or `pi_list` snapshots to check actual state before taking further action;
 reconnect if needed. A transport error is not evidence that a worker stopped or a write failed.
 
+Blocking tools also need client headroom. `pi_verify` and `pi_exec` may run the acceptance command
+for up to 10 minutes, so a client that caps each tool call at 60 seconds must have that cap raised
+for this server (`mcp_servers.pi.tool_timeout_sec` for Codex, `timeout` in `mcp.json` for pi) before
+long acceptance runs. A client-side timeout cancels nothing and is not evidence that the command
+failed; read the recorded verification instead of re-running it blindly.
+
 A `provider_wait` notice means no observable generation progress, not a proven provider-wide outage.
 The default warning is 60 seconds; the default terminal silence deadline is 10 minutes. Model
 text/thinking/tool-call deltas count as progress. Local tool execution and pending user questions
