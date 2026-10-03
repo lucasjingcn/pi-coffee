@@ -227,6 +227,7 @@ export class Coordinator {
       await this.cleanSessionDir(entry).catch(() => {});
     }
     for (const repo of repos) await pruneWorktrees(repo).catch(() => {});
+    await this.sweepFinalRetention().catch(() => {});
   }
 
   private startSweeper(): void {
@@ -255,6 +256,7 @@ export class Coordinator {
         this.notifyWaiters();
       }
     }
+    await this.sweepFinalRetention(now).catch(() => {});
   }
 
   /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
@@ -300,6 +302,33 @@ export class Coordinator {
     } catch {
       return false;
     }
+    return true;
+  }
+
+  /**
+   * Drop clean worktrees of unfinished (None/abandoned) stopped sessions past the
+   * final retention. Dirty trees are preserved; branches are always kept, so no
+   * committed work is lost. Bounds disk growth from worktrees the normal sweep
+   * must never auto-remove.
+   */
+  private async sweepFinalRetention(now = Date.now()): Promise<void> {
+    const finalTtlMs = this.config.worktreeFinalTtlMin <= 0 ? 0 : this.config.worktreeFinalTtlMin * 60_000;
+    if (finalTtlMs <= 0) return;
+    for (const meta of this.history) {
+      if (meta.status !== "stopped") continue;
+      if (meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome)) continue;
+      if (now - (meta.lastActivity ?? 0) < finalTtlMs) continue;
+      await this.cleanUnfinishedWorktree(meta).catch(() => {});
+    }
+  }
+
+  /** Remove a clean worktree for an unfinished (None/abandoned) stopped session. */
+  private async cleanUnfinishedWorktree(meta: SessionMeta): Promise<boolean> {
+    const dir = meta.worktree;
+    if (!dir || meta.status !== "stopped" || !existsSync(dir)) return false;
+    if (!(await isWorktreeClean(dir))) return false;
+    await removeWorktree(meta.repo, dir).catch(() => {});
+    if (existsSync(dir)) return false;
     return true;
   }
 

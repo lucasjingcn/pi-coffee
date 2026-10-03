@@ -36,6 +36,8 @@ export interface Config {
   autoClean: boolean;
   /** Minutes a finished+idle worker is kept before the sweeper cleans it. */
   worktreeTtlMin: number;
+  /** Final retention (minutes) before a clean worktree of an unfinished/abandoned session is removed (branch kept). 0 disables; default 7 days. */
+  worktreeFinalTtlMin: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -88,7 +90,7 @@ function validateNumber(field: string, key: string, value: number, rules: Number
  */
 function resolveNumber(
   overrides: Partial<Config>,
-  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs",
+  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs",
   key: string,
   fallback: number,
   rules: NumberRules,
@@ -198,6 +200,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       min: 1,
       max: Number.MAX_SAFE_INTEGER / 60000,
       description: "a finite number between 1 and MAX_SAFE_INTEGER/60000",
+    }),
+    worktreeFinalTtlMin: resolveNumber(overrides, "worktreeFinalTtlMin", "PI_COFFEE_WORKTREE_FINAL_TTL_MIN", 10080, {
+      integer: true,
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER / 60000,
+      description: "a non-negative integer (0 disables); minutes before a clean worktree of an unfinished/abandoned session is removed (branch kept)",
     }),
     workerWarnMs: resolveNumber(overrides, "workerWarnMs", "PI_COFFEE_WORKER_WARN_MS", 60_000,
       { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
