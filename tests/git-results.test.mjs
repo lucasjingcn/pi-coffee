@@ -9,6 +9,8 @@ async function fixture(fn) {
  const dir=await mkdtemp(join(tmpdir(),'pi-git-test-'));
  const git=(...args)=>execFileSync('git',['-C',dir,...args],{encoding:'utf8'});
  try {git('init','-q');git('config','user.name','test');git('config','user.email','test@example.com');
+ // Exercise fixture hooks even when the user has a global core.hooksPath.
+ git('config','core.hooksPath',join(dir,'.git','hooks'));
  await writeFile(join(dir,'tracked.txt'),'base\n');git('add','-A');git('commit','-qm','base');await fn(dir,git);}
  finally {await rm(dir,{recursive:true,force:true});}
 }

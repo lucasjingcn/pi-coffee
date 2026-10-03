@@ -31,6 +31,10 @@ test('live MCP wait wakes for a warning, skips consumed notices and exposes safe
  const notice=warning.sessions[0].handoff;assert.equal(notice.kind,'provider_wait');assert.equal(notice.safeToTakeOver,false);
  const next=JSON.parse((await call('pi_wait',{session_ids:['s1'],until:'question',timeout_ms:0,after_notice_ids:[notice.id]})).content[0].text);
  assert.equal(next.timedOut,true);
+ assert.match(next.wait_hint,/does not stop workers or indicate task failure/);
+ assert.equal(rt.meta.status,'working');assert.equal(c.locksList().length,1);
+ assert.equal(rt.meta.handoff.id,notice.id);
+ assert.equal(warning.wait_hint,undefined);
  await c.checkWorkerHealth(rt.lastProgressAt+501);
  const final=JSON.parse((await call('pi_status',{session_id:'s1'})).content[0].text);
  assert.equal(final.handoff.safeToTakeOver,true);assert.equal(final.handoff.locksReleased,true);

@@ -387,18 +387,28 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Wait for workers",
       description:
-        "Block until all listed sessions settle (until=settled), any worker asks a question (until=question), or a new daemon handoff notice requires attention. Returns concise snapshots by default. Prefer timeouts <= 120000ms and re-poll.",
+        "Block until all listed sessions settle (until=settled), any worker asks a question (until=question), or a new daemon handoff notice requires attention. Returns concise snapshots by default. " +
+        "The default wait window is 30000ms; expiry does not stop workers or mean task failure. Keep the wait below the outer script/client/transport deadline with headroom. " +
+        "With a 60s outer deadline, use 30000ms and only one blocking wait per codemode script; re-poll in a new codemode call. " +
+        "Longer waits (up to 120000ms) require sufficient outer deadline headroom. Use pi_status/pi_list for non-blocking snapshots.",
       inputSchema: {
         session_ids: z.array(z.string()).min(1),
         until: z.enum(["settled", "question"]).optional(),
-        timeout_ms: z.number().int().min(0).max(120_000).optional(),
+        timeout_ms: z.number().int().min(0).max(120_000).optional()
+          .describe("Wait window in milliseconds (default 30000; 0 does not wait). Keep below the outer script/client/transport deadline with headroom; use longer windows only when the client supports them."),
         detail: z.enum(["summary", "full"]).optional(),
         after_notice_ids: z.array(z.string()).optional().describe("Previously consumed handoff notice IDs; new notices wake this wait even if workers are still working"),
       },
     },
     async ({ session_ids, until, timeout_ms, detail, after_notice_ids }) => {
-      const res = await coord.wait(session_ids, until ?? "settled", Math.min(timeout_ms ?? 60_000, 120_000), after_notice_ids);
-      return json({ timedOut: res.timedOut, sessions: res.sessions.map((m) => sessionView(m, detail ?? "summary")) });
+      const res = await coord.wait(session_ids, until ?? "settled", Math.min(timeout_ms ?? 30_000, 120_000), after_notice_ids);
+      return json({
+        timedOut: res.timedOut,
+        sessions: res.sessions.map((m) => sessionView(m, detail ?? "summary")),
+        ...(res.timedOut ? {
+          wait_hint: "Wait window expired; this does not stop workers or indicate task failure. Inspect returned statuses and handoff notices, then continue waiting for active workers in a new call. Do not stop or re-spawn workers solely because this wait expired.",
+        } : {}),
+      });
     },
   );
 

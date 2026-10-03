@@ -354,7 +354,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
 | `pi_review` | 记录准确候选的统筹方审查。接收 `verification_id`、逐项 `requirements` 和逐文件 `test_changes`；硬性要求或既有验证文件变更未完整确认时，禁止合并。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
-| `pi_wait` | 阻塞到所有会话 `settled`，或任一 worker 提出 `question`。超时控制在两分钟以内，然后重新轮询。 |
+| `pi_wait` | 等待会话稳定、问题或新的交接通知。默认等待窗口 30 秒；窗口结束不停止 worker。等待须短于外层期限，跨调用重新轮询；兼容客户端可显式等待最长 120 秒。默认返回简明状态，可用 `detail=full` 查看详情。 |
 | `pi_status` / `pi_list` | 当前状态：状态、模型、成本、上下文占用、待处理问题。 |
 | `pi_tail` | 增量读会话记录，把上次的 `lastEntryId` 作为 `since` 传进去。 |
 | `pi_diff` | 某个 worker 分支的已提交、未提交和未跟踪改动。 |
@@ -592,6 +592,14 @@ pi（`@earendil-works/pi-coding-agent`）是 Mario Zechner 的独立 MIT 项目�
 worker 静默不会无限占用范围：默认 60 秒没有生成进展发出 `provider_wait`，10 分钟仍无进展
 则停止执行并通知主 agent 接管。服务方报错、重试耗尽、意外退出也会触发收尾。本地工具执行
 及待回答问题不计为服务方静默；不换模型、不降低质量，也不自动发起额外付费重试。
+
+`pi_wait` 默认等待窗口为 30 秒。`timedOut:true` 及其 `wait_hint` 表示等待窗口结束，不表示
+worker 失败；等待本身不会停止 worker。检查状态和交接通知后，继续等待仍在运行的 worker。
+等待时间须短于脚本、客户端和传输层的期限，并留出处理余量。外层期限为 60 秒时，使用
+`timeout_ms:30000`；每个 codemode 脚本只做一次阻塞等待，再在新的 codemode 调用中轮询，
+不要在同一个脚本里连续循环等待。`@options timeout_ms` 不能覆盖外部期限；兼容客户端仍可
+显式等待最长 120 秒。传输超时后，先用限定会话的 `pi_status` / `pi_list` 检查实际状态，
+不要因此盲目停止或重新派发 worker。
 
 `pi_wait` 会被新 `handoff` 通知唤醒，`pi_status` / `pi_list` 也返回通知。后续等待可传
 `after_notice_ids` 跳过已处理的通知。当前无常驻推送通道，已经停止执行的 Codex 聊天不会被

@@ -156,11 +156,25 @@ only for legacy unprotected sessions.
 
 ## Worker failure and handoff
 
-While workers run, keep a scoped `pi_wait` outstanding. The daemon watchdog does not depend on
-model output: a new `handoff` notice wakes the wait even before the worker settles. Consume notices
-from `pi_wait`, `pi_status` and `pi_list`; pass consumed notice IDs as `after_notice_ids` on later
-waits to avoid replaying a warning. The current stateless MCP transport cannot push into a chat that
-has stopped executing; these notices persist and remain visible when the owner returns.
+While workers run, keep scoped `pi_wait` polling active with repeated short waits. The daemon
+watchdog does not depend on model output: a new `handoff` notice wakes the wait even before the
+worker settles. Consume notices from `pi_wait`, `pi_status` and `pi_list`; pass consumed notice IDs
+as `after_notice_ids` on later waits to avoid replaying a warning. The current stateless MCP transport
+cannot push into a chat that has stopped executing; these notices persist for the owner's return.
+
+`pi_wait` defaults to 30000ms (30 seconds). Keep the window below the outer script, client and
+transport deadlines with headroom for other calls and response delivery. Explicit windows up to
+120000ms remain available when the client and every outer layer support them with headroom.
+For a 60-second outer deadline, use 30000ms and one blocking wait per codemode script, then
+re-poll in a new codemode call. Do not loop sequential waits inside one script: the deadline covers
+the entire script. `@options timeout_ms` cannot override an external harness or transport deadline;
+do not assume every codemode environment has a fixed 60-second cap.
+
+`timedOut:true` means the wait window expired; it does not stop workers or indicate task failure.
+Read the returned statuses and handoff notices, then continue scoped waiting for active workers.
+Do not stop, re-spawn or take over solely because a wait window expired. After a transport timeout,
+use scoped `pi_status` or `pi_list` snapshots to check actual state before taking further action;
+reconnect if needed. A transport error is not evidence that a worker stopped or a write failed.
 
 A `provider_wait` notice means no observable generation progress, not a proven provider-wide outage.
 The default warning is 60 seconds; the default terminal silence deadline is 10 minutes. Model

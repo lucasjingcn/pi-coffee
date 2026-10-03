@@ -410,7 +410,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 |---|---|
 | `pi_spawn` | Create a worktree and branch, then start a worker. Returns its one-time `control_key` and a `scope_key`; pass the first scope key into later spawns that should coordinate. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
 | `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
-| `pi_wait` | Block until every listed session is `settled`, or until any worker asks a `question`. Returns concise snapshots by default; use `detail=full` when needed. Keep timeouts at or under two minutes. |
+| `pi_wait` | Wait for sessions to settle, a question, or a new handoff notice. Defaults to a 30-second window; expiry does not stop workers. Re-poll across calls below the outer deadline; explicit windows up to 120 seconds require a compatible client. Returns concise snapshots; `detail=full` is available. |
 | `pi_status` / `pi_list` | Concise state and pending questions by default, including `control_required`. Pass `session_ids` to `pi_list` to include only your workstreams, including stopped history. Use `detail=full` for the contract, transcript excerpt, verification, and integration records; use `pi_metrics` for complete cost evidence. |
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
@@ -682,6 +682,15 @@ The daemon watchdog warns after 60 seconds without observable generation progres
 at the 10-minute silence deadline. Provider failures after retries settle and unexpected worker exits
 also produce a durable `handoff` notice. Local tools and pending questions are excluded. Model quality,
 model selection and user authorization remain unchanged; no extra paid retry is launched.
+
+`pi_wait` defaults to a 30-second window. `timedOut:true` and its `wait_hint` describe wait-window
+expiry, not worker failure; the wait does not stop workers. Inspect statuses and handoff notices,
+then continue waiting for active workers. Keep each window below the script/client/transport deadline
+with headroom. With a 60-second outer deadline, use `timeout_ms:30000` and one blocking wait per
+codemode script, then re-poll in a new codemode call rather than looping inside one script.
+`@options timeout_ms` cannot override an external deadline. Explicit windows up to 120 seconds
+remain available for compatible clients. After a transport timeout, inspect scoped `pi_status` /
+`pi_list` snapshots instead of blindly stopping or re-spawning workers.
 
 A new notice wakes `pi_wait`, and status/list responses include it. Pass consumed `after_notice_ids`
 to avoid replaying a warning. Stateless MCP cannot wake a chat that is no longer executing; its owner

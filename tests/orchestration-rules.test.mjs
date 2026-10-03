@@ -49,6 +49,18 @@ test("verification covers candidate and metrics do not claim financial proof", (
 });
 
 
+test("polling rules distinguish wait windows from worker failures and outer deadlines", () => {
+  assert.match(PLAYBOOK, /pi_wait.*30000ms/);
+  assert.match(PLAYBOOK, /120000ms[\s\S]*client/);
+  assert.match(PLAYBOOK, /timedOut:true[\s\S]*does not stop workers or indicate task failure/);
+  assert.match(PLAYBOOK, /one blocking wait per codemode script[\s\S]*new codemode call/);
+  assert.match(PLAYBOOK, /@options[\s\S]*cannot override/);
+  assert.match(PLAYBOOK, /transport timeout[\s\S]*pi_status[\s\S]*pi_list/);
+  assert.match(MCP_INSTRUCTIONS, /30000ms/);
+  assert.match(MCP_INSTRUCTIONS, /outer.*deadline/);
+  assert.match(MCP_INSTRUCTIONS, /not worker failure/);
+});
+
 test("runtime policy location does not depend on the daemon working directory", () => {
   const runtimeUrl = new URL("../dist/playbook.js", import.meta.url).href;
   const output = execFileSync(process.execPath, ["--input-type=module", "-e", `const { PLAYBOOK } = await import(${JSON.stringify(runtimeUrl)}); process.stdout.write(PLAYBOOK);`], { cwd: tmpdir(), encoding: "utf8" });
