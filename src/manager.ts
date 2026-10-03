@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
@@ -224,6 +224,7 @@ export class Coordinator {
       if (!entry.repo) continue;
       repos.add(entry.repo);
       await this.cleanMeta(entry).catch(() => {});
+      await this.cleanSessionDir(entry).catch(() => {});
     }
     for (const repo of repos) await pruneWorktrees(repo).catch(() => {});
   }
@@ -249,6 +250,7 @@ export class Coordinator {
         await this.stop(id).catch(() => {});
       } else if (rt.meta.status === "stopped") {
         await this.cleanMeta(rt.meta).catch(() => {});
+        await this.cleanSessionDir(rt.meta).catch(() => {});
         this.runtimes.delete(id); // already archived at stop(); report uses history
         this.notifyWaiters();
       }
@@ -278,6 +280,26 @@ export class Coordinator {
 
     await removeWorktree(meta.repo, meta.worktree).catch(() => {});
     if (existsSync(meta.worktree)) throw new Error(`worktree cleanup failed: ${meta.worktree}`);
+    return true;
+  }
+
+  /**
+   * Remove the pi transcript directory for a finished, stopped session whose
+   * retention has lapsed. Tied to the same autoClean lifecycle as the worktree;
+   * lastText/lastEntryId live in state, so no report or resume data is lost.
+   * Dirty, unrecorded and abandoned transcripts are preserved.
+   */
+  private async cleanSessionDir(meta: SessionMeta): Promise<boolean> {
+    if (meta.status !== "stopped") return false;
+    const finished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
+    if (!finished) return false;
+    const dir = join(this.config.dataDir, "sessions", meta.id);
+    if (!existsSync(dir)) return false;
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch {
+      return false;
+    }
     return true;
   }
 
@@ -825,6 +847,9 @@ export class Coordinator {
         case "tool_execution_start":
           (rt.activeTools ??= new Set()).add(event.toolCallId);
           rt.lastProgressAt = Date.now();
+          // A worker that starts executing a tool is demonstrably active again;
+          // drop a stale stall warning that a previous quiet period published.
+          if (rt.meta.handoff?.kind === "provider_wait") rt.meta.handoff = undefined;
           break;
         case "tool_execution_end":
           rt.activeTools?.delete(event.toolCallId);
@@ -1216,6 +1241,7 @@ export class Coordinator {
     this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       if (!verificationId || rt.meta.verification?.id !== verificationId) throw new Error("review verification ID does not match the current candidate");
+      await rt.client.refreshStreaming();
       if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle worker and questions before review");
       const proof = await this.integrationGate.assertCurrent(rt.meta, rt.meta.verification.targetBranch, false, false);
       validateCandidateReview(rt.meta.spec, proof.existingValidationChanges, input);
@@ -1251,6 +1277,7 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
+      await rt.client.refreshStreaming();
       if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle the worker and its questions before verification");
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
@@ -1560,6 +1587,7 @@ export class Coordinator {
       if (readonlySuccess) {
         if (!note?.trim()) throw new Error("read-only success requires an orchestrator acceptance note");
         if (rt.meta.status !== "idle" && rt.meta.status !== "stopped") throw new Error("settle the read-only worker before acceptance");
+        await rt.client.refreshStreaming();
         if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle worker questions before acceptance");
         if (!rt.meta.lastText?.trim()) throw new Error("read-only success requires a delivered worker report");
         const diff = await worktreeDiff(rt.meta.worktree, rt.meta.baseRef);

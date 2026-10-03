@@ -29,7 +29,7 @@ async function fixture(fn, command = 'test "$(cat src/item.txt)" = changed') {
   git(worker,'add','src/item.txt','tests/acceptance.txt');git(worker,'commit','-qm','worker');
   const config = loadConfig({dataDir:join(root,'data'),workspaceRoot:join(root,'workers'),defaultRepo:repo,autoClean:false});
   const c = new Coordinator(config); await c.init();
-  const client = {getState:async()=>{throw new Error('no live provider');},stop:async()=>{},isStreaming:false};
+  const client = {getState:async()=>{throw new Error('no live provider');},stop:async()=>{},isStreaming:false,refreshStreaming:async()=>{}};
   c.runtimes.set(meta.id,{meta,client,repoIdentity:resolveRepoIdentity(repo),lastNotifiedQuestionIds:new Set()});
   const head = () => git(repo,'rev-parse','HEAD');
   const noSuccess = async () => assert.equal((await c.report()).counts.success_first,0);
@@ -308,7 +308,7 @@ test('review survives as validated audit data but restart does not restore a mer
     r=>r.history[0].spec.requirements.push({id:'change',text:'duplicate'}),
   ]) {const bad=structuredClone(raw);mutate(bad);assert.throws(()=>validateSnapshot(bad,'fixture'),/candidateReview|duplicate/);}
   const restarted=new Coordinator(config);await restarted.init();const stored=restarted.history.find(s=>s.id==='s1');
-  restarted.runtimes.set('s1',{meta:stored,client:{isStreaming:false,stop:async()=>{},getState:async()=>{throw new Error('offline');}},repoIdentity:resolveRepoIdentity(stored.repo)});
+  restarted.runtimes.set('s1',{meta:stored,client:{isStreaming:false,stop:async()=>{},getState:async()=>{throw new Error('offline');},refreshStreaming:async()=>{}},repoIdentity:resolveRepoIdentity(stored.repo)});
   try {assert.equal(stored.candidateReview.verificationId,proof.id);await assert.rejects(restarted.merge('s1'),/pi_verify/);}
   finally {await restarted.stopAll();}
 }));

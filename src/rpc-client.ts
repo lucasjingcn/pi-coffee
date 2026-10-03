@@ -63,6 +63,22 @@ export class PiRpcClient extends EventEmitter {
     return this.streaming;
   }
 
+  /**
+   * Reconcile the streaming flag with authoritative session state. `agent_settled`
+   * normally resets it, but a dropped frame can leave it stale-true, which would
+   * queue a follow-up incorrectly and false-block settle/verify/review gates.
+   * Call this before relying on `isStreaming` for a gating decision.
+   */
+  async refreshStreaming(): Promise<void> {
+    if (!this.proc || this.disposed || this.exited) return;
+    try {
+      const state = await this.getState();
+      if (!this.disposed && !this.exited) this.streaming = state.isStreaming;
+    } catch {
+      /* keep the current flag; fail-safe */
+    }
+  }
+
   get hasExited(): boolean {
     return this.shutdownConfirmed;
   }

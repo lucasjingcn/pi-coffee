@@ -76,3 +76,10 @@ test('background watchdog notifies the waiting owner even with auto cleanup disa
  assert.equal(result.timedOut,false);assert.equal(result.sessions[0].handoff.kind,'provider_wait');
  assert.equal(result.sessions[0].handoff.safeToTakeOver,false);assert.equal(c.locksList().length,1);
 }));
+test('a fresh tool execution clears a stale provider_wait handoff',()=>fixture(async(c,rt,client)=>{
+ client.emit('event',{type:'agent_start'});const start=rt.lastProgressAt;
+ await c.checkWorkerHealth(start+101);
+ assert.equal(rt.meta.handoff.kind,'provider_wait');
+ client.emit('event',{type:'tool_execution_start',toolCallId:'t1'});
+ assert.equal(rt.meta.handoff,undefined);
+}));

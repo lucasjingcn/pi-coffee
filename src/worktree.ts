@@ -1,9 +1,14 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { promisify } from "node:util";
 
-const run = promisify(execFile);
+/** Result of a git subprocess run. */
+interface GitResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
 
 /**
  * The daemon may run as a different Unix user than the repository owner (e.g.
@@ -25,24 +30,82 @@ function gitEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * Run git in its own process group on POSIX so a hard timeout kills the whole
+ * tree, including helpers (`git-remote-http`, ssh) and hooks, mirroring
+ * `runCommand` in manager.ts. Killing only the direct git process lets a hung
+ * push leave a helper running (e.g. holding `index.lock` or a live connection).
+ * On Windows git is spawned in the parent group and only it is killed, matching
+ * the pre-existing behavior.
+ */
+function execGit(cwd: string, args: string[], timeout: number): Promise<GitResult> {
+  return new Promise((resolve) => {
+    const grouped = process.platform !== "win32";
+    const proc = spawn("git", ["-C", cwd, ...args], {
+      env: gitEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: grouped,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const finish = (result: GitResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (grouped && proc.pid) process.kill(-proc.pid, "SIGKILL");
+        else proc.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+    }, timeout);
+
+    // Cap output (like execFile's maxBuffer) so a runaway command cannot exhaust memory.
+    proc.stdout?.on("data", (d: Buffer) => (stdout = (stdout + d.toString("utf8")).slice(-64 * 1024 * 1024)));
+    proc.stderr?.on("data", (d: Buffer) => (stderr = (stderr + d.toString("utf8")).slice(-32 * 1024 * 1024)));
+    proc.on("error", (error) => finish({ code: null, stdout, stderr: stderr || String(error) || "", timedOut }));
+    proc.on("close", (code) => finish({ code, stdout, stderr, timedOut }));
+  });
+}
+
+/** Build a failure error shaped like the old execFile error for downstream callers. */
+function gitFailure(cwd: string, args: string[], result: GitResult, why: string): Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean } {
+  const detail = (result.stderr || result.stdout || "").trim();
+  const err: Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean } = new Error(
+    detail || `git ${args.join(" ")} failed (${why})`,
+  ) as Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean };
+  if (result.code !== null) err.code = result.code;
+  err.stdout = result.stdout;
+  err.stderr = result.stderr;
+  err.killed = result.timedOut;
+  return err;
+}
+
 /** Run git and return trimmed stdout. Throws on failure. */
 export async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
-  const { stdout } = await run("git", ["-C", cwd, ...args], {
-    timeout,
-    maxBuffer: 32 * 1024 * 1024,
-    env: gitEnv(),
-  });
-  return stdout.trim();
+  const result = await execGit(cwd, args, timeout);
+  if (result.timedOut) throw gitFailure(cwd, args, result, `timed out after ${timeout}ms`);
+  if (result.code !== 0) throw gitFailure(cwd, args, result, `exit code ${result.code}`);
+  return result.stdout.trim();
 }
 
 /** Like `git`, but returns stdout verbatim so leading columns and patch whitespace survive. */
 export async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<string> {
-  const { stdout } = await run("git", ["-C", cwd, ...args], {
-    timeout,
-    maxBuffer: 32 * 1024 * 1024,
-    env: gitEnv(),
-  });
-  return stdout;
+  const result = await execGit(cwd, args, timeout);
+  if (result.timedOut) throw gitFailure(cwd, args, result, `timed out after ${timeout}ms`);
+  if (result.code !== 0) throw gitFailure(cwd, args, result, `exit code ${result.code}`);
+  return result.stdout;
 }
 
 interface GitOutcome {
@@ -55,22 +118,14 @@ interface GitOutcome {
 
 /** Run git and report success/failure plus captured output instead of throwing. */
 async function gitOutcome(cwd: string, args: string[], timeout = 120_000): Promise<GitOutcome> {
-  try {
-    const { stdout, stderr } = await run("git", ["-C", cwd, ...args], {
-      timeout,
-      maxBuffer: 32 * 1024 * 1024,
-      env: gitEnv(),
-    });
-    return { ok: true, stdout, stderr, message: "" };
-  } catch (e: any) {
-    return {
-      ok: false,
-      exitCode: typeof e?.code === "number" ? e.code : undefined,
-      stdout: typeof e?.stdout === "string" ? e.stdout : "",
-      stderr: typeof e?.stderr === "string" ? e.stderr : "",
-      message: String(e?.message ?? e),
-    };
+  const result = await execGit(cwd, args, timeout);
+  if (result.timedOut) {
+    return { ok: false, exitCode: undefined, stdout: result.stdout, stderr: result.stderr, message: `git ${args.join(" ")} timed out after ${timeout}ms` };
   }
+  if (result.code !== 0) {
+    return { ok: false, exitCode: result.code ?? undefined, stdout: result.stdout, stderr: result.stderr, message: (result.stderr || result.stdout || "").trim() };
+  }
+  return { ok: true, exitCode: result.code ?? 0, stdout: result.stdout, stderr: result.stderr, message: "" };
 }
 
 /** Decode NUL-delimited git output into exact (unquoted, untrimmed) paths. */

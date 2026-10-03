@@ -59,7 +59,30 @@ export function envFilePath(env = process.env) {
   return env.PI_COFFEE_ENV_FILE || join(homedir(), ".pi-coffee", "env");
 }
 
-/** Parse a KEY=VALUE file (shell-sourced format). */
+/** Strip a shell-style inline comment (\" # ...\") from a value, honoring single and double
+ * quotes so a \"#\" inside a quoted value is preserved. A \"#\" counts as a comment only when
+ * preceded by whitespace (shell word rules): \"KEY=abc#def\" keeps \"#def\", \"KEY=abc # c\" keeps \"abc\". */
+function stripInlineComment(value) {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '\"') inDouble = false;
+      continue;
+    }
+    if (c === "'") { inSingle = true; continue; }
+    if (c === '\"') { inDouble = true; continue; }
+    if (c === "#" && i > 0 && /\s/.test(value[i - 1])) return value.slice(0, i);
+  }
+  return value;
+}
+
+/** Parse a KEY=VALUE file (shell-sourced format). Values may be quoted; inline comments are dropped. */
 export function parseEnvFile(text) {
   const out = {};
   for (const raw of text.split("\n")) {
@@ -67,7 +90,7 @@ export function parseEnvFile(text) {
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
     if (eq === -1) continue;
-    out[line.slice(0, eq).trim()] = unquote(line.slice(eq + 1).trim());
+    out[line.slice(0, eq).trim()] = unquote(stripInlineComment(line.slice(eq + 1)).trim());
   }
   return out;
 }

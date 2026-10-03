@@ -4,7 +4,7 @@ import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {worktreeDiff, commitAll, mergeBranch} from '../dist/worktree.js';
+import {worktreeDiff, commitAll, mergeBranch, git as gitRunner} from '../dist/worktree.js';
 async function fixture(fn) {
  const dir=await mkdtemp(join(tmpdir(),'pi-git-test-'));
  const git=(...args)=>execFileSync('git',['-C',dir,...args],{encoding:'utf8'});
@@ -44,4 +44,14 @@ test('merge reports failure even when there are no conflict markers',async()=>fi
 test('dirty merge is unsuccessful with no content conflict',async()=>fixture(async(dir,git)=>{
  const into=git('branch','--show-current').trim();git('checkout','-qb','worker');await writeFile(join(dir,'tracked.txt'),'worker');git('add','-A');git('commit','-qm','worker');git('checkout',into);await writeFile(join(dir,'tracked.txt'),'local');
  assert.equal((await mergeBranch(dir,'worker',into)).ok,false);
+}));
+test('git timeout kills the whole process group, not just the direct git process', async () => fixture(async (dir) => {
+ await writeFile(join(dir,'tracked.txt'),'edited\n');
+ // A pre-commit hook that hangs by exec'ing a long-lived sleep inside git's group.
+ await writeFile(join(dir,'.git/hooks/pre-commit'),'#!/bin/sh\nexec sleep 3199\n',{mode:0o755});
+ await assert.rejects(gitRunner(dir,['commit','-am','blocked'],2000),/timed out/);
+ await new Promise(r=>setTimeout(r,80));
+ let alive='';
+ try { alive=execFileSync('pgrep',['-f','sleep 3199'],{encoding:'utf8'}).trim(); } catch { /* no match */ }
+ assert.equal(alive,'');
 }));
