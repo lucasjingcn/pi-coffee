@@ -322,17 +322,25 @@ worker 有初始任务加一次纠正，第 3 条指令需说明 override 理由
 
 ### 日志
 
-监督进程把 daemon 的 stderr 指向 `~/.pi-coffee/logs/daemon.err.log`（macOS/Linux）或
-`$HOME\.pi-coffee\logs\daemon.log`（Windows），每行都带 ISO-8601 UTC 时间戳：
+daemon 把所有诊断输出写到 stderr，每行带 ISO-8601 UTC 时间戳。落到哪里取决于安装方式：
+
+| 安装方式 | 日志位置 | 轮转 |
+|---|---|---|
+| macOS（launchd） | `~/.pi-coffee/logs/daemon.err.log` | 有：下次启动时超过 `PI_COFFEE_LOG_MAX_MB` 就归档为 `daemon.err.log.1` |
+| Linux（systemd） | journal：`journalctl --user -u pi-coffee -f` | 由 journald 自己限制 |
+| Windows（计划任务） | `$HOME\.pi-coffee\logs\daemon.log` | 无：任务用 `Out-File` 管道写入 |
+| Docker / `npm run start` | `docker compose logs -f`，或终端 | 由采集方自己限制 |
 
 ```bash
-tail -f ~/.pi-coffee/logs/daemon.err.log
+tail -f ~/.pi-coffee/logs/daemon.err.log                       # macOS
 grep -iE "error|fail|refus|timeout|unreach" ~/.pi-coffee/logs/daemon.err.log
+journalctl --user -u pi-coffee -f                              # Linux
+docker compose logs -f                                          # Docker
 ```
 
-下次启动 daemon 时，超过 `PI_COFFEE_LOG_MAX_MB`（默认 5 MB）的日志会以 copytruncate 方式归档为
-`daemon.err.log.1`，监督进程持有的文件描述符仍写在当前文件上。daemon 侧错误（`mcp error:`、
-`internal error:`、`[state] ... failed`）都在这里。
+轮转用 copytruncate：launchd 在 daemon 启动前就打开日志并一直持有该描述符，rename 会把后续日志写进归档
+文件。它只处理本进程自己写入的日志，所以在 systemd、docker 和前台运行时自动 no-op。daemon 侧错误
+（`mcp error:`、`internal error:`、`[state] ... failed`、`reclaimed N stale credential(s)`）都在这里。
 
 其它层次各有自己的记录：pi 把 MCP server 的日志通知追加到 `~/.pi/agent/mcp.log`；`/mcp`（或
 `pi mcp list`）显示连接错误和 server stderr 的尾部；每个 worker 的完整过程是
@@ -409,7 +417,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。 |
 | `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
-| `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录和控制密钥都保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
+| `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录、控制密钥以及 provider/model/thinking 全部保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、证据已被回收、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对已无法 resume 的会话还会删除其控制凭据、裁掉 history 里的大块证据（`credentials_reclaimed`、`history_compacted`）。 |
@@ -456,7 +464,7 @@ worktree 和转录都没了的会话已经无法 resume、验收或合并。这�
 `pi_metrics` 读到的数字不变。`pi_gc` 用 `credentials_reclaimed` 和 `history_compacted` 上报，sweeper
 在 `PI_COFFEE_AUTO_CLEAN` 开启时做同样的事。
 
-永远不会自动回收的：有新提交的分支、未完成或未记录 outcome 的会话转录、仍然可恢复会话的凭据与证据，
+永远不会自动回收的：有新提交的分支、仍然有 worktree 的会话转录、磁盘上还留着 worktree 或转录的会话的凭据与证据，
 以及 daemon 自己的簿记（信箱、黑板、锁）。worktree 和转录都没了的会话不能再 resume，只能重新派发。
 
 `pi_gc` 只处理你给的 session IDs：先停掉并驱逐其中已完成的 worker、移除干净的 worktree（包括

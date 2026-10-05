@@ -380,17 +380,27 @@ The single install command above configures the right background startup for the
 
 ### Logs
 
-The supervisor points the daemon's stderr at `~/.pi-coffee/logs/daemon.err.log` (macOS/Linux) or
-`$HOME\.pi-coffee\logs\daemon.log` (Windows), and every line carries an ISO-8601 UTC timestamp:
+The daemon writes every diagnostic line to stderr with an ISO-8601 UTC timestamp. Where that lands
+depends on the supervisor:
+
+| Install | Where the log goes | Rotation |
+|---|---|---|
+| macOS (launchd) | `~/.pi-coffee/logs/daemon.err.log` | yes: archived to `daemon.err.log.1` at the next start once it exceeds `PI_COFFEE_LOG_MAX_MB` |
+| Linux (systemd) | the journal: `journalctl --user -u pi-coffee -f` | journald keeps its own limits |
+| Windows (scheduled task) | `$HOME\.pi-coffee\logs\daemon.log` | no: the task pipes it through `Out-File` |
+| Docker / `npm run start` | `docker compose logs -f`, or the terminal | the collector's own limits |
 
 ```bash
-tail -f ~/.pi-coffee/logs/daemon.err.log
+tail -f ~/.pi-coffee/logs/daemon.err.log                       # macOS
 grep -iE "error|fail|refus|timeout|unreach" ~/.pi-coffee/logs/daemon.err.log
+journalctl --user -u pi-coffee -f                              # Linux
+docker compose logs -f                                          # Docker
 ```
 
-At the next daemon start, a log larger than `PI_COFFEE_LOG_MAX_MB` (default 5 MB) is archived to
-`daemon.err.log.1` with copytruncate, so the descriptor the supervisor holds keeps writing to the
-live file. daemon-side errors (`mcp error:`, `internal error:`, `[state] ... failed`) land here.
+Rotation is copytruncate: launchd opens the log before the daemon starts and keeps that descriptor,
+so renaming the file would send later lines into the archive. It only touches a log this process
+itself writes to, which makes it a no-op under systemd, docker and foreground runs. daemon-side errors
+(`mcp error:`, `internal error:`, `[state] ... failed`, `reclaimed N stale credential(s)`) land here.
 
 Other layers keep their own record: pi appends MCP server logging notifications to
 `~/.pi/agent/mcp.log`, `/mcp` (or `pi mcp list`) shows connection errors plus the tail of the
@@ -469,7 +479,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
 | `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. |
 | `pi_stop` | Stop an unfinished worker early, optionally removing its worktree and branch. |
-| `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record and control key, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, an unconfirmed shutdown, or a missing transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
+| `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record, control key and its provider/model/thinking level, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, whose evidence was reclaimed, have an unconfirmed shutdown, or have lost their transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
 | `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
 | `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
 | `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also deletes the control credential and trims the bulk evidence of sessions that can no longer be resumed (`credentials_reclaimed`, `history_compacted`). |
@@ -525,10 +535,10 @@ outcome, purpose, cost and token counters stay, so `pi_report` and `pi_metrics` 
 `pi_gc` reports this as `credentials_reclaimed` and `history_compacted`; the sweeper does the same work
 under `PI_COFFEE_AUTO_CLEAN`.
 
-Never reclaimed automatically: branches with new commits, the transcripts of unfinished or unrecorded
-sessions, the credential and evidence of anything still recoverable, and the daemon's own bookkeeping
-(the mailbox, the board and the locks). Sessions whose worktree and transcript are gone are no longer
-resumable — dispatch a fresh one instead.
+Never reclaimed automatically: branches with new commits, the transcript of any session that still has a
+worktree, the credential and evidence of any session with a worktree or transcript left on disk, and
+the daemon's own bookkeeping (the mailbox, the board and the locks). Sessions whose worktree and
+transcript are gone are no longer resumable — dispatch a fresh one instead.
 
 Scoped `pi_gc` acts only on the supplied session IDs. It stops and evicts selected finished workers
 and removes clean accepted worktrees, including those left in history by a restart. An abandoned

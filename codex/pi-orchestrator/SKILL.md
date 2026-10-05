@@ -1,6 +1,6 @@
 ---
 name: pi-orchestrator
-description: Read this BEFORE any use of the pi-coffee MCP tools (pi_spawn, pi_wait, pi_status, pi_list, pi_verify, pi_review, pi_merge, pi_finish, pi_gc, …) or considering pi-coffee workers — including tests, load/capacity checks, diagnostics, and non-repository work. This is the authoritative pi-coffee orchestration policy. Delegate only independent, clearly specified work whose expected benefit exceeds coordination overhead. Complete small fixes directly, follow user and repository instructions, review full diffs, and verify candidates before integration.
+description: Read this BEFORE any use of the pi-coffee MCP tools (pi_spawn, pi_resume, pi_wait, pi_status, pi_list, pi_verify, pi_review, pi_merge, pi_finish, pi_gc, …) or considering pi-coffee workers — including tests, load/capacity checks, diagnostics, and non-repository work. This is the authoritative pi-coffee orchestration policy. Delegate only independent, clearly specified work whose expected benefit exceeds coordination overhead. Complete small fixes directly, follow user and repository instructions, review full diffs, and verify candidates before integration.
 ---
 
 # pi-orchestrator
