@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
@@ -157,6 +157,15 @@ export interface SpawnOptions {
   scopeKey?: string;
 }
 
+export interface ResumeOptions {
+  /** Optional first instruction after resuming; the original contract is not re-sent. */
+  prompt?: string;
+  /** Override the recorded/last-known model; defaults to the session's own model, then the daemon default. */
+  provider?: string;
+  model?: string;
+  thinking?: string;
+}
+
 export interface WaitResult {
   sessions: SessionMeta[];
   timedOut: boolean;
@@ -253,7 +262,9 @@ export class Coordinator {
       } else if (rt.meta.status === "stopped") {
         await this.cleanMeta(rt.meta).catch(() => {});
         await this.cleanSessionDir(rt.meta).catch(() => {});
-        this.runtimes.delete(id); // already archived at stop(); report uses history
+        // Only drop the registration this sweep decided about: a resume may have
+        // replaced it with a live runtime while the cleanups above were awaited.
+        if (this.runtimes.get(id) === rt) this.runtimes.delete(id); // already archived at stop(); report uses history
         this.notifyWaiters();
       }
     }
@@ -271,10 +282,21 @@ export class Coordinator {
   }
 
   /**
+   * True when a session has a runtime that is not stopped. Reclamation paths read
+   * history as well, and a resumed session's history copy must never authorize
+   * removing the worktree or transcript of the worker that is running again.
+   */
+  private isLive(id: string): boolean {
+    const rt = this.runtimes.get(id);
+    return rt !== undefined && rt.meta.status !== "stopped";
+  }
+
+  /**
    * Remove a stopped, clean worktree only after success or a proven empty abandonment.
    * Dirty or unrecorded work remains available for recovery. Branch deletion is gc-only.
    */
   private async cleanMeta(meta: SessionMeta): Promise<boolean> {
+    if (this.isLive(meta.id)) return false;
     if (meta.handoff && meta.handoff.kind !== "awaiting_acceptance") return false;
     const isFinished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
     if ((!isFinished && !(await this.emptyAbandoned(meta))) || meta.status !== "stopped"
@@ -293,6 +315,7 @@ export class Coordinator {
    * Dirty, unrecorded and abandoned transcripts are preserved.
    */
   private async cleanSessionDir(meta: SessionMeta): Promise<boolean> {
+    if (this.isLive(meta.id)) return false;
     if (meta.status !== "stopped") return false;
     const finished = meta.outcome !== undefined && FINISHED_OUTCOMES.has(meta.outcome);
     if (!finished) return false;
@@ -326,6 +349,7 @@ export class Coordinator {
   /** Remove a clean worktree for an unfinished (None/abandoned) stopped session. */
   private async cleanUnfinishedWorktree(meta: SessionMeta): Promise<boolean> {
     const dir = meta.worktree;
+    if (this.isLive(meta.id)) return false;
     if (!dir || meta.status !== "stopped" || !existsSync(dir)) return false;
     if (!(await isWorktreeClean(dir))) return false;
     await removeWorktree(meta.repo, dir).catch(() => {});
@@ -361,7 +385,7 @@ export class Coordinator {
       }
 
       if (hadWorktree && !existsSync(rt.meta.worktree)) cleaned++;
-      this.runtimes.delete(id);
+      if (this.runtimes.get(id) === rt) this.runtimes.delete(id);
       evicted++;
     }
 
@@ -691,33 +715,8 @@ export class Coordinator {
       }
     }
 
-    // Reserve Codex-owned acceptance files before creating anything. LockManager
-    // skips same-owner collisions, so precheck under a temporary distinct owner
-    // first: that surfaces overlaps with any existing lock (including another
-    // Codex-held acceptance reservation), then re-claim under the shared "codex"
-    // owner so the worker never owns its own tests.
-    if (acceptancePaths.length) {
-      const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw", repoIdentity);
-      if (!pre.ok) {
-        this.locks.releaseAll(id, repoIdentity);
-        this.scheduleSave();
-        throw new Error(
-          `acceptance files conflict with active locks: ${pre.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
-        );
-      }
-      this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, repoIdentity);
-
-      const acc = this.locks.claim("codex", acceptancePaths, "rw", repoIdentity);
-      if (!acc.ok) {
-        // Not expected (no await between precheck and claim), but never leak partial reservations.
-        this.locks.releaseAll(id, repoIdentity);
-        this.scheduleSave();
-        throw new Error(
-          `acceptance files conflict with active locks: ${acc.conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ")}`,
-        );
-      }
-      acceptanceReserved = true;
-    }
+    // Reserve Codex-owned acceptance files before creating anything.
+    acceptanceReserved = this.reserveAcceptanceLocks(id, acceptancePaths, repoIdentity);
 
     // Resolve the requested base to a concrete SHA and create the worktree on
     // that same SHA in one guarded block. A failed resolve must propagate (no
@@ -845,6 +844,195 @@ export class Coordinator {
     const first = parts.join("\n\n");
     if (first) {
       try { await this.send(id, first, "prompt"); }
+      catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
+    }
+    return meta;
+  }
+
+  // -------------------------------------------------------------------------
+  // Sessions: resume a stopped worker on its own transcript
+  // -------------------------------------------------------------------------
+
+  /**
+   * Restart a stopped worker on the transcript it already has, instead of
+   * dispatching a fresh session that would have to rediscover its context.
+   *
+   * Worktree, branch, spec, acceptance record and control credential all survive a
+   * stop, so resume rebuilds only the pi process, its worker token and the scope
+   * locks. Everything an earlier run proved is dropped: a resumed worker is not the
+   * settled worker that verification described.
+   *
+   * Refuses instead of guessing when the transcript, agent directory or worktree is
+   * gone, when an outcome is already recorded, or when a shutdown is unconfirmed.
+   */
+  async resume(id: string, opts: ResumeOptions = {}): Promise<SessionMeta> {
+    const running = this.runtimes.get(id);
+    if (running && running.meta.status !== "stopped") {
+      throw new Error(`session ${id} is ${running.meta.status}; stop it before resuming`);
+    }
+    // A stopped worker keeps its runtime until the sweeper evicts it; that meta is
+    // at least as fresh as the archived copy and is the one this resume replaces.
+    const entry = running?.meta ?? this.history.find((candidate) => candidate.id === id);
+    if (!entry) throw new Error(`unknown session: ${id}`);
+    if (entry.outcome !== undefined) throw new Error(`session ${id} is finished (${entry.outcome}); re-dispatch instead of resuming`);
+    if (entry.status !== "stopped") throw new Error(`session ${id} is ${entry.status}; only a stopped worker can be resumed`);
+    if (entry.shutdownUnconfirmed) throw new Error(`session ${id} has an unconfirmed worker shutdown; stop it before resuming`);
+    if (!entry.repo || !existsSync(entry.repo)) throw new Error(`session ${id} lost its repository; re-dispatch instead of resuming`);
+    if (!entry.worktree || !existsSync(entry.worktree)) throw new Error(`session ${id} lost its worktree; re-dispatch instead of resuming`);
+    const transcript = this.resumableTranscript(id);
+    const repoIdentity = resolveRepoIdentity(entry.repo);
+
+    // Same slot discipline as spawn: reserve before the first await so two
+    // concurrent resumes cannot both pass the cap check.
+    this.reserveSlot();
+    const slot = { transferred: false };
+    let dispatchIdentity: string | undefined;
+    try {
+      if (!await this.vault.read(id)) {
+        throw new Error(`session ${id} has no stored control credential; re-dispatch instead of resuming`);
+      }
+      this.assertRepoAvailable(repoIdentity);
+      this.dispatchingRepos.set(repoIdentity, (this.dispatchingRepos.get(repoIdentity) ?? 0) + 1);
+      dispatchIdentity = repoIdentity;
+      return await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
+    } finally {
+      if (dispatchIdentity) {
+        const remaining = (this.dispatchingRepos.get(dispatchIdentity) ?? 0) - 1;
+        if (remaining > 0) this.dispatchingRepos.set(dispatchIdentity, remaining);
+        else this.dispatchingRepos.delete(dispatchIdentity);
+      }
+      if (!slot.transferred) this.releaseReservation();
+    }
+  }
+
+  /**
+   * The single transcript a resumable worker owns. Several candidates are refused
+   * rather than guessed: continuing the wrong branch of a worker's history would
+   * silently detach it from its contract.
+   */
+  private resumableTranscript(id: string): string {
+    const dir = join(this.config.dataDir, "sessions", id);
+    let transcripts: string[];
+    try {
+      transcripts = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+    } catch {
+      throw new Error(`session ${id} has no transcript directory; re-dispatch instead of resuming`);
+    }
+    if (!transcripts.length) throw new Error(`session ${id} has no transcript; re-dispatch instead of resuming`);
+    if (transcripts.length > 1) throw new Error(`session ${id} has ${transcripts.length} transcripts; resume is ambiguous`);
+    if (!existsSync(join(dir, "agent"))) {
+      throw new Error(`session ${id} lost its worker agent directory; re-dispatch instead of resuming`);
+    }
+    return join(dir, transcripts[0]);
+  }
+
+  private async resumeSession(
+    entry: SessionMeta,
+    transcript: string,
+    repoIdentity: string,
+    opts: ResumeOptions,
+    slot: { transferred: boolean },
+  ): Promise<SessionMeta> {
+    const id = entry.id;
+    const acceptancePaths = entry.acceptance?.files ?? [];
+
+    // The spec still owns the scope: re-claim it before the process starts, so a
+    // concurrent dispatch cannot take files this worker is about to edit again.
+    const scope = normalizedScope(entry.spec?.scope ?? []);
+    if (scope.length) {
+      const claim = this.locks.claim(id, scope, "rw", repoIdentity);
+      if (!claim.ok) {
+        this.locks.releaseAll(id, repoIdentity);
+        throw new Error(`scope conflicts with active sessions: ${this.conflictSummary(claim.conflicts)}`);
+      }
+    }
+    const acceptanceReserved = this.reserveAcceptanceLocks(id, acceptancePaths, repoIdentity);
+
+    const meta: SessionMeta = { ...entry, pendingQuestions: [] };
+    // Nothing that described the settled previous run still applies once the
+    // worker can write again, and the previous pid must never be kill-authority.
+    meta.verification = undefined;
+    meta.integration = undefined;
+    meta.candidateReview = undefined;
+    meta.reviewAcceptance = undefined;
+    meta.handoff = undefined;
+    meta.error = undefined;
+    meta.extension = undefined;
+    meta.extensionAt = undefined;
+    meta.workerProcess = undefined;
+    meta.shutdownUnconfirmed = true;
+    meta.lockRepoIdentity = repoIdentity;
+    meta.status = "starting";
+    meta.lastActivity = Date.now();
+
+    const workerToken = randomBytes(32).toString("base64url");
+    const sessionDir = join(this.config.dataDir, "sessions", id);
+    const client = new PiRpcClient({
+      cwd: meta.worktree,
+      piBin: this.config.piBin,
+      provider: opts.provider ?? entry.provider ?? this.config.provider,
+      model: opts.model ?? entry.model ?? this.config.model,
+      thinking: opts.thinking ?? this.config.thinking,
+      name: meta.name,
+      sessionDir,
+      resumeSession: transcript,
+      extensionPath: this.config.extensionPath,
+      env: {
+        PI_CODING_AGENT_DIR: join(sessionDir, "agent"),
+        PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
+        PI_COORD_SESSION_ID: id,
+        PI_COORD_TOKEN: workerToken,
+      },
+    });
+
+    const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
+    this.runtimes.set(id, rt);
+    this.workerTokens.set(workerToken, id);
+    slot.transferred = true;
+    this.releaseReservation();
+    this.wireEvents(rt);
+    // Reclamation and report paths read history too: it must not keep describing
+    // this session as stopped while a worker is running again.
+    this.archive(meta);
+
+    // Read the runtime's status as it is now: a concurrent pi_stop can change it
+    // while this worker is starting up.
+    const currentStatus = (): SessionStatus => this.runtimes.get(id)?.meta.status ?? "stopped";
+
+    try {
+      // Durable ownership precedes start; a crash before PID capture fails closed.
+      await this.flush();
+      await client.start();
+      if (client.pid !== undefined) meta.workerProcess = await captureWorkerProcess(client.pid);
+      await this.flush();
+      if (currentStatus() === "stopped") throw new Error(`session ${id} stopped during resume`);
+      meta.status = "idle";
+    } catch (e) {
+      if (currentStatus() !== "stopped") {
+        meta.status = "error";
+        meta.error = String(e);
+      }
+      try { await client.stop(); }
+      catch {
+        this.publishHandoff(rt, "shutdown_failed", false);
+        this.archive(meta);
+        throw new Error("worker resume failed and shutdown is unconfirmed; locks retained");
+      }
+      meta.shutdownUnconfirmed = false;
+      this.workerTokens.delete(workerToken);
+      this.releaseRuntimeReservations(rt);
+      this.archive(meta);
+      this.scheduleSave();
+      this.notifyWaiters();
+      throw e;
+    }
+
+    this.scheduleSave();
+    this.notifyWaiters();
+
+    // The contract is already in the transcript; only an explicit nudge is sent.
+    if (opts.prompt) {
+      try { await this.send(id, opts.prompt, "prompt"); }
       catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
     }
     return meta;
@@ -1056,6 +1244,38 @@ export class Coordinator {
   }
 
   /** Undo all lock reservations made while starting a session that then failed. */
+  /** `path @ session` list for a rejected claim, without leaking anything else. */
+  private conflictSummary(conflicts: Lock[]): string {
+    return conflicts.map((c) => `${c.path} @ ${c.sessionId}`).join(", ");
+  }
+
+  /**
+   * Reserve Codex-owned acceptance paths for a session. LockManager skips
+   * same-owner collisions, so precheck under a temporary distinct owner first:
+   * that surfaces overlaps with any existing lock (including another Codex-held
+   * acceptance reservation), then re-claim under the shared "codex" owner so the
+   * worker never owns its own tests. Returns whether the reservation was taken.
+   */
+  private reserveAcceptanceLocks(sessionId: string, acceptancePaths: string[], repoIdentity: string): boolean {
+    if (!acceptancePaths.length) return false;
+    const pre = this.locks.claim(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, "rw", repoIdentity);
+    if (!pre.ok) {
+      this.locks.releaseAll(sessionId, repoIdentity);
+      this.scheduleSave();
+      throw new Error(`acceptance files conflict with active locks: ${this.conflictSummary(pre.conflicts)}`);
+    }
+    this.locks.release(ACCEPTANCE_PRECHECK_OWNER, acceptancePaths, repoIdentity);
+
+    const claimed = this.locks.claim("codex", acceptancePaths, "rw", repoIdentity);
+    if (!claimed.ok) {
+      // Not expected (no await between precheck and claim), but never leak partial reservations.
+      this.locks.releaseAll(sessionId, repoIdentity);
+      this.scheduleSave();
+      throw new Error(`acceptance files conflict with active locks: ${this.conflictSummary(claimed.conflicts)}`);
+    }
+    return true;
+  }
+
   private releaseSpawnReservations(
     id: string,
     acceptancePaths: string[],

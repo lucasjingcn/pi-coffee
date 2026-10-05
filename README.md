@@ -469,6 +469,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
 | `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. |
 | `pi_stop` | Stop an unfinished worker early, optionally removing its worktree and branch. |
+| `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record and control key, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, an unconfirmed shutdown, or a missing transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
 | `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
 | `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
 | `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. |
@@ -505,6 +506,21 @@ Untrusted workers require separate OS/container isolation, credential restrictio
 read-only acceptance mounts; that isolation is not provided by this release.
 
 ## Cleaning up finished work
+
+A stopped worker keeps everything resume needs: `pi_resume` restarts it on the same transcript,
+worktree, branch, spec and control key. That is why reclamation is narrow. `pi_gc`, `pi_stop`, and the
+sweeper only remove:
+
+- the **worktree** of a finished worker after `PI_COFFEE_WORKTREE_TTL_MIN`, or of a clean unfinished
+  worker after `PI_COFFEE_WORKTREE_FINAL_TTL_MIN` (default 7 days); dirty trees are kept;
+- the **transcript** (`PI_COFFEE_DATA_DIR/sessions/<id>`) of a stopped *and* finished session;
+- **branches** only when asked for: `pi_stop` with `delete_branch` (or `PI_COFFEE_DELETE_BRANCHES=1`),
+  and `pi_gc` for tips it proves merged into the target.
+
+Never reclaimed automatically: branches with new commits, transcripts of unfinished or unrecorded
+sessions, and the daemon state itself (`state.json` history, mailbox, board, locks, and the
+`control-credentials` records `pi_recover_control` reads). Sessions removed from disk that way are no
+longer resumable — dispatch a fresh one instead.
 
 Scoped `pi_gc` acts only on the supplied session IDs. It stops and evicts selected finished workers
 and removes clean accepted worktrees, including those left in history by a restart. An abandoned

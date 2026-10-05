@@ -10,6 +10,8 @@ export interface PiRpcClientOptions {
   thinking?: string;
   name?: string;
   sessionDir?: string;
+  /** Existing transcript to continue (`--session <path>`); set only when resuming a stopped worker. */
+  resumeSession?: string;
   extensionPath?: string;
   extraArgs?: string[];
   env?: Record<string, string>;
@@ -100,6 +102,9 @@ export class PiRpcClient extends EventEmitter {
 
     const args = ["--mode", "rpc"];
     if (this.opts.name) args.push("--name", this.opts.name);
+    // Reopen the previous transcript instead of starting a new session. Pair with
+    // the same --session-dir so the continued session stays in that directory.
+    if (this.opts.resumeSession) args.push("--session", this.opts.resumeSession);
     if (this.opts.provider) args.push("--provider", this.opts.provider);
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.thinking) args.push("--thinking", this.opts.thinking);

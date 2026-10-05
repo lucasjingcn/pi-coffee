@@ -409,6 +409,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。 |
 | `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
+| `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录和控制密钥都保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。 |
@@ -440,8 +441,21 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 ## 清理已完成的工作
 
-`pi_gc` 做两件事。先把已完成的 worker 停掉、驱逐，并移除它们干净的 worktree；然后删除那些已经
-证明合并的已完成工作流分支。
+已停止的 worker 会留着 resume 需要的一切：`pi_resume` 用同一份转录、worktree、分支、spec 和控制密钥
+把它重新拉起来。所以回收范围本来就窄。`pi_gc`、`pi_stop` 和 sweeper 只移除：
+
+- **worktree**：已完成的工作流超过 `PI_COFFEE_WORKTREE_TTL_MIN`，或未收尾但干净的工作流超过
+  `PI_COFFEE_WORKTREE_FINAL_TTL_MIN`（默认 7 天）；脏树一律保留；
+- **转录**（`PI_COFFEE_DATA_DIR/sessions/<id>`）：仅限已停止**且**已收尾的会话；
+- **分支**：只在被明确要求时删 —— `pi_stop` 带 `delete_branch`（或 `PI_COFFEE_DELETE_BRANCHES=1`），
+  以及 `pi_gc` 对已证明合并进目标的尖端。
+
+永远不会自动回收的：有新提交的分支、未完成或未记录 outcome 的会话转录，以及 daemon 状态本身
+（`state.json` 的 history、信箱、黑板、锁，以及 `pi_recover_control` 要读的 `control-credentials`
+记录）。这样被删掉磁盘内容的会话就不能再 resume，只能重新派发。
+
+`pi_gc` 只处理你给的 session IDs：先停掉并驱逐其中已完成的 worker、移除干净的 worktree（包括
+重启后留在 history 里的），然后删除能证明已合并的已完成分支。
 
 只有分支尖端是仓库当前 `HEAD` 的祖先时才会删。用 squash 或 rebase 集成进来的提交不是祖先，会被
 留着让你自己看，gc 从不强删。候选来自持久化元数据，所以 worktree 已经没了的分支（比如 daemon

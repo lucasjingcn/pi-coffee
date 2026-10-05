@@ -450,6 +450,36 @@ export function buildServer(coord: Coordinator): McpServer {
   );
 
   server.registerTool(
+    "pi_resume",
+    {
+      title: "Resume a stopped worker on its own transcript",
+      description:
+        "Restart a stopped, unfinished worker with the conversation it already has instead of re-dispatching. Keeps its worktree, branch, spec, acceptance record and control key; clears stale verification/review evidence. Refuses when the session already has an outcome, when a shutdown is unconfirmed, or when its transcript, agent directory or worktree is gone. The contract is already in the transcript and is not re-sent: pass prompt only for an explicit nudge.",
+      annotations: { readOnlyHint: false, idempotentHint: false },
+      inputSchema: {
+        session_id: z.string(),
+        control_key: z.string().optional(),
+        prompt: z.string().optional().describe("Optional instruction to send once the worker is back up"),
+        provider: z.string().optional(),
+        model: z.string().optional().describe("Override the model (default: the session's own model, then the daemon default)"),
+        thinking: z
+          .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+          .optional()
+          .describe("pi thinking level for the resumed worker (default: PI_COFFEE_THINKING)"),
+      },
+    },
+    async ({ session_id, control_key, prompt, provider, model, thinking }) => {
+      coord.assertControl(session_id, control_key);
+      const meta = await coord.resume(session_id, { prompt, provider, model, thinking });
+      return json({
+        ok: true,
+        ...compactMeta(meta),
+        note: "continued the existing transcript; earlier verification and review evidence was cleared",
+      });
+    },
+  );
+
+  server.registerTool(
     "pi_finish",
     {
       title: "Close a workstream with an outcome",
