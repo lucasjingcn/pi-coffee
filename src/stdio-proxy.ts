@@ -12,11 +12,13 @@
  *   PI_COFFEE_PORT   used if PI_COFFEE_URL is unset
  *   PI_COFFEE_TOKEN  optional bearer/x-pi-coord-token
  */
+import { logLine } from "./log.js";
+
 const URL = process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}/mcp`;
 const TOKEN = process.env.PI_COFFEE_TOKEN || "";
 
 function log(...args: unknown[]): void {
-  console.error("[pi-coffee-proxy]", ...args);
+  logLine("pi-coffee-proxy", ...args);
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

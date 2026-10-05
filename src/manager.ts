@@ -18,6 +18,7 @@ import { prepareWorkerAgentDir } from "./worker-agent-dir.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
+import { logLine } from "./log.js";
 import {
   commitAll,
   createWorktree,
@@ -573,7 +574,7 @@ export class Coordinator {
   private reportSaveError(operation: string, error: unknown): void {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     const detail = error instanceof Error ? error.message : String(error);
-    console.error(`[state] ${operation} failed for ${this.store.path}${code ? ` [${code}]` : ""}: ${detail}`);
+    logLine("state", `${operation} failed for ${this.store.path}${code ? ` [${code}]` : ""}: ${detail}`);
   }
 
   /** Persisted history overlaid with the live sessions (live wins on id collisions). */

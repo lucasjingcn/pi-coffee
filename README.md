@@ -378,6 +378,26 @@ Missing credentials block actual model calls; independently authorized local wor
 
 The single install command above configures the right background startup for the host. For maintenance:
 
+### Logs
+
+The supervisor points the daemon's stderr at `~/.pi-coffee/logs/daemon.err.log` (macOS/Linux) or
+`$HOME\.pi-coffee\logs\daemon.log` (Windows), and every line carries an ISO-8601 UTC timestamp:
+
+```bash
+tail -f ~/.pi-coffee/logs/daemon.err.log
+grep -iE "error|fail|refus|timeout|unreach" ~/.pi-coffee/logs/daemon.err.log
+```
+
+At the next daemon start, a log larger than `PI_COFFEE_LOG_MAX_MB` (default 5 MB) is archived to
+`daemon.err.log.1` with copytruncate, so the descriptor the supervisor holds keeps writing to the
+live file. daemon-side errors (`mcp error:`, `internal error:`, `[state] ... failed`) land here.
+
+Other layers keep their own record: pi appends MCP server logging notifications to
+`~/.pi/agent/mcp.log`, `/mcp` (or `pi mcp list`) shows connection errors plus the tail of the
+server's stderr, and each worker's full transcript is the pi session log under
+`PI_COFFEE_DATA_DIR/sessions/<id>/*.jsonl` — read the live view with `pi_tail` or
+`pi_status({detail:"full"})`. `node scripts/status.mjs` prints the current workers and locks.
+
 ### Linux (systemd user service)
 
 ```bash
@@ -530,6 +550,8 @@ Everything is configured through environment variables.
 | `PI_COFFEE_WORKER_PLUGINS` | *(empty)* | Comma-separated glob allowlist of global plugins a worker may inherit: npm/git package sources, external extension entries, and MCP server names. Empty means none; `*` restores full inheritance. Core `builtin:` extensions always survive. |
 | `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
+| `PI_COFFEE_LOG_MAX_MB` | `5` | Archive a daemon log at the next start once it exceeds this size. `0` disables rotation. |
+| `PI_COFFEE_LOG_KEEP` | `1` | Rotated archives kept per log (`daemon.err.log.1`, `.2`, ...). |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through
@@ -539,7 +561,9 @@ services; `doctor --background` checks persisted credentials before startup is i
 Bad values stop startup rather than limping along. Ports must be integers from 1 to 65535, session
 caps and warning thresholds must be positive safe integers, and the TTL must be finite and at least
 one minute (fractional minutes are fine). Numbers use decimal notation, and booleans accept only `0`
-or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and defaults.
+or `1`. Programmatic overrides passed to `loadConfig` win over both env vars and defaults. The log
+rotation knobs are the one exception: an unreadable value falls back to its default, so a typo can
+never stop the daemon from starting.
 
 ## State and recovery
 

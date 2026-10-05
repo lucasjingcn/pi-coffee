@@ -30,7 +30,7 @@ the provider, checks the environment, and starts a current-user LaunchAgent. Wai
 workers finish before reinstalling; the installer will refuse to restart a running coordinator.
 
 - plist: `~/Library/LaunchAgents/com.picoffee.daemon.plist`
-- logs: `~/.pi-coffee/logs/daemon.out.log`, `~/.pi-coffee/logs/daemon.err.log`
+- logs: `~/.pi-coffee/logs/daemon.out.log`, `~/.pi-coffee/logs/daemon.err.log` — timestamped lines; a log over `PI_COFFEE_LOG_MAX_MB` (default 5 MB) is archived to `daemon.err.log.1` at the next start
 - stop: `launchctl bootout gui/$(id -u)/com.picoffee.daemon`
 
 ## 3. Verify

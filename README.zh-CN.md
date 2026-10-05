@@ -320,6 +320,25 @@ worker 有初始任务加一次纠正，第 3 条指令需说明 override 理由
 
 上面的单条安装命令会按系统配置后台运行。维护命令如下。
 
+### 日志
+
+监督进程把 daemon 的 stderr 指向 `~/.pi-coffee/logs/daemon.err.log`（macOS/Linux）或
+`$HOME\.pi-coffee\logs\daemon.log`（Windows），每行都带 ISO-8601 UTC 时间戳：
+
+```bash
+tail -f ~/.pi-coffee/logs/daemon.err.log
+grep -iE "error|fail|refus|timeout|unreach" ~/.pi-coffee/logs/daemon.err.log
+```
+
+下次启动 daemon 时，超过 `PI_COFFEE_LOG_MAX_MB`（默认 5 MB）的日志会以 copytruncate 方式归档为
+`daemon.err.log.1`，监督进程持有的文件描述符仍写在当前文件上。daemon 侧错误（`mcp error:`、
+`internal error:`、`[state] ... failed`）都在这里。
+
+其它层次各有自己的记录：pi 把 MCP server 的日志通知追加到 `~/.pi/agent/mcp.log`；`/mcp`（或
+`pi mcp list`）显示连接错误和 server stderr 的尾部；每个 worker 的完整过程是
+`PI_COFFEE_DATA_DIR/sessions/<id>/*.jsonl` 下的 pi 会话日志，实时查看用 `pi_tail` 或
+`pi_status({detail:"full"})`。`node scripts/status.mjs` 打印当前 worker 与锁。
+
 ### Linux（systemd 用户服务）
 
 ```bash
@@ -458,12 +477,14 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `PI_COFFEE_WORKER_PLUGINS` | *(空)* | worker 可继承的全局插件白名单（逗号分隔 glob）：npm/git 包、外部扩展条目、MCP 服务器名。留空表示一律不继承；`*` 恢复全部继承。pi 自带的 `builtin:` 扩展始终保留。 |
 | `PI_COFFEE_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
+| `PI_COFFEE_LOG_MAX_MB` | `5` | 下次启动时，超过该大小的 daemon 日志会被归档。`0` 关闭轮转。 |
+| `PI_COFFEE_LOG_KEEP` | `1` | 每个日志保留的归档份数（`daemon.err.log.1`、`.2`……）。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
 
 配置不合法时启动会直接失败，而不是带着问题跑。端口必须是 1 到 65535 的整数，会话上限和提醒阈值必须
-是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。
+是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。传给 `loadConfig` 的代码覆盖值优先于环境变量和默认值。日志轮转的两个开关是唯一例外：值无法解析时回退默认值，拼错不会阻止 daemon 启动。
 传给 `loadConfig` 的代码级 override 优先级最高。
 
 ## 状态与恢复

@@ -6,12 +6,13 @@ import { buildServer } from "./mcp-server.js";
 import type { LockMode } from "./locks.js";
 import { z } from "zod";
 import { WORKER_STARTUP_POLICY } from "./worker-agent-dir.js";
+import { logLine } from "./log.js";
 
 const config = loadConfig();
 const coord = new Coordinator(config);
 
 function log(...args: unknown[]): void {
-  console.error("[pi-coffee]", ...args);
+  logLine("pi-coffee", ...args);
 }
 
 // ---------------------------------------------------------------------------

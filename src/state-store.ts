@@ -4,6 +4,7 @@ import { HANDOFF_KINDS, type Outcome, type SessionMeta, type SessionStatus } fro
 import { validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { WORKSTREAM_PURPOSES, type DelegationSpec } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReviewInput } from "./candidate-review.js";
+import { logLine } from "./log.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
 export interface StateSnapshot {
@@ -356,7 +357,7 @@ export class StateStore {
   private readError(path: string, error: unknown): never {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     const detail = safeReason(error);
-    console.error(`[state] load failed for ${path}${code ? ` [${code}]` : ""}: ${detail}`);
+    logLine("state", `load failed for ${path}${code ? ` [${code}]` : ""}: ${detail}`);
     throw error;
   }
 
@@ -416,10 +417,10 @@ export class StateStore {
   }
 
   private warnRecovered(reason: string, backupPath: string): void {
-    console.error(`[state] recovered ${this.path} from backup ${backupPath} (${reason})`);
+    logLine("state", `recovered ${this.path} from backup ${backupPath} (${reason})`);
   }
 
   private logLoadFailure(file: string, reason: string, detail: string): void {
-    console.error(`[state] failed to load ${file}: ${reason}; ${detail}`);
+    logLine("state", `failed to load ${file}: ${reason}; ${detail}`);
   }
 }
