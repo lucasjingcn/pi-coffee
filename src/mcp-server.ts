@@ -32,6 +32,7 @@ function compactMeta(m: SessionMeta) {
     worktree: m.worktree,
     model: m.model,
     provider: m.provider,
+    thinking: m.thinking,
     cost: m.cost,
     context: m.context,
     turns: m.turns ?? 0,
@@ -44,6 +45,7 @@ function compactMeta(m: SessionMeta) {
     lastEntryId: m.lastEntryId,
     lastText: m.lastText,
     extension: m.extension ?? false,
+    reclaimed: m.reclaimed ?? null,
     acceptance: m.acceptance ?? null,
     verification: m.verification ?? null,
     reviewAcceptance: m.reviewAcceptance ?? null,
@@ -454,7 +456,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Resume a stopped worker on its own transcript",
       description:
-        "Restart a stopped, unfinished worker with the conversation it already has instead of re-dispatching. Keeps its worktree, branch, spec, acceptance record and control key; clears stale verification/review evidence. Refuses when the session already has an outcome, when a shutdown is unconfirmed, or when its transcript, agent directory or worktree is gone. The contract is already in the transcript and is not re-sent: pass prompt only for an explicit nudge.",
+        "Restart a stopped, unfinished worker with the conversation it already has instead of re-dispatching. Keeps its worktree, branch, spec, acceptance record, control key and its provider/model/thinking; clears stale verification/review evidence. Refuses when the session already has an outcome, when its evidence was reclaimed, when a shutdown is unconfirmed, or when its transcript, agent directory or worktree is gone. The contract is already in the transcript and is not re-sent: pass prompt only for an explicit nudge.",
       annotations: { readOnlyHint: false, idempotentHint: false },
       inputSchema: {
         session_id: z.string(),
@@ -465,7 +467,7 @@ export function buildServer(coord: Coordinator): McpServer {
         thinking: z
           .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
           .optional()
-          .describe("pi thinking level for the resumed worker (default: PI_COFFEE_THINKING)"),
+          .describe("pi thinking level for the resumed worker (default: the session's own level, then PI_COFFEE_THINKING)"),
       },
     },
     async ({ session_id, control_key, prompt, provider, model, thinking }) => {

@@ -91,6 +91,8 @@ export interface SessionMeta {
   context?: { tokens: number | null; contextWindow: number; percent: number | null };
   provider?: string;
   model?: string;
+  /** pi thinking level the worker is running at; resume reuses it unless overridden. */
+  thinking?: string;
   pendingQuestions: UiRequest[];
   error?: string;
   /** Assistant turns seen for this session. */
@@ -448,24 +450,32 @@ export class Coordinator {
    * lifecycle as worktree cleanup, and on demand from pi_gc (which reports the counts).
    */
   private async reclaimStale(selected?: Set<string>): Promise<{ credentials: number; compacted: number }> {
-    const ids = new Set<string>();
-    for (const meta of this.history) if (!selected || selected.has(meta.id)) ids.add(meta.id);
-    for (const rt of this.runtimes.values()) if (!selected || selected.has(rt.meta.id)) ids.add(rt.meta.id);
+    // One bucket per session: the archived history copy and, when it still exists, the
+    // runtime meta. The runtime wins in persisted state and the copy takes over once
+    // the sweeper evicts it, so both are compacted and neither can resurrect the bulk.
+    const byId = new Map<string, SessionMeta[]>();
+    const add = (meta: SessionMeta) => {
+      if (selected && !selected.has(meta.id)) return;
+      const bucket = byId.get(meta.id);
+      if (bucket) {
+        if (!bucket.includes(meta)) bucket.push(meta);
+      } else byId.set(meta.id, [meta]);
+    };
+    for (const meta of this.history) add(meta);
+    for (const rt of this.runtimes.values()) add(rt.meta);
 
     let credentials = 0;
     let compacted = 0;
-    for (const id of ids) {
-      // The runtime meta wins in persisted state and the archived copy takes over
-      // once the sweeper evicts it: compact every copy that is beyond recovery.
-      const metas = this.metasFor(id).filter((meta) => this.unrecoverable(meta));
-      if (!metas.length) continue;
+    for (const [id, metas] of byId) {
+      const stale = metas.filter((meta) => this.unrecoverable(meta));
+      if (!stale.length) continue;
 
-      if (metas.some((meta) => !(meta.reclaimed?.credential ?? false))) {
+      if (stale.some((meta) => !(meta.reclaimed?.credential ?? false))) {
         if (await this.vault.remove(id)) credentials += 1;
-        for (const meta of metas) meta.reclaimed = this.reclaimedMarker(meta, true, []);
+        for (const meta of stale) meta.reclaimed = this.reclaimedMarker(meta, true, []);
       }
 
-      const trimmed = metas
+      const trimmed = stale
         .map((meta) => [meta, this.compactStale(meta)] as const)
         .filter(([, fields]) => fields.length > 0);
       if (!trimmed.length) continue;
@@ -478,16 +488,6 @@ export class Coordinator {
       logLine("pi-coffee", `reclaimed ${credentials} stale credential(s) and compacted ${compacted} history entr${compacted === 1 ? "y" : "ies"}`);
     }
     return { credentials, compacted };
-  }
-
-  /** Every in-memory copy of one session: the archived history entry and, if any, the runtime meta. */
-  private metasFor(id: string): SessionMeta[] {
-    const metas: SessionMeta[] = [];
-    const historic = this.history.find((entry) => entry.id === id);
-    if (historic) metas.push(historic);
-    const rt = this.runtimes.get(id);
-    if (rt && rt.meta !== historic) metas.push(rt.meta);
-    return metas;
   }
 
   private reclaimedMarker(meta: SessionMeta, credential: boolean, fields: string[]): NonNullable<SessionMeta["reclaimed"]> {
@@ -904,6 +904,7 @@ export class Coordinator {
         hashes: originalAcceptanceHashes,
       } : undefined,
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
+      thinking: opts.thinking ?? this.config.thinking,
       status: "starting",
       createdAt: Date.now(),
       lastActivity: Date.now(),
@@ -1020,6 +1021,7 @@ export class Coordinator {
     const entry = running?.meta ?? this.history.find((candidate) => candidate.id === id);
     if (!entry) throw new Error(`unknown session: ${id}`);
     if (entry.outcome !== undefined) throw new Error(`session ${id} is finished (${entry.outcome}); re-dispatch instead of resuming`);
+    if (entry.reclaimed) throw new Error(`session ${id} had its evidence reclaimed; re-dispatch instead of resuming`);
     if (entry.status !== "stopped") throw new Error(`session ${id} is ${entry.status}; only a stopped worker can be resumed`);
     if (entry.shutdownUnconfirmed) throw new Error(`session ${id} has an unconfirmed worker shutdown; stop it before resuming`);
     if (!entry.repo || !existsSync(entry.repo)) throw new Error(`session ${id} lost its repository; re-dispatch instead of resuming`);
@@ -1117,7 +1119,7 @@ export class Coordinator {
       piBin: this.config.piBin,
       provider: opts.provider ?? entry.provider ?? this.config.provider,
       model: opts.model ?? entry.model ?? this.config.model,
-      thinking: opts.thinking ?? this.config.thinking,
+      thinking: opts.thinking ?? entry.thinking ?? this.config.thinking,
       name: meta.name,
       sessionDir,
       resumeSession: transcript,
@@ -1340,6 +1342,7 @@ export class Coordinator {
       const state = await rt.client.getState();
       rt.meta.provider = state.model?.provider;
       rt.meta.model = state.model?.id;
+      if (typeof state.thinkingLevel === "string" && state.thinkingLevel) rt.meta.thinking = state.thinkingLevel;
       if (typeof state.sessionName === "string") rt.meta.name = state.sessionName;
 
       if (includeCost) {

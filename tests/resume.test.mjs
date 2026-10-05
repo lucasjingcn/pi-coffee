@@ -218,7 +218,7 @@ test("pi_resume refuses what it cannot prove instead of guessing", posix, async 
   });
 });
 
-async function coordinatorFixture(fn, { shutdownUnconfirmed = false, credentialed = true, workerProcess } = {}) {
+async function coordinatorFixture(fn, { shutdownUnconfirmed = false, credentialed = true, workerProcess, reclaimed = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pi-resume-state-"));
   const repo = await makeRepo(root);
   const fake = join(root, "fake-pi.js");
@@ -253,6 +253,7 @@ async function coordinatorFixture(fn, { shutdownUnconfirmed = false, credentiale
     reviewAcceptance: { acceptedAt: 1, workerSha: sha("a"), note: "stale" },
     workerProcess: workerProcess ?? { pid: 4242, platform: process.platform, started: "1" },
     ...(shutdownUnconfirmed ? { shutdownUnconfirmed: true } : {}),
+    ...(reclaimed ? { reclaimed: { at: 1, credential: true, fields: ["spec"] } } : {}),
   };
   await mkdir(dataDir, { recursive: true });
   await writeFile(join(dataDir, "state.json"), JSON.stringify({ counter: 1, history: [meta] }));
@@ -324,4 +325,116 @@ test("resume refuses an unconfirmed shutdown and a missing control credential", 
   await coordinatorFixture(async (coordinator) => {
     await assert.rejects(coordinator.resume("s1"), /no stored control credential/);
   }, { credentialed: false });
+});
+
+test("a resumed worker keeps its full lifecycle: commit, verify, merge, finish", posix, async () => {
+  await daemonFixture(async (ctx) => {
+    const spawned = await ctx.mcp("pi_spawn", {
+      task: "resume-lifecycle",
+      prompt: "do the work",
+      spec: { goal: "write src/out.txt", scope: ["src"], purpose: "implementation" },
+      acceptance_command: "test -f src/out.txt",
+    });
+    assert.equal(spawned.isError, false, JSON.stringify(spawned.body));
+    const id = spawned.body.id;
+    const control = spawned.body.control_key;
+
+    const settle = async () => {
+      for (let i = 0; i < 200; i += 1) {
+        const found = (await ctx.internal("sessions")).sessions.find((s) => s.id === id);
+        if (found?.status === "idle") return found;
+        await pause(25);
+      }
+      throw new Error("worker never settled");
+    };
+    await settle();
+
+    const stopped = await ctx.mcp("pi_stop", { session_id: id, control_key: control, preserve_worktree: true });
+    assert.equal(stopped.isError, false, JSON.stringify(stopped.body));
+
+    const resumed = await ctx.mcp("pi_resume", { session_id: id, control_key: control });
+    assert.equal(resumed.isError, false, JSON.stringify(resumed.body));
+    await settle();
+
+    // The resumed worker is a normal worker again: its scope is writable and its
+    // branch can be committed, verified, merged and finished.
+    const worktree = (await ctx.internal("sessions")).sessions.find((s) => s.id === id).worktree;
+    await writeFile(join(worktree, "src", "out.txt"), "resumed\n").catch(async (error) => {
+      if (error.code !== "ENOENT") throw error;
+      await mkdir(join(worktree, "src"), { recursive: true });
+      await writeFile(join(worktree, "src", "out.txt"), "resumed\n");
+    });
+
+    const committed = await ctx.mcp("pi_commit", { session_id: id, control_key: control, message: "resumed work" });
+    assert.equal(committed.isError, false, JSON.stringify(committed.body));
+
+    const verified = await ctx.mcp("pi_verify", { session_id: id, control_key: control });
+    assert.equal(verified.isError, false, JSON.stringify(verified.body));
+
+    const merged = await ctx.mcp("pi_merge", { session_id: id, control_key: control });
+    assert.equal(merged.isError, false, JSON.stringify(merged.body));
+
+    const finished = await ctx.mcp("pi_finish", { session_id: id, control_key: control, outcome: "success_first" });
+    assert.equal(finished.isError, false, JSON.stringify(finished.body));
+    assert.equal((await ctx.internal("sessions")).sessions.find((s) => s.id === id).outcome, "success_first");
+  });
+});
+
+test("resume keeps the worker's own model, provider and thinking level", posix, async () => {
+  await daemonFixture(async (ctx) => {
+    const spawned = await ctx.mcp("pi_spawn", {
+      task: "resume-levels",
+      repo: ctx.repo,
+      provider: "woaichifan",
+      model: "deepseek-v4.1-flash",
+      thinking: "low",
+      prompt: "do the work",
+      spec: { goal: "write src/out.txt", scope: ["src"], purpose: "implementation" },
+    });
+    assert.equal(spawned.isError, false, JSON.stringify(spawned.body));
+    const id = spawned.body.id;
+    const control = spawned.body.control_key;
+    await ctx.mcp("pi_stop", { session_id: id, control_key: control, preserve_worktree: true });
+
+    const resumed = await ctx.mcp("pi_resume", { session_id: id, control_key: control });
+    assert.equal(resumed.isError, false, JSON.stringify(resumed.body));
+    const argued = (await ctx.starts()).at(-1).args;
+    // The daemon default is xhigh; a resumed worker must not silently get more
+    // thinking (and cost) than the session it continues.
+    assert.equal(argued[argued.indexOf("--thinking") + 1], "low");
+    assert.equal(argued[argued.indexOf("--model") + 1], "deepseek-v4.1-flash");
+    assert.equal(argued[argued.indexOf("--provider") + 1], "woaichifan");
+
+    // An explicit override still wins.
+    await ctx.mcp("pi_stop", { session_id: id, control_key: control, preserve_worktree: true });
+    const overridden = await ctx.mcp("pi_resume", { session_id: id, control_key: control, thinking: "high" });
+    assert.equal(overridden.isError, false, JSON.stringify(overridden.body));
+    const lastArgs = (await ctx.starts()).at(-1).args;
+    assert.equal(lastArgs[lastArgs.indexOf("--thinking") + 1], "high");
+  });
+});
+
+test("resume refuses a session whose evidence was already reclaimed", posix, async () => {
+  await coordinatorFixture(async (coordinator) => {
+    await assert.rejects(coordinator.resume("s1"), /evidence reclaimed/);
+  }, { reclaimed: true });
+});
+
+test("pi_gc through MCP reclaims a dead session and the full view explains it", posix, async () => {
+  await daemonFixture(async (ctx) => {
+    const worker = await stoppedWorker(ctx, ["reclaim-view"]);
+    const worktree = (await ctx.internal("sessions")).sessions.find((s) => s.id === worker.id).worktree;
+    await rm(worktree, { recursive: true, force: true });
+    await rm(worker.sessionDir, { recursive: true, force: true });
+
+    const gc = await ctx.mcp("pi_gc", { session_ids: [worker.id], control_keys: { [worker.id]: worker.control_key } });
+    assert.equal(gc.isError, false, JSON.stringify(gc.body));
+    assert.equal(gc.body.credentials_reclaimed, 1);
+    assert.equal(gc.body.history_compacted, 1);
+
+    const status = await ctx.mcp("pi_status", { session_id: worker.id, detail: "full" });
+    assert.equal(status.isError, false, JSON.stringify(status.body));
+    assert.equal(status.body.status, "stopped");
+    assert.equal(status.body.reclaimed.credential, true, "the full view must say why evidence is missing");
+  });
 });
