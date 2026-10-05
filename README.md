@@ -482,7 +482,7 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 | `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record, control key and its provider/model/thinking level, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, whose evidence was reclaimed, have an unconfirmed shutdown, or have lost their transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
 | `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
 | `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
-| `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also deletes the control credential and trims the bulk evidence of sessions that can no longer be resumed (`credentials_reclaimed`, `history_compacted`). |
+| `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also reclaims what a session beyond recovery still holds (`transcripts_reclaimed`, `credentials_reclaimed`, `history_compacted`). |
 | `pi_metrics` | Usage and cost evidence for active/historical sessions, optionally filtered by `session_ids`. Missing costs stay unknown; partial ratios do not prove savings. |
 | `pi_record_cost` | Register orchestrator cost evidence with `id`, `amount`, `currency`, `source`, `reference`, and covered `session_ids`; distinguish reported, manual and estimated evidence. |
 
@@ -527,18 +527,20 @@ sweeper only remove:
 - **branches** only when asked for: `pi_stop` with `delete_branch` (or `PI_COFFEE_DELETE_BRANCHES=1`),
   and `pi_gc` for tips it proves merged into the target.
 
-A session with neither its worktree nor its transcript left can no longer be resumed, verified or
-merged. Once that is true, the daemon reclaims what only a recoverable session needs: its control
-credential is deleted and the bulk in its history entry is trimmed — acceptance output and the final
-message keep a tail, contract free-text and acceptance hashes are dropped, while the review record,
-outcome, purpose, cost and token counters stay, so `pi_report` and `pi_metrics` read the same numbers.
-`pi_gc` reports this as `credentials_reclaimed` and `history_compacted`; the sweeper does the same work
+A session's work is beyond recovery once its worktree is gone and it either already has an outcome,
+or its worker branch is gone (no committed work left to resurrect). Then the daemon reclaims what it
+still holds: the transcript directory under `PI_COFFEE_DATA_DIR/sessions/<id>`, its control credential,
+and the bulk in its history entry — acceptance output and the final message keep a tail, contract
+free-text and acceptance hashes are dropped, while the review record, outcome, purpose, cost and token
+counters stay, so `pi_report` and `pi_metrics` read the same numbers. An unrecorded session with a live
+branch is kept, because the branch could still be checked out to continue it. `pi_gc` reports this as
+`transcripts_reclaimed`, `credentials_reclaimed` and `history_compacted`; the sweeper does the same work
 under `PI_COFFEE_AUTO_CLEAN`.
 
-Never reclaimed automatically: branches with new commits, the transcript of any session that still has a
-worktree, the credential and evidence of any session with a worktree or transcript left on disk, and
-the daemon's own bookkeeping (the mailbox, the board and the locks). Sessions whose worktree and
-transcript are gone are no longer resumable — dispatch a fresh one instead.
+Never reclaimed automatically: branches with new commits, the transcript and credential of any session
+whose worktree or live worker branch is still there (i.e. anything that could still be resumed or
+checked out), and the daemon's own bookkeeping (the mailbox, the board and the locks). Sessions whose
+work is beyond recovery are no longer resumable — dispatch a fresh one instead.
 
 Scoped `pi_gc` acts only on the supplied session IDs. It stops and evicts selected finished workers
 and removes clean accepted worktrees, including those left in history by a restart. An abandoned

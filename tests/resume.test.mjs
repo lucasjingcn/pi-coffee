@@ -426,6 +426,10 @@ test("pi_gc through MCP reclaims a dead session and the full view explains it", 
     const worktree = (await ctx.internal("sessions")).sessions.find((s) => s.id === worker.id).worktree;
     await rm(worktree, { recursive: true, force: true });
     await rm(worker.sessionDir, { recursive: true, force: true });
+    // The worker branch is still alive and the session has no outcome: only once the
+    // branch is gone too is its work beyond recovery and the session reclaimed.
+    execFileSync("git", ["-C", ctx.repo, "worktree", "prune"]);
+    execFileSync("git", ["-C", ctx.repo, "branch", "-D", `pi/${worker.id}`]);
 
     const gc = await ctx.mcp("pi_gc", { session_ids: [worker.id], control_keys: { [worker.id]: worker.control_key } });
     assert.equal(gc.isError, false, JSON.stringify(gc.body));

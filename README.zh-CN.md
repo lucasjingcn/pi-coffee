@@ -420,7 +420,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录、控制密钥以及 provider/model/thinking 全部保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、证据已被回收、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
-| `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对已无法 resume 的会话还会删除其控制凭据、裁掉 history 里的大块证据（`credentials_reclaimed`、`history_compacted`）。 |
+| `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对工作已无法挽救的会话还会回收其转录目录、控制凭据、裁掉 history 里的大块证据（`transcripts_reclaimed`、`credentials_reclaimed`、`history_compacted`）。 |
 | `pi_metrics` | 活跃与历史任务的使用量和费用证据，可用 `session_ids` 过滤；缺失费用为未知，部分比值不证明省钱。 |
 | `pi_record_cost` | 登记主代理费用：`id`、`amount`、`currency`、`source`、`reference`、覆盖的 `session_ids`；区分实报、手动和估算来源。 |
 
@@ -458,14 +458,15 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 - **分支**：只在被明确要求时删 —— `pi_stop` 带 `delete_branch`（或 `PI_COFFEE_DELETE_BRANCHES=1`），
   以及 `pi_gc` 对已证明合并进目标的尖端。
 
-worktree 和转录都没了的会话已经无法 resume、验收或合并。这时 daemon 会回收只有可恢复会话才需要的东西：
-删除它的控制凭据，并裁掉 history 条目里的大块内容 —— 验收输出和最终报告只保留尾部，契约的自由文本字段
-和验收摘要被丢弃，而审查记录、outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和
-`pi_metrics` 读到的数字不变。`pi_gc` 用 `credentials_reclaimed` 和 `history_compacted` 上报，sweeper
-在 `PI_COFFEE_AUTO_CLEAN` 开启时做同样的事。
+一个会话的工作「已无法挽救」= worktree 没了，而且要么已经记了 outcome，要么它的 worker 分支也没了（没有可抢救的
+已提交工作）。这时 daemon 会回收它还占着的一切：`PI_COFFEE_DATA_DIR/sessions/<id>` 下的转录目录、控制凭据，
+以及 history 条目里的大块内容 —— 验收输出和最终报告只保留尾部，契约的自由文本字段和验收摘要被丢弃，而审查记录、
+outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `pi_metrics` 读到的数字不变。没有 outcome
+但有活分支的会话会被保留，因为分支还能 checkout 出来接着干。`pi_gc` 用 `transcripts_reclaimed`、
+`credentials_reclaimed` 和 `history_compacted` 上报，sweeper 在 `PI_COFFEE_AUTO_CLEAN` 开启时做同样的事。
 
-永远不会自动回收的：有新提交的分支、仍然有 worktree 的会话转录、磁盘上还留着 worktree 或转录的会话的凭据与证据，
-以及 daemon 自己的簿记（信箱、黑板、锁）。worktree 和转录都没了的会话不能再 resume，只能重新派发。
+永远不会自动回收的：有新提交的分支、worktree 或活分支还在的会话的转录与凭据（即任何还能 resume 或 checkout
+的东西），以及 daemon 自己的簿记（信箱、黑板、锁）。工作已无法挽救的会话不能再 resume，只能重新派发。
 
 `pi_gc` 只处理你给的 session IDs：先停掉并驱逐其中已完成的 worker、移除干净的 worktree（包括
 重启后留在 history 里的），然后删除能证明已合并的已完成分支。

@@ -329,7 +329,9 @@ export class Coordinator {
    * Remove the pi transcript directory for a finished, stopped session whose
    * retention has lapsed. Tied to the same autoClean lifecycle as the worktree;
    * lastText/lastEntryId live in state, so no report or resume data is lost.
-   * Dirty, unrecorded and abandoned transcripts are preserved.
+   * This path only touches finished sessions; the reclaimStale sweep also removes
+   * the transcript of an unfinished session whose work is beyond recovery (no
+   * worktree and no live branch), but leaves a live-branch transcript alone.
    */
   private async cleanSessionDir(meta: SessionMeta): Promise<boolean> {
     if (this.isLive(meta.id)) return false;
@@ -375,17 +377,26 @@ export class Coordinator {
   }
 
   /**
-   * True once nothing on disk can bring this session back: no worktree, no
-   * transcript directory and no live runtime. Only then are its control credential
-   * and its bulk evidence dead weight.
+   * True once a session's work is beyond recovery: its worktree is gone and it either
+   * already has an outcome, or its worker branch is gone so there is no committed work
+   * left to resurrect. Only then are its transcript, control credential and history
+   * bulk dead weight. An unrecorded session with a live branch is kept, because the
+   * branch could still be checked out to continue the work.
    */
-  private unrecoverable(meta: SessionMeta): boolean {
+  private async dead(meta: SessionMeta): Promise<boolean> {
     if (this.isLive(meta.id)) return false;
     // An unconfirmed shutdown still has an open ownership question to resolve.
     if (meta.shutdownUnconfirmed) return false;
     if (meta.worktree && existsSync(meta.worktree)) return false;
-    if (existsSync(join(this.config.dataDir, "sessions", meta.id))) return false;
-    return true;
+    if (meta.outcome !== undefined) return true;
+    // No outcome: keep the transcript only while a live branch could still be checked out.
+    if (!meta.repo || !existsSync(meta.repo) || !meta.branch) return true;
+    try {
+      await resolveRef(meta.repo, `refs/heads/${meta.branch}`);
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -445,11 +456,12 @@ export class Coordinator {
   }
 
   /**
-   * Reclaim what unrecoverable sessions hold: their control credential and the bulk
-   * evidence in their history entry. Runs from the sweeper under the same autoClean
-   * lifecycle as worktree cleanup, and on demand from pi_gc (which reports the counts).
+   * Reclaim what sessions beyond recovery still hold: their control credential, their
+   * transcript directory and the bulk evidence in their history entry. Runs from the
+   * sweeper under the same autoClean lifecycle as worktree cleanup, and on demand from
+   * pi_gc (which reports the counts).
    */
-  private async reclaimStale(selected?: Set<string>): Promise<{ credentials: number; compacted: number }> {
+  private async reclaimStale(selected?: Set<string>): Promise<{ credentials: number; compacted: number; transcripts: number }> {
     // One bucket per session: the archived history copy and, when it still exists, the
     // runtime meta. The runtime wins in persisted state and the copy takes over once
     // the sweeper evicts it, so both are compacted and neither can resurrect the bulk.
@@ -466,28 +478,37 @@ export class Coordinator {
 
     let credentials = 0;
     let compacted = 0;
+    let transcripts = 0;
     for (const [id, metas] of byId) {
-      const stale = metas.filter((meta) => this.unrecoverable(meta));
+      const stale: SessionMeta[] = [];
+      for (const meta of metas) if (await this.dead(meta)) stale.push(meta);
       if (!stale.length) continue;
+
+      const sessionDir = join(this.config.dataDir, "sessions", id);
+      let transcriptRemoved = false;
+      if (existsSync(sessionDir)) {
+        try { await rm(sessionDir, { recursive: true, force: true }); transcriptRemoved = true; transcripts += 1; }
+        catch { /* retry on the next sweep */ }
+      }
+      const removedFields = transcriptRemoved ? ["transcript"] : [];
 
       if (stale.some((meta) => !(meta.reclaimed?.credential ?? false))) {
         if (await this.vault.remove(id)) credentials += 1;
-        for (const meta of stale) meta.reclaimed = this.reclaimedMarker(meta, true, []);
+        for (const meta of stale) meta.reclaimed = this.reclaimedMarker(meta, true, removedFields);
       }
 
       const trimmed = stale
         .map((meta) => [meta, this.compactStale(meta)] as const)
         .filter(([, fields]) => fields.length > 0);
-      if (!trimmed.length) continue;
-      for (const [meta, fields] of trimmed) meta.reclaimed = this.reclaimedMarker(meta, true, fields);
-      compacted += 1;
+      for (const [meta, fields] of trimmed) meta.reclaimed = this.reclaimedMarker(meta, true, [...fields, ...removedFields]);
+      if (trimmed.length) compacted += 1;
     }
 
-    if (credentials || compacted) {
+    if (credentials || compacted || transcripts) {
       this.scheduleSave();
-      logLine("pi-coffee", `reclaimed ${credentials} stale credential(s) and compacted ${compacted} history entr${compacted === 1 ? "y" : "ies"}`);
+      logLine("pi-coffee", `reclaimed ${credentials} credential(s), ${transcripts} transcript(s), compacted ${compacted} history entr${compacted === 1 ? "y" : "ies"}`);
     }
-    return { credentials, compacted };
+    return { credentials, compacted, transcripts };
   }
 
   private reclaimedMarker(meta: SessionMeta, credential: boolean, fields: string[]): NonNullable<SessionMeta["reclaimed"]> {
@@ -553,7 +574,7 @@ export class Coordinator {
       branches = { deleted: [], retained: [], failure: error instanceof Error ? error.message : String(error) };
     }
 
-    const reclaimed = await this.reclaimStale(selected).catch(() => ({ credentials: 0, compacted: 0 }));
+    const reclaimed = await this.reclaimStale(selected).catch(() => ({ credentials: 0, compacted: 0, transcripts: 0 }));
 
     this.notifyWaiters();
     this.scheduleSave();
@@ -566,6 +587,7 @@ export class Coordinator {
       ...(branches.failure ? { branches_error: branches.failure } : {}),
       sessions_evicted: evicted,
       credentials_reclaimed: reclaimed.credentials,
+      transcripts_reclaimed: reclaimed.transcripts,
       history_compacted: reclaimed.compacted,
       remaining_live: this.runtimes.size,
     };

@@ -121,6 +121,7 @@ async function mixedEntries({ root, repo, dataDir, worktrees }) {
   await mkdir(join(sessions, "s2", "agent"), { recursive: true });
   await writeFile(join(sessions, "s2", "2026-01-01T00-00-00-000Z_01a.jsonl"), "{}\n");
   await mkdir(join(worktrees, "s4"), { recursive: true });
+  await mkdir(join(worktrees, "s5"), { recursive: true });
   await mkdir(join(sessions, "s5", "agent"), { recursive: true });
   await writeFile(join(sessions, "s5", "2026-01-01T00-00-00-000Z_01b.jsonl"), "{}\n");
   void root;
@@ -220,6 +221,16 @@ test("a live worker is never reclaimed, even with no worktree or transcript left
 
     // Once stopped, nothing on disk can bring it back, so it is reclaimed.
     await coordinator.stop(id);
+    // The worker branch is still alive and the session has no outcome: the daemon
+    // keeps the door open (the branch could still be checked out), so nothing is
+    // reclaimed until the branch is gone too.
+    const kept = await coordinator.gc([id]);
+    assert.equal(kept.credentials_reclaimed, 0);
+    assert.equal(existsSync(credential), true);
+    assert.equal(coordinator.snapshot(id).reclaimed, undefined);
+
+    execFileSync("git", ["-C", repo, "worktree", "prune"]);
+    execFileSync("git", ["-C", repo, "branch", "-D", `pi/${id}`]);
     const stopped = await coordinator.gc([id]);
     assert.equal(stopped.credentials_reclaimed, 1);
     assert.equal(existsSync(credential), false);
@@ -276,4 +287,39 @@ test("a malformed reclamation marker is rejected on load", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+async function makeTranscript(dataDir, id) {
+  const dir = join(dataDir, "sessions", id);
+  await mkdir(join(dir, "agent"), { recursive: true });
+  await writeFile(join(dir, "2026-01-01T00-00-00-000Z_01.jsonl"), "{}\n");
+}
+
+test("a transcript whose work is beyond recovery is reclaimed; a live branch is kept", async () => {
+  await fixture(async ({ repo, dataDir, worktrees }) => {
+    const base = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    await makeTranscript(dataDir, "s10");
+    await makeTranscript(dataDir, "s11");
+    await makeTranscript(dataDir, "s12");
+    // s11 keeps a live branch with no outcome; s10 has an outcome; s12 has no branch.
+    execFileSync("git", ["-C", repo, "branch", "pi/s11", base]);
+    return [
+      { id: "s10", meta: { ...bulkEntry("s10", repo, join(worktrees, "s10")), baseRef: base } },
+      { id: "s11", meta: { ...bulkEntry("s11", repo, join(worktrees, "s11")), baseRef: base, outcome: undefined, outcomeNote: undefined } },
+      { id: "s12", meta: { ...bulkEntry("s12", repo, join(worktrees, "s12")), baseRef: base, outcome: undefined, outcomeNote: undefined } },
+    ];
+  }, async ({ coordinator, dataDir }) => {
+    const result = await coordinator.gc(["s10", "s11", "s12"]);
+    assert.equal(result.transcripts_reclaimed, 2, JSON.stringify(result));
+    assert.equal(result.credentials_reclaimed, 2);
+    assert.equal(existsSync(join(dataDir, "sessions", "s10")), false);
+    assert.equal(existsSync(join(dataDir, "sessions", "s12")), false);
+    assert.ok(coordinator.snapshot("s10").reclaimed.fields.includes("transcript"));
+    assert.ok(coordinator.snapshot("s12").reclaimed.fields.includes("transcript"));
+
+    // s11 has a live branch and no outcome: everything stays.
+    assert.equal(existsSync(join(dataDir, "sessions", "s11")), true);
+    assert.equal(existsSync(join(dataDir, "control-credentials", "s11.json")), true);
+    assert.equal(coordinator.snapshot("s11").reclaimed, undefined);
+  });
 });

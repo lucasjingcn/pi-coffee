@@ -739,7 +739,7 @@ export function buildServer(coord: Coordinator): McpServer {
     {
       title: "Clean up finished workers",
       description:
-        "Clean selected stopped workers, including historical sessions: accepted work and abandoned work with no commit or dirty files. Branches are removed only when safely merged; dirty, unrecorded, and abandoned work with commits is retained. Also reclaims what a session that can no longer be resumed is still holding: its control credential is deleted and the bulk evidence in its history entry is trimmed (reported as credentials_reclaimed and history_compacted), while everything the scoreboard reads is kept. Supply session_ids and matching control_keys. Global cleanup requires keys for every protected session, including history.",
+        "Clean selected stopped workers, including historical sessions: accepted work and abandoned work with no commit or dirty files. Branches are removed only when safely merged; dirty, unrecorded, and abandoned work with commits is retained. Also reclaims what a session beyond recovery still holds: once its worktree is gone and it has an outcome or no live worker branch, its transcript directory, control credential and the bulk evidence in its history entry are removed (reported as transcripts_reclaimed, credentials_reclaimed and history_compacted), while everything the scoreboard reads is kept. Supply session_ids and matching control_keys. Global cleanup requires keys for every protected session, including history.",
       inputSchema: { session_ids: z.array(z.string()).min(1).optional(), control_keys: z.record(z.string()).optional() },
     },
     async ({ session_ids, control_keys }) => {
