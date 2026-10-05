@@ -44,6 +44,11 @@ const cases = [
     paths: ['new', 'setTimeout'],
   },
   {
+    title: 'null device redirects are not write targets',
+    cmd: 'ls /tmp/artifacts/ 2>/dev/null | head -50; printf x > /dev/null; printf y 1>/dev/null',
+    paths: [],
+  },
+  {
     title: 'quoted JS program is not scanned as shell',
     cmd: "node -e 'const task = () => new Promise(resolve => setTimeout(resolve, 5)); task();'",
     paths: [],

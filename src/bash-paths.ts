@@ -456,6 +456,13 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * Device sinks that discard whatever is written to them. Redirecting into
+ * `/dev/null` never creates or modifies a file, so it is not a write target
+ * (and must not be treated as one, or `2>/dev/null` blocks ordinary reads).
+ */
+const DISCARD_DEVICES = new Set(["/dev/null"]);
+
+/**
  * Extract repo paths a bash command is expected to write. Only literal targets
  * are returned; dynamic expressions are ignored.
  */
@@ -466,6 +473,7 @@ export function bashPaths(cmd: string): string[] {
   const add: Adder = (raw) => {
     if (!raw) return;
     if (raw === "-" || raw.startsWith("-") || raw.startsWith("&")) return;
+    if (DISCARD_DEVICES.has(raw)) return;
     if (/[$`*?{}[\]~]/.test(raw)) return; // dynamic / glob / expansion
     out.add(raw);
   };
