@@ -207,6 +207,14 @@ retains scope/acceptance reservations. Windows crash-orphan recovery requires lo
 A `shutdown_failed` notice retains locks and blocks worker
 writes; resolve actual process termination first. Notifications alone do not establish acceptance.
 
+A worker that died mid-flight with its work still on disk is resumed, not re-dispatched: `pi_resume`
+continues the same transcript, worktree, branch, spec, acceptance record and control key, so context
+that was already read and paid for is not discovered twice. It clears the interrupted run's
+verification and review evidence first, so re-verify the candidate before integrating. Re-dispatch
+only when the session already has an outcome, or its transcript, worker agent directory, worktree or
+credential is gone; `pi_resume` refuses those instead of guessing. Pass `prompt` only as a nudge — the
+contract is already in the transcript.
+
 An `awaiting_acceptance` notice requires owner review: inspect an unchanged investigation/review
 and finish it with the normal accepted-report path; verify/review/integrate implementation before
 finishing successfully. Do not leave a delivered worker idle indefinitely. After 30 minutes idle

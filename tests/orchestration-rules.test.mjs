@@ -71,6 +71,16 @@ test("client-side tool timeouts are documented as outer limits, not worker failu
   }
 });
 
+test("a mid-flight death is resumed on the same transcript instead of re-dispatched", () => {
+  assert.match(PLAYBOOK, /resumed, not re-dispatched/);
+  assert.match(PLAYBOOK, /pi_resume`\s+continues the same transcript/);
+  assert.match(PLAYBOOK, /clears the interrupted run's\s+verification and review evidence/);
+  assert.match(PLAYBOOK, /Re-dispatch\s+only when the session already has an outcome/);
+  assert.match(PLAYBOOK, /contract is already in the transcript/);
+  assert.match(MCP_INSTRUCTIONS, /pi_resume/);
+  assert.match(MCP_INSTRUCTIONS, /instead of re-dispatching/);
+});
+
 test("runtime policy location does not depend on the daemon working directory", () => {
   const runtimeUrl = new URL("../dist/playbook.js", import.meta.url).href;
   const output = execFileSync(process.execPath, ["--input-type=module", "-e", `const { PLAYBOOK } = await import(${JSON.stringify(runtimeUrl)}); process.stdout.write(PLAYBOOK);`], { cwd: tmpdir(), encoding: "utf8" });
