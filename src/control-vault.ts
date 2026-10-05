@@ -73,4 +73,24 @@ export class ControlVault {
     } catch { fail(); }
     finally { await handle?.close(); await unlink(temp).catch(() => undefined); }
   }
+
+  /**
+   * Delete one stored credential and report whether a record was actually removed.
+   *
+   * Callers must first prove the session can no longer be resumed (no worktree and
+   * no transcript): for a recoverable session the record must stay, because pi_resume
+   * fails closed on a missing credential rather than minting a replacement.
+   */
+  async remove(sessionId: string): Promise<boolean> {
+    validateId(sessionId);
+    // Never create the directory for a removal: an absent vault has nothing to delete.
+    if (!await this.directoryReady(false)) return false;
+    try {
+      await unlink(join(this.directory, `${sessionId}.json`));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      return fail();
+    }
+  }
 }

@@ -111,10 +111,13 @@ test("GC deleting merged and empty abandoned historical branches retains cost ev
   assert.equal(gc.branches_deleted, 2);
   assert.throws(() => git("rev-parse", "--verify", "refs/heads/pi/s1"));
   assert.throws(() => git("rev-parse", "--verify", "refs/heads/pi/s2"));
-  assert.deepEqual(await coordinator.metrics(), before);
+  // gc also marks these now-unrecoverable sessions as reclaimed; that bookkeeping is
+  // not cost evidence and is the only thing gc is allowed to add here.
+  const costEvidence = (report) => JSON.parse(JSON.stringify(report, (key, value) => (key === "reclaimed" ? undefined : value)));
+  assert.deepEqual(costEvidence(await coordinator.metrics()), costEvidence(before));
   await close(coordinator);
   const restarted = await open();
-  assert.deepEqual(await restarted.metrics(), before);
+  assert.deepEqual(costEvidence(await restarted.metrics()), costEvidence(before));
   assert.equal((await restarted.metrics()).combined.total, 9);
 }));
 

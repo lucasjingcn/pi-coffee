@@ -47,6 +47,14 @@ const ACCEPTANCE_PRECHECK_OWNER = "__acceptance_precheck__";
 /** Workstream outcomes whose branches are eligible for safe cleanup once proven merged. */
 const FINISHED_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["success_first", "success_second", "taken_over"]);
 
+/**
+ * Bulk evidence kept for a session that can no longer be resumed. A session whose
+ * worktree and transcript are both gone cannot be re-verified, re-merged or
+ * resumed, so its long strings only make state.json grow: keep a tail for context.
+ */
+const RECLAIM_LAST_TEXT_CHARS = 500;
+const RECLAIM_OUTPUT_CHARS = 2_000;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -92,6 +100,11 @@ export interface SessionMeta {
   /** Final disposition of this workstream. */
   outcome?: Outcome;
   outcomeNote?: string;
+  /**
+   * Set once a session that can no longer be resumed has had its control credential
+   * deleted and its bulk evidence trimmed, so the sweeper never repeats the work.
+   */
+  reclaimed?: { at: number; credential: boolean; fields: string[] };
   /** Whether the acceptance test was authored/owned by Codex (spec-derived) rather than the worker. */
   testsOwnedByCodex?: boolean;
   /** Coordinator-authored acceptance files written into the worktree before the worker starts. */
@@ -238,6 +251,7 @@ export class Coordinator {
     }
     for (const repo of repos) await pruneWorktrees(repo).catch(() => {});
     await this.sweepFinalRetention().catch(() => {});
+    await this.reclaimStale().catch(() => {});
   }
 
   private startSweeper(): void {
@@ -269,6 +283,7 @@ export class Coordinator {
       }
     }
     await this.sweepFinalRetention(now).catch(() => {});
+    await this.reclaimStale().catch(() => {});
   }
 
   /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
@@ -358,6 +373,132 @@ export class Coordinator {
   }
 
   /**
+   * True once nothing on disk can bring this session back: no worktree, no
+   * transcript directory and no live runtime. Only then are its control credential
+   * and its bulk evidence dead weight.
+   */
+  private unrecoverable(meta: SessionMeta): boolean {
+    if (this.isLive(meta.id)) return false;
+    // An unconfirmed shutdown still has an open ownership question to resolve.
+    if (meta.shutdownUnconfirmed) return false;
+    if (meta.worktree && existsSync(meta.worktree)) return false;
+    if (existsSync(join(this.config.dataDir, "sessions", meta.id))) return false;
+    return true;
+  }
+
+  /**
+   * Trim what only a recoverable session needs, keeping every field the scoreboard
+   * reads (outcome, purpose, cost, tokens, counters, review records) and every field
+   * the state validator enforces (requirements, validation paths, candidate review).
+   * Returns the field names that changed.
+   */
+  private compactStale(meta: SessionMeta): string[] {
+    const fields: string[] = [];
+    // Trim to the limit exactly and keep the strings clean: the audit trail of what
+    // was reclaimed lives in `meta.reclaimed.fields`, so a second pass finds nothing
+    // left to cut and never re-trims its own output.
+    const tail = (text: string, limit: number) => text.slice(-limit);
+
+    if (meta.lastText && meta.lastText.length > RECLAIM_LAST_TEXT_CHARS) {
+      meta.lastText = tail(meta.lastText, RECLAIM_LAST_TEXT_CHARS);
+      fields.push("lastText");
+    }
+
+    const result = meta.verification?.result;
+    if (result && !result.compacted
+      && (result.stdout.length > RECLAIM_OUTPUT_CHARS || result.stderr.length > RECLAIM_OUTPUT_CHARS)) {
+      result.stdout = tail(result.stdout, RECLAIM_OUTPUT_CHARS);
+      result.stderr = tail(result.stderr, RECLAIM_OUTPUT_CHARS);
+      result.compacted = true;
+      fields.push("verification.result");
+    }
+
+    // Free-text contract fields are never validated on reload; requirements and
+    // validation paths must stay, because the candidate review verdicts bind to them.
+    if (meta.spec) {
+      const bulk = meta.spec.goal || meta.spec.contracts?.length || meta.spec.constraints?.length || meta.spec.non_goals?.length;
+      if (bulk) {
+        meta.spec = { ...meta.spec, goal: "", contracts: undefined, constraints: undefined, non_goals: undefined };
+        fields.push("spec");
+      }
+    }
+
+    if (meta.acceptance?.hashes && Object.keys(meta.acceptance.hashes).length) {
+      meta.acceptance = { ...meta.acceptance, hashes: {} };
+      fields.push("acceptance.hashes");
+    }
+
+    if (meta.heldLocks?.length) {
+      meta.heldLocks = [];
+      fields.push("heldLocks");
+    }
+
+    if (meta.workerProcess) {
+      // Nothing owns this pid any more, and it must not stay kill-authority.
+      meta.workerProcess = undefined;
+      fields.push("workerProcess");
+    }
+
+    return fields;
+  }
+
+  /**
+   * Reclaim what unrecoverable sessions hold: their control credential and the bulk
+   * evidence in their history entry. Runs from the sweeper under the same autoClean
+   * lifecycle as worktree cleanup, and on demand from pi_gc (which reports the counts).
+   */
+  private async reclaimStale(selected?: Set<string>): Promise<{ credentials: number; compacted: number }> {
+    const ids = new Set<string>();
+    for (const meta of this.history) if (!selected || selected.has(meta.id)) ids.add(meta.id);
+    for (const rt of this.runtimes.values()) if (!selected || selected.has(rt.meta.id)) ids.add(rt.meta.id);
+
+    let credentials = 0;
+    let compacted = 0;
+    for (const id of ids) {
+      // The runtime meta wins in persisted state and the archived copy takes over
+      // once the sweeper evicts it: compact every copy that is beyond recovery.
+      const metas = this.metasFor(id).filter((meta) => this.unrecoverable(meta));
+      if (!metas.length) continue;
+
+      if (metas.some((meta) => !(meta.reclaimed?.credential ?? false))) {
+        if (await this.vault.remove(id)) credentials += 1;
+        for (const meta of metas) meta.reclaimed = this.reclaimedMarker(meta, true, []);
+      }
+
+      const trimmed = metas
+        .map((meta) => [meta, this.compactStale(meta)] as const)
+        .filter(([, fields]) => fields.length > 0);
+      if (!trimmed.length) continue;
+      for (const [meta, fields] of trimmed) meta.reclaimed = this.reclaimedMarker(meta, true, fields);
+      compacted += 1;
+    }
+
+    if (credentials || compacted) {
+      this.scheduleSave();
+      logLine("pi-coffee", `reclaimed ${credentials} stale credential(s) and compacted ${compacted} history entr${compacted === 1 ? "y" : "ies"}`);
+    }
+    return { credentials, compacted };
+  }
+
+  /** Every in-memory copy of one session: the archived history entry and, if any, the runtime meta. */
+  private metasFor(id: string): SessionMeta[] {
+    const metas: SessionMeta[] = [];
+    const historic = this.history.find((entry) => entry.id === id);
+    if (historic) metas.push(historic);
+    const rt = this.runtimes.get(id);
+    if (rt && rt.meta !== historic) metas.push(rt.meta);
+    return metas;
+  }
+
+  private reclaimedMarker(meta: SessionMeta, credential: boolean, fields: string[]): NonNullable<SessionMeta["reclaimed"]> {
+    return {
+      at: Date.now(),
+      credential: credential || Boolean(meta.reclaimed?.credential),
+      fields: [...new Set([...(meta.reclaimed?.fields ?? []), ...fields])],
+    };
+  }
+
+  /**
    * Manual cleanup: stop+clean every finished, non-running worker and evict it
    * from memory, then safely delete branches for finished workstreams (including
    * historical ones whose worktree is already gone) whose tip is an ancestor of
@@ -412,6 +553,8 @@ export class Coordinator {
       branches = { deleted: [], retained: [], failure: error instanceof Error ? error.message : String(error) };
     }
 
+    const reclaimed = await this.reclaimStale(selected).catch(() => ({ credentials: 0, compacted: 0 }));
+
     this.notifyWaiters();
     this.scheduleSave();
 
@@ -422,6 +565,8 @@ export class Coordinator {
       ...(cleanupErrors.length ? { cleanup_errors: cleanupErrors } : {}),
       ...(branches.failure ? { branches_error: branches.failure } : {}),
       sessions_evicted: evicted,
+      credentials_reclaimed: reclaimed.credentials,
+      history_compacted: reclaimed.compacted,
       remaining_live: this.runtimes.size,
     };
   }

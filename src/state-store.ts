@@ -189,6 +189,14 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
     && (typeof entry.scopeKeyHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.scopeKeyHash))) {
     fail(file, `${at}.scopeKeyHash is invalid`);
   }
+  if (entry.reclaimed !== undefined) {
+    const reclaimed = entry.reclaimed;
+    if (!isRecord(reclaimed) || typeof reclaimed.at !== "number" || !Number.isFinite(reclaimed.at)
+      || typeof reclaimed.credential !== "boolean"
+      || !Array.isArray(reclaimed.fields) || !reclaimed.fields.every((field) => typeof field === "string" && field.length > 0)) {
+      fail(file, `${at}.reclaimed is invalid`);
+    }
+  }
 
   if (entry.shutdownUnconfirmed !== undefined && typeof entry.shutdownUnconfirmed !== "boolean")
     fail(file, `${at}.shutdownUnconfirmed is invalid`);

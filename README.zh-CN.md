@@ -412,7 +412,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录和控制密钥都保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
-| `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。 |
+| `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对已无法 resume 的会话还会删除其控制凭据、裁掉 history 里的大块证据（`credentials_reclaimed`、`history_compacted`）。 |
 | `pi_metrics` | 活跃与历史任务的使用量和费用证据，可用 `session_ids` 过滤；缺失费用为未知，部分比值不证明省钱。 |
 | `pi_record_cost` | 登记主代理费用：`id`、`amount`、`currency`、`source`、`reference`、覆盖的 `session_ids`；区分实报、手动和估算来源。 |
 
@@ -450,9 +450,14 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 - **分支**：只在被明确要求时删 —— `pi_stop` 带 `delete_branch`（或 `PI_COFFEE_DELETE_BRANCHES=1`），
   以及 `pi_gc` 对已证明合并进目标的尖端。
 
-永远不会自动回收的：有新提交的分支、未完成或未记录 outcome 的会话转录，以及 daemon 状态本身
-（`state.json` 的 history、信箱、黑板、锁，以及 `pi_recover_control` 要读的 `control-credentials`
-记录）。这样被删掉磁盘内容的会话就不能再 resume，只能重新派发。
+worktree 和转录都没了的会话已经无法 resume、验收或合并。这时 daemon 会回收只有可恢复会话才需要的东西：
+删除它的控制凭据，并裁掉 history 条目里的大块内容 —— 验收输出和最终报告只保留尾部，契约的自由文本字段
+和验收摘要被丢弃，而审查记录、outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和
+`pi_metrics` 读到的数字不变。`pi_gc` 用 `credentials_reclaimed` 和 `history_compacted` 上报，sweeper
+在 `PI_COFFEE_AUTO_CLEAN` 开启时做同样的事。
+
+永远不会自动回收的：有新提交的分支、未完成或未记录 outcome 的会话转录、仍然可恢复会话的凭据与证据，
+以及 daemon 自己的簿记（信箱、黑板、锁）。worktree 和转录都没了的会话不能再 resume，只能重新派发。
 
 `pi_gc` 只处理你给的 session IDs：先停掉并驱逐其中已完成的 worker、移除干净的 worktree（包括
 重启后留在 history 里的），然后删除能证明已合并的已完成分支。
@@ -498,7 +503,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
 
 配置不合法时启动会直接失败，而不是带着问题跑。端口必须是 1 到 65535 的整数，会话上限和提醒阈值必须
-是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。传给 `loadConfig` 的代码覆盖值优先于环境变量和默认值。日志轮转的两个开关是唯一例外：值无法解析时回退默认值，拼错不会阻止 daemon 启动。
+是正的安全整数，TTL 必须有限且至少一分钟（可以有小数）。数字用十进制；布尔只接受 `0` 或 `1`。日志轮转的两个开关是唯一例外：值无法解析时回退默认值，拼错不会阻止 daemon 启动。
 传给 `loadConfig` 的代码级 override 优先级最高。
 
 ## 状态与恢复

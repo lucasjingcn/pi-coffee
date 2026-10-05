@@ -24,7 +24,8 @@ export interface Verification {
   codeChanged: boolean;
   existingValidationChanges: string[];
   reviewContractHash: string;
-  result: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
+  /** Command output; `compacted` marks a tail kept for a session that is no longer recoverable. */
+  result: { code: number | null; stdout: string; stderr: string; timedOut: boolean; compacted?: boolean };
 }
 
 export interface IntegrationRecord {
