@@ -323,3 +323,27 @@ test("a transcript whose work is beyond recovery is reclaimed; a live branch is 
     assert.equal(coordinator.snapshot("s11").reclaimed, undefined);
   });
 });
+
+test("a transcript removed in a later pass is still recorded on the reclaimed marker", async () => {
+  await fixture(async ({ repo, dataDir, worktrees }) => {
+    const base = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    await makeTranscript(dataDir, "s20");
+    // Already beyond recovery, credential and bulk already reclaimed in a prior pass;
+    // only the transcript directory is still here to remove.
+    return [{
+      id: "s20",
+      meta: {
+        id: "s20", name: "already-reclaimed", status: "stopped", createdAt: 1, lastActivity: 1,
+        repo, cwd: repo, worktree: join(worktrees, "s20"), branch: "pi/s20", baseRef: base, pendingQuestions: [],
+        outcome: "success_first", outcomeNote: "done",
+        reclaimed: { at: 1, credential: true, fields: [] },
+      },
+    }];
+  }, async ({ coordinator, dataDir }) => {
+    const result = await coordinator.gc(["s20"]);
+    assert.equal(result.transcripts_reclaimed, 1, JSON.stringify(result));
+    assert.equal(existsSync(join(dataDir, "sessions", "s20")), false);
+    assert.ok(coordinator.snapshot("s20").reclaimed.fields.includes("transcript"),
+      "the later transcript removal must still be recorded in the marker");
+  });
+});

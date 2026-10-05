@@ -497,6 +497,15 @@ export class Coordinator {
         for (const meta of stale) meta.reclaimed = this.reclaimedMarker(meta, true, removedFields);
       }
 
+      // Record the transcript removal even when the credential and bulk were already
+      // reclaimed in a prior pass (e.g. a transcript that could only be removed now):
+      // otherwise the marker would silently claim nothing was trimmed. This must run
+      // after the credential branch, or the premature credential flag would stop the
+      // real credential removal above.
+      if (transcriptRemoved && !stale.some((meta) => meta.reclaimed?.fields.includes("transcript"))) {
+        stale[0].reclaimed = this.reclaimedMarker(stale[0], true, ["transcript"]);
+      }
+
       const trimmed = stale
         .map((meta) => [meta, this.compactStale(meta)] as const)
         .filter(([, fields]) => fields.length > 0);
