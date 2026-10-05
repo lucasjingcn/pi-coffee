@@ -1,6 +1,6 @@
 ---
 name: pi-orchestrator
-description: Use when considering pi-coffee workers for a repository change. Delegate only independent, clearly specified work whose expected benefit exceeds coordination overhead. Complete small fixes directly, follow user and repository instructions, review full diffs, and verify candidates before integration.
+description: Read this BEFORE any use of the pi-coffee MCP tools (pi_spawn, pi_wait, pi_status, pi_list, pi_verify, pi_review, pi_merge, pi_finish, pi_gc, …) or considering pi-coffee workers — including tests, load/capacity checks, diagnostics, and non-repository work. This is the authoritative pi-coffee orchestration policy. Delegate only independent, clearly specified work whose expected benefit exceeds coordination overhead. Complete small fixes directly, follow user and repository instructions, review full diffs, and verify candidates before integration.
 ---
 
 # pi-orchestrator
@@ -56,6 +56,17 @@ briefly in the normal progress update; no separate plan or delegation quota is r
 all implementation direct or delegate only read-only review, explain why (for example coupled files,
 unresolved contracts, overlapping dirty work, or a specific tool/credential blocker). A late review
 after most code is written is review assistance, not evidence of implementation delegation.
+
+When multiple workstreams meet the repository size gate and delegation-benefit criteria, split
+them into non-overlapping file scopes with fixed interfaces and independent acceptance. From this
+same orchestrator chat, start multiple pi-coffee workers before waiting for the first one to finish;
+pass the shared scope_key to each subsequent spawn. Respect the daemon's global available capacity
+and scope locks, including workers owned by other chats. Do not serialize independent work by
+habit or use one worker for every slice. The main agent should continue authorized work outside
+those worker scopes while they run, then review all results and verify/integrate in dependency order.
+If scopes overlap or a slice needs another slice's unfinished output, keep that dependency sequential.
+Report the actual concurrent worker IDs and assigned slices; capacity alone is not proof of parallel
+execution. This rule does not authorize extra paid calls, model changes, commits, pushes or deployment.
 
 If pi tools, model credentials, or paid-call authorization are missing, report the dependent blocker
 and continue independently authorized local implementation and checks. Do not stall all work merely
