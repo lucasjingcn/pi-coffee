@@ -24,6 +24,7 @@
     "smoke": "node scripts/smoke.mjs",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "inspect": "node scripts/inspect.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
