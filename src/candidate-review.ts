@@ -61,7 +61,11 @@ export function validateCandidateReview(
   const paths = new Set(validationChanges);
   const reviewed = new Set<string>();
   for (const change of input.test_changes) {
-    if (!change || !paths.has(change.path)) throw new Error("unknown validation file in test_changes review");
+    if (!change || !paths.has(change.path)) {
+      const offending = change && typeof change.path === "string" && change.path.trim() ? change.path : "(missing path)";
+      const allowed = validationChanges.length ? validationChanges.join(", ") : "(none)";
+      throw new Error(`test_changes may only list existing validation files that the worker modified (declared in spec.validation_paths: ${allowed}); new test files are not validation changes. Offending path: ${offending}`);
+    }
     if (reviewed.has(change.path)) throw new Error(`duplicate validation review: ${change.path}`);
     if (change.approved !== true) throw new Error(`validation change not approved: ${change.path}`);
     if (typeof change.reason !== "string" || !change.reason.trim()) throw new Error(`validation review reason required: ${change.path}`);

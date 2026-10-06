@@ -5,6 +5,7 @@ import type { Coordinator, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
 import { WORKSTREAM_PURPOSES } from "./types.js";
 import { validateReviewSpec } from "./candidate-review.js";
+import { checkCodeVersion, daemonCodeDir, recordCodeVersion, type CodeVersionRecord } from "./code-version.js";
 import { MCP_INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
 
 function json(value: unknown) {
@@ -36,6 +37,7 @@ function compactMeta(m: SessionMeta) {
     cost: m.cost,
     context: m.context,
     turns: m.turns ?? 0,
+    statsAt: m.statsAt ?? null,
     instructions_sent: m.instructionsSent ?? 0,
     outcome: m.outcome ?? "unrecorded",
     control_required: m.controlKeyHash !== undefined,
@@ -78,6 +80,7 @@ export function summaryMeta(m: SessionMeta) {
     outcome: m.outcome ?? "unrecorded",
     control_required: m.controlKeyHash !== undefined,
     turns: m.turns ?? 0,
+    statsAt: m.statsAt ?? null,
     cost: m.cost,
     output_tokens: m.tokens?.output ?? 0,
     instructions_sent: m.instructionsSent ?? 0,
@@ -137,7 +140,11 @@ export function summaryReport(report: Record<string, unknown>, detail: Detail = 
   };
 }
 
-export function buildServer(coord: Coordinator): McpServer {
+export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord): McpServer {
+  // The daemon passes the value it recorded at startup; direct callers (tests)
+  // record now so pi_status still has a baseline to compare against disk.
+  const codeDir = codeVersion ? codeVersion.dir : daemonCodeDir();
+  const runningDistMtimeMs = codeVersion ? codeVersion.distMtimeMs : recordCodeVersion(codeDir);
   const server = new McpServer(
     { name: "pi-coffee", version: "0.1.0" },
     { instructions: MCP_INSTRUCTIONS },
@@ -520,13 +527,14 @@ export function buildServer(coord: Coordinator): McpServer {
     "pi_status",
     {
       title: "Worker status",
-      description: "Get concise status and pending questions for one or all sessions. Use detail=full for contracts, transcript excerpt, verification and integration records; pi_metrics provides full cost evidence.",
+      description: "Get concise status and pending questions for one or all sessions. Use detail=full for contracts, transcript excerpt, verification and integration records; pi_metrics provides full cost evidence. The top-level code field flags a daemon still running stale dist code; each session carries statsAt (last successful turns/tokens refresh, null=never).",
       inputSchema: { session_id: z.string().optional(), detail: z.enum(["summary", "full"]).optional() },
     },
     async ({ session_id, detail }) => {
       const view = detail ?? "summary";
-      if (session_id) return json(sessionView(coord.snapshot(session_id), view));
-      return json({ sessions: coord.list().map((m) => sessionView(m, view)),
+      const code = checkCodeVersion(codeDir, runningDistMtimeMs);
+      if (session_id) return json({ ...sessionView(coord.snapshot(session_id), view), code });
+      return json({ sessions: coord.list().map((m) => sessionView(m, view)), code,
         ...(view === "full" ? { metrics: await coord.metrics() } : {}) });
     },
   );
@@ -585,7 +593,7 @@ export function buildServer(coord: Coordinator): McpServer {
 
   server.registerTool(
     "pi_list",
-    { title: "List workers", description: "List concise worker states. Supply session_ids to inspect only your workstreams, including stopped history; use detail=full for complete records.",
+    { title: "List workers", description: "List concise worker states. Supply session_ids to inspect only your workstreams, including stopped history; use detail=full for complete records. Each session carries statsAt (last successful turns/tokens refresh, null=never).",
       inputSchema: { session_ids: z.array(z.string()).min(1).optional(), detail: z.enum(["summary", "full"]).optional() } },
     async ({ session_ids, detail }) => {
       const sessions = session_ids === undefined ? coord.list() : [...new Set(session_ids)].map((id) => coord.snapshot(id));

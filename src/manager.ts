@@ -59,6 +59,9 @@ const RECLAIM_OUTPUT_CHARS = 2_000;
 /** Retention for a stopped worker's transcript directory (48 hours). */
 const SESSION_DIR_TTL_MS = 48 * 60 * 60 * 1000;
 
+/** Minimum interval between mid-run turns/tokens refreshes for one worker. */
+const STATS_REFRESH_THROTTLE_MS = 15_000;
+
 /**
  * Tool-result text a coordinator-guarded tool call reports when the worker
  * extension blocks it. Every marker comes from the extension's block reasons;
@@ -127,6 +130,8 @@ export interface SessionMeta {
   error?: string;
   /** Assistant turns seen for this session. */
   turns?: number;
+  /** When turns/tokens were last read from the worker; absent/null means never. */
+  statsAt?: number;
   /** Number of instructions Codex has sent to this session (initial + corrections). */
   instructionsSent?: number;
   /** Final disposition of this workstream. */
@@ -176,6 +181,8 @@ interface Runtime {
   lastNotifiedQuestionIds: Set<string>;
   /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
   acceptanceReserved?: boolean;
+  /** Throttle clock for mid-run stats refreshes triggered by message_end. */
+  lastStatsRefreshAt?: number;
   /** Canonical repository identity this session's locks are namespaced under. */
   repoIdentity: string;
 }
@@ -1427,6 +1434,8 @@ export class Coordinator {
             const text = textOf(msg);
             if (text) rt.meta.lastText = text;
           }
+          // A long turn must not hide turns/tokens until agent_settled.
+          this.refreshRunningStats(rt);
           break;
         }
         case "entry_appended":
@@ -1541,10 +1550,25 @@ export class Coordinator {
         rt.meta.tokens = stats.tokens;
         rt.meta.context = stats.contextUsage;
         rt.meta.turns = stats.assistantMessages ?? rt.meta.turns;
+        rt.meta.statsAt = Date.now();
       }
     } catch {
       /* ignore */
     }
+  }
+
+  /**
+   * Mid-run stats refresh while a worker is not stopped. Long turns otherwise
+   * show stale turns/tokens until agent_settled; throttle per worker so a busy
+   * live worker costs at most one stats round-trip per window. Settled, stop,
+   * wait and report reads stay unthrottled.
+   */
+  private refreshRunningStats(rt: Runtime): void {
+    if (rt.meta.status === "stopped" || rt.meta.status === "stopping" || rt.stopping) return;
+    const now = Date.now();
+    if (now - (rt.lastStatsRefreshAt ?? 0) < STATS_REFRESH_THROTTLE_MS) return;
+    rt.lastStatsRefreshAt = now;
+    void this.refreshStats(rt, true);
   }
 
   get(id: string): Runtime {
