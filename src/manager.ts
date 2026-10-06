@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, createReadStream, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
+import { createInterface } from "node:readline";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
 import { Board, Mailbox, type MessageKind } from "./mailbox.js";
@@ -18,7 +19,7 @@ import { prepareWorkerAgentDir } from "./worker-agent-dir.js";
 import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js";
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
-import { logLine } from "./log.js";
+import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
 import {
   commitAll,
   createWorktree,
@@ -54,6 +55,35 @@ const FINISHED_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["success_first
  */
 const RECLAIM_LAST_TEXT_CHARS = 500;
 const RECLAIM_OUTPUT_CHARS = 2_000;
+
+/** Retention for a stopped worker's transcript directory (48 hours). */
+const SESSION_DIR_TTL_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Tool-result text a coordinator-guarded tool call reports when the worker
+ * extension blocks it. Every marker comes from the extension's block reasons;
+ * a guard block is counted apart from the tool's own errors.
+ */
+const GUARD_BLOCK_MARKERS = [
+  "Write target must be inside the worker worktree",
+  "Recognized shell write target escapes the worker worktree",
+  "File is claimed by another worker",
+  "Coordinator could not authorize the write",
+] as const;
+
+/** Flatten a transcript `toolResult` message into searchable text. */
+function toolResultText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => (part && typeof part.text === "string" ? part.text : "")).join("\n");
+}
+
+/** True when a failed toolResult is the coordination guard blocking a write. */
+function isGuardBlock(message: any): boolean {
+  const text = toolResultText(message);
+  return GUARD_BLOCK_MARKERS.some((marker) => text.includes(marker));
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -286,6 +316,7 @@ export class Coordinator {
     }
     await this.sweepFinalRetention(now).catch(() => {});
     await this.reclaimStale().catch(() => {});
+    await this.sweepSessionDirs(now).catch(() => {});
   }
 
   /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
@@ -345,7 +376,49 @@ export class Coordinator {
     } catch {
       return false;
     }
+    this.logWorkerEvent(meta.id, "reclaim", { transcript: true, reason: "clean" });
     return true;
+  }
+
+  /**
+   * Delete transcript directories of stopped sessions past the retention TTL.
+   *
+   * Eligibility requires the session to be stopped: active and not-yet-stopped
+   * workers are never touched. The reference time is the later of the recorded
+   * last activity and the directory mtime, so a worker that just stopped after a
+   * long run is not mistaken for an abandoned one. Directories with no state
+   * entry are left alone: nothing here knows whether they are still wanted.
+   */
+  private async sweepSessionDirs(now = Date.now()): Promise<number> {
+    const sessionsRoot = join(this.config.dataDir, "sessions");
+    if (!existsSync(sessionsRoot)) return 0;
+    let names: string[];
+    try {
+      names = readdirSync(sessionsRoot);
+    } catch {
+      return 0;
+    }
+    let removed = 0;
+    for (const name of names) {
+      const meta = this.runtimes.get(name)?.meta ?? this.history.find((entry) => entry.id === name);
+      if (!meta || meta.status !== "stopped") continue;
+      const dir = join(sessionsRoot, name);
+      let mtimeMs: number;
+      try {
+        mtimeMs = statSync(dir).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (now - Math.max(meta.lastActivity ?? 0, mtimeMs) <= SESSION_DIR_TTL_MS) continue;
+      try {
+        await rm(dir, { recursive: true, force: true });
+      } catch {
+        continue; // retry on the next sweep
+      }
+      removed += 1;
+      this.logWorkerEvent(name, "reclaim", { transcript: true, reason: "ttl" });
+    }
+    return removed;
   }
 
   /**
@@ -397,6 +470,76 @@ export class Coordinator {
     } catch {
       return true;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker lifecycle events
+  // -------------------------------------------------------------------------
+
+  /** Append one lifecycle event; diagnostics never throw into a worker path. */
+  private logWorkerEvent(id: string, event: WorkerEventKind, fields: Record<string, unknown> = {}): void {
+    appendWorkerEvent(join(this.config.dataDir, "logs", "workers.jsonl"), {
+      ts: new Date().toISOString(),
+      id,
+      event,
+      ...fields,
+    });
+  }
+
+  /**
+   * Best-effort guard/tool error counters from the worker's own transcripts.
+   *
+   * Only top-level `*.jsonl` files are the worker's conversation (`agent/` holds
+   * pi's internal run history). A missing, unreadable or partially corrupted
+   * transcript yields null instead of a misleading zero, and never throws: a
+   * finish event must not fail because diagnostics could not be derived.
+   */
+  private async countWorkerToolErrors(id: string): Promise<{ guard_blocks: number; tool_errors: number } | null> {
+    const dir = join(this.config.dataDir, "sessions", id);
+    let files: string[];
+    try {
+      files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+    } catch {
+      return null;
+    }
+    if (!files.length) return null;
+
+    let guardBlocks = 0;
+    let toolErrors = 0;
+    try {
+      for (const name of files) {
+        const lines = createInterface({ input: createReadStream(join(dir, name), { encoding: "utf8" }), crlfDelay: Infinity });
+        for await (const line of lines) {
+          if (!line.trim()) continue;
+          let entry: any;
+          try { entry = JSON.parse(line); } catch { continue; } // tolerate a torn tail
+          const message = entry?.message;
+          if (message?.role !== "toolResult" || message.isError !== true) continue;
+          if (isGuardBlock(message)) guardBlocks += 1;
+          else toolErrors += 1;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return { guard_blocks: guardBlocks, tool_errors: toolErrors };
+  }
+
+  /** Record the final disposition of a workstream with what its evidence still shows. */
+  private async emitFinishEvent(meta: SessionMeta, outcome: Outcome): Promise<void> {
+    const counts = await this.countWorkerToolErrors(meta.id);
+    let dirty: boolean | null = null;
+    if (meta.worktree && existsSync(meta.worktree)) {
+      try { dirty = !(await isWorktreeClean(meta.worktree)); } catch { dirty = null; }
+    }
+    this.logWorkerEvent(meta.id, "finish", {
+      outcome,
+      turns: typeof meta.turns === "number" ? meta.turns : null,
+      cost: typeof meta.cost === "number" ? meta.cost : null,
+      guard_blocks: counts?.guard_blocks ?? null,
+      tool_errors: counts?.tool_errors ?? null,
+      dirty,
+    });
   }
 
   /**
@@ -492,8 +635,9 @@ export class Coordinator {
       }
       const removedFields = transcriptRemoved ? ["transcript"] : [];
 
+      let credentialRemoved = false;
       if (stale.some((meta) => !(meta.reclaimed?.credential ?? false))) {
-        if (await this.vault.remove(id)) credentials += 1;
+        if (await this.vault.remove(id)) { credentials += 1; credentialRemoved = true; }
         for (const meta of stale) meta.reclaimed = this.reclaimedMarker(meta, true, removedFields);
       }
 
@@ -511,6 +655,14 @@ export class Coordinator {
         .filter(([, fields]) => fields.length > 0);
       for (const [meta, fields] of trimmed) meta.reclaimed = this.reclaimedMarker(meta, true, [...fields, ...removedFields]);
       if (trimmed.length) compacted += 1;
+
+      if (transcriptRemoved || credentialRemoved || trimmed.length) {
+        this.logWorkerEvent(id, "reclaim", {
+          transcript: transcriptRemoved,
+          credential: credentialRemoved,
+          fields: [...new Set([...(transcriptRemoved ? ["transcript"] : []), ...trimmed.flatMap(([, names]) => names)])],
+        });
+      }
     }
 
     if (credentials || compacted || transcripts) {
@@ -1004,6 +1156,13 @@ export class Coordinator {
 
     this.scheduleSave();
     this.notifyWaiters();
+
+    this.logWorkerEvent(id, "spawn", {
+      name: meta.name,
+      repo,
+      task_type: opts.spec?.task_type ?? null,
+      purpose: opts.spec?.purpose ?? null,
+    });
 
     // Compose the first instruction from the prompt, the spec and the acceptance note.
     const parts: string[] = [];
@@ -2005,6 +2164,7 @@ export class Coordinator {
       }
       historic.outcome = outcome;
       if (note !== undefined) historic.outcomeNote = note;
+      await this.emitFinishEvent(historic, outcome);
       this.scheduleSave();
       this.notifyWaiters();
       return;
@@ -2043,6 +2203,7 @@ export class Coordinator {
       this.scheduleSave();
       this.notifyWaiters();
     });
+    await this.emitFinishEvent(rt.meta, outcome);
     if (rt.meta.status === "stopped") {
       this.archive(rt.meta);
       this.scheduleSave();
