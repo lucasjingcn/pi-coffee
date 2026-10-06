@@ -230,9 +230,18 @@ function readLedger(statePath, findings) {
   return { status, history, locks };
 }
 
-/** Check 1: ledger entries whose worktree path is gone from disk. */
+/**
+ * Check 1: ledger entries whose worktree path is gone from disk.
+ *
+ * A stopped session the daemon already reclaimed (`entry.reclaimed`) has reached
+ * its normal end of life: the worktree is expected to be gone. Reporting every
+ * retired worker would bury the real discrepancies, so those are folded into a
+ * `retired` count instead. Everything else — unfinished sessions, or a stopped
+ * session with no reclamation record — stays a finding.
+ */
 function checkMissingWorktrees(history, findings) {
   const ledger = new Map();
+  let retired = 0;
   for (const entry of history) {
     if (typeof entry.worktree !== "string" || entry.worktree.trim() === "") continue;
     const path = normalizePath(entry.worktree);
@@ -242,13 +251,17 @@ function checkMissingWorktrees(history, findings) {
 
     const status = typeof entry.status === "string" ? entry.status : "unknown";
     const outcome = typeof entry.outcome === "string" ? entry.outcome : "none";
+    if (status === "stopped" && entry.reclaimed !== undefined && entry.reclaimed !== null) {
+      retired += 1;
+      continue;
+    }
     findings.push({
       kind: "missing_worktree",
       id,
       detail: `${path} (status=${status}, outcome=${outcome})`,
     });
   }
-  return ledger;
+  return { ledger, retired };
 }
 
 // ---------------------------------------------------------------------------
@@ -390,10 +403,13 @@ function printHuman(report) {
 
   console.log("");
   if (findings.length === 0) {
-    console.log("findings: none — ledger and disk reconcile");
+    console.log(`findings: none — ledger and disk reconcile (${summary.retiredWorktrees} retired worktree(s) folded)`);
   } else {
     console.log(`findings: ${findings.length}`);
     for (const finding of findings) console.log(`  [${finding.kind}] ${finding.id}: ${finding.detail}`);
+    if (summary.retiredWorktrees > 0) {
+      console.log(`  (${summary.retiredWorktrees} retired worktree(s) folded: reclaimed by the daemon, expected gone)`);
+    }
   }
 
   console.log("");
@@ -451,7 +467,7 @@ function run() {
 
   const findings = [];
   const ledger = readLedger(stateFile, findings);
-  const ledgerWorktrees = checkMissingWorktrees(ledger.history, findings);
+  const { ledger: ledgerWorktrees, retired: retiredWorktrees } = checkMissingWorktrees(ledger.history, findings);
   const diskWorktrees = scanWorktrees(workspaceRoot, ledgerWorktrees, findings);
   const sessionAge = collectSessionAge(sessionsRoot, historyIndex(ledger.history), now, findings);
   sortFindings(findings);
@@ -465,6 +481,7 @@ function run() {
       stateStatus: ledger.status,
       historySessions: ledger.history.length,
       historyWorktrees: ledgerWorktrees.size,
+      retiredWorktrees,
       worktreesOnDisk: diskWorktrees.length,
       activeLocks: collectLocks(ledger.locks, now),
       sessionAge,

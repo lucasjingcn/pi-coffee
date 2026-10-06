@@ -216,3 +216,53 @@ test("inspect treats an unreadable ledger as a difference and rejects bad usage"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("retired stopped sessions with a reclamation record are folded, not reported", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-inspect-retired-"));
+  try {
+    const dataDir = await makeDataDir(root);
+    const worktrees = join(dataDir, "worktrees");
+    await mkdir(worktrees, { recursive: true });
+
+    await writeState(dataDir, {
+      counter: 3,
+      locks: [],
+      mailbox: [],
+      board: [],
+      history: [
+        // Normal end of life: stopped and already reclaimed -> folded, not a finding.
+        { id: "s1", worktree: join(worktrees, "s1"), status: "stopped", outcome: "success_first", reclaimed: { credential: true, fields: ["lastText"] }, lastActivity: 1 },
+        // Stopped but the daemon has no reclamation record -> still a discrepancy.
+        { id: "s2", worktree: join(worktrees, "s2"), status: "stopped", outcome: "success_first", lastActivity: 1 },
+        // Never finished -> still a discrepancy.
+        { id: "s3", worktree: join(worktrees, "s3"), status: "working", lastActivity: 1 },
+      ],
+    });
+
+    const json = runInspect(["--data-dir", dataDir, "--json"]);
+    assert.equal(json.status, 1, "unreclaimed/unfinished misses keep exit 1");
+    const report = JSON.parse(json.stdout);
+    assert.equal(report.summary.retiredWorktrees, 1);
+    assert.deepEqual(report.findings.map((f) => f.id).sort(), ["s2", "s3"]);
+
+    const human = runInspect(["--data-dir", dataDir]);
+    assert.equal(human.status, 1);
+    assert.match(human.stdout, /1 retired worktree\(s\) folded/);
+
+    // When only retired entries are missing, the ledger reconciles (exit 0).
+    await writeState(dataDir, {
+      counter: 3,
+      locks: [],
+      mailbox: [],
+      board: [],
+      history: [
+        { id: "s1", worktree: join(worktrees, "s1"), status: "stopped", outcome: "success_first", reclaimed: { credential: true, fields: [] }, lastActivity: 1 },
+      ],
+    });
+    const clean = runInspect(["--data-dir", dataDir]);
+    assert.equal(clean.status, 0, "only-retired ledger reconciles");
+    assert.match(clean.stdout, /findings: none/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
