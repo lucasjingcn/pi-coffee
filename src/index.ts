@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { loadConfig } from "./config.js";
 import { Coordinator } from "./manager.js";
 import { buildServer } from "./mcp-server.js";
+import { daemonCodeDir, recordCodeVersion } from "./code-version.js";
 import type { LockMode } from "./locks.js";
 import { z } from "zod";
 import { WORKER_STARTUP_POLICY } from "./worker-agent-dir.js";
@@ -10,6 +11,11 @@ import { logLine } from "./log.js";
 
 const config = loadConfig();
 const coord = new Coordinator(config);
+
+// Captured once at daemon startup: pi_status compares this in-memory value with
+// the current dist/manager.js mtime so a rebuilt dist without a restart is visible.
+const codeDir = daemonCodeDir();
+const runningCodeMtimeMs = recordCodeVersion(codeDir);
 
 function log(...args: unknown[]): void {
   logLine("pi-coffee", ...args);
@@ -89,7 +95,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
     return;
   }
 
-  const server = buildServer(coord);
+  const server = buildServer(coord, { dir: codeDir, distMtimeMs: runningCodeMtimeMs });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
