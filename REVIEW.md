@@ -80,3 +80,25 @@ bogus 锁补修单独统计：委派 1 项（s16），首次完成 0%，一次�
 具体范围与完成记录见 [现行改进方案](docs/plans/reliability-and-cost-evidence.md)。候选验收、合并和成功结果改为有版本证据的强制门禁；协调故障不再放行写操作，检测直接/符号链接越界；默认使用非登录 shell，CI 增加 macOS；成本统计覆盖活跃与历史、失败及返工，缺失为未知，主代理记录保留来源与币种；编排正文只维护一份。
 
 本机 Node 24.19.0 `npm run verify`：137 项通过、0 失败、0 跳过；类型、离线 MCP 全链路和编排一致性检查通过。真实 pi 0.87.1 无提示词 RPC 启动通过。GitHub 四组 Linux/macOS × Node 22.19/24 的实际状态应查看该次推送的 Actions，不以矩阵文件存在替代运行结果。未执行收费模型编码或远程部署；文件锁不构成 OS 沙箱，费用覆盖声明不自动证明主代理所有调用已完整登记。
+
+## 2026-10-31 0.2.0 升级记录
+
+本轮按 A/B/C 三条线完成，本地 `npm run verify` 359/359 通过（含 4 项新增 daemon 路由测试）。
+
+### 完成内容
+
+- A：修复 `pi_resume` 不保存 provider/model 的 CI 红点；测试 fixture 不再读真实 `~/.pi` 凭据；CI 升到 checkout@v7/setup-node@v7，矩阵 Node 22.19.0/24/26；补 `engines`、Dependabot、CHANGELOG、release workflow 与 tag helper；`pi-coding-agent` 1.4.0、MCP SDK 1.32.2、typebox 1.4.3、zod 4.6.7、`@types/node` 24、tsx 4.23。
+- B：启动时自动恢复崩溃前仍活跃的 worker（保留 provider/model/thinking/control key）；新增 `pi_drain` 工具、`POST /internal/drain`、`POST /internal/shutdown` 与 `scripts/upgrade.mjs`；新增 Prometheus `/metrics` 和 `PI_COFFEE_LOG_FORMAT=json` 结构化日志。
+- C：新增 `docs/integrations/dsh.md` 与幂等的 `scripts/setup-dsh.mjs`；新增只读 `/dashboard` Web 控制台；新增 GitHub Release/GHCR workflow、`scripts/release.mjs`、Dependabot、CHANGELOG。
+
+### 验证与 Git 记录
+
+- `npm run verify`：359 项通过、0 失败、0 跳过；`npm audit --omit=dev`：0 个已知漏洞。
+- 关键提交：`e7cefdc`（resume/测试隔离）、`6d2fb54`（依赖+CI+release）、`599ea81`（Node 26/DSH 文档）、`59b2979`（release helper）、`feee50c`（测试并发上限）、`9135950`/`ad75fee`/`09cfee9`（DSH/metrics/dashboard）、`1d3860c`（恢复+drain）。
+- 委派：s287、s288、s289 均通过 `pi_verify` → `pi_review` → `pi_merge`。s286 的实现来自 worker，但声明的 scope 漏了必须修改的 `src/mcp-server.ts`，`pi_verify` 按规则拒绝；已把 `pi/s286` 备份为 `pi/s286-takeover`，由主会话审查完整 diff 后手动合并，并用同一 `npm run verify` 记录 359/359 证据，不伪称其通过 `pi_verify`。
+
+### 待外部确认
+
+- GitHub Actions 与 release workflow 只有推送/tag 后才会在远端运行；本轮未推送。
+- 真实模型调用与生产部署不在本轮验收内；daemon 重启后以 `/internal/health`、`/metrics`、`/dashboard` 和 `pi_status` 做本地加载验证。
+

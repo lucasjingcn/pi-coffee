@@ -37,6 +37,7 @@ git worktree 中的 pi worker，审查完整 diff，并在合并前验证候选�
 - [Docker](#docker)
 - [一个任务的全过程](#一个任务的全过程)
 - [部署](#部署)
+- [Dashboard、指标与升级](#dashboard指标与升级)
 - [工具参考](#工具参考)
 - [Worker 端工具](#worker-端工具)
 - [文件声明是怎么工作的](#文件声明是怎么工作的)
@@ -195,7 +196,8 @@ Windows 后台任务在当前用户登录后启动；未登录时不会运行。
 
 ## 让 Codex 连上 daemon
 
-`npm run install:local` 要求 `codex` 在 `PATH` 中，并会注册代理。手工修复时可写进
+DeepSeek Harness（DSH）见 [docs/integrations/dsh.md](docs/integrations/dsh.md)，或运行
+`node scripts/setup-dsh.mjs --print`。Codex 方面，`npm run install:local` 要求 `codex` 在 `PATH` 中，并会注册代理。手工修复时可写进
 `~/.codex/config.toml`，再重启 Codex。本机代理会读取配置文件：
 
 ```toml
@@ -396,6 +398,32 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 `pi_diff`、`pi_commit`、`pi_merge`、`pi_push` 让 Codex 在拿不到文件系统的情况下也能审查和集成代码。
 只在你信得过的网络里这么做，默认绑定是回环。
 
+## Dashboard、指标与升级
+
+daemon 还提供两个只读的运维界面。设置 `PI_COFFEE_TOKEN` 时，两者与 `/mcp` 使用同一个
+`x-pi-coord-token` / `Authorization: Bearer` 凭据。
+
+- `GET /dashboard` —— 只读控制台：会话、状态、成本、turn 数、模型，以及单会话 diff/tail；不提供
+  spawn、stop、merge 或发消息操作。
+- `GET /metrics` —— Prometheus 文本指标（`pi_coffee_*`）：uptime、活跃/上限 worker、drain 状态、
+  按状态统计的会话数、spawn/verify/merge 总数，以及完整的 worker 上报美元成本。未知成本会省略，
+  不会写成 0。
+
+重启前先 drain，避免直接丢掉正在跑的 worker：
+
+```bash
+npm run upgrade -- --timeout=300   # 开始 drain、等待 active=0、请求 daemon 停止
+# 然后执行脚本打印的 supervisor 重启命令，例如 launchctl kickstart -k ...
+```
+
+`pi_drain`（MCP）和 `POST /internal/drain` 暴露同一份 drain 状态（`start` / `status` / `cancel`）。
+如果 daemon 是崩溃而不是正常停止，下次启动会把崩溃时仍活跃的会话从原转录自动恢复，保留
+provider/model/thinking 和控制密钥；显式停止或已收尾的会话不会恢复。设置
+`PI_COFFEE_RECOVER_ON_START=0` 可关闭该恢复，改为手动 `pi_resume`。
+
+设置 `PI_COFFEE_LOG_FORMAT=json` 时，每行 stderr 是一条 JSON（`ts`、`level`、`event`、`message`、
+`details`），凭据形状的值会被脱敏；默认文本格式不变。
+
 ## 工具参考
 
 | 工具 | 作用 |
@@ -403,6 +431,7 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 | `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
 | `pi_review` | 记录准确候选的统筹方审查。接收 `verification_id`、逐项 `requirements` 和逐文件 `test_changes`；硬性要求或既有验证文件变更未完整确认时，禁止合并。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
+| `pi_drain` | `action=start\|status\|cancel`：重启前开始 drain。drain 期间拒绝新的 spawn/resume，已有 worker 继续跑完；`status` 返回 `active`，可据此等到 0。 |
 | `pi_wait` | 等待会话稳定、问题或新的交接通知。默认等待窗口 30 秒；窗口结束不停止 worker。等待须短于外层期限，跨调用重新轮询；兼容客户端可显式等待最长 120 秒。默认返回简明状态，可用 `detail=full` 查看详情。 |
 | `pi_status` / `pi_list` | 当前状态：状态、模型、成本、上下文占用、待处理问题。 |
 | `pi_tail` | 增量读会话记录，把上次的 `lastEntryId` 作为 `since` 传进去。 |
@@ -507,6 +536,8 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
 | `PI_COFFEE_LOG_MAX_MB` | `5` | 下次启动时，超过该大小的 daemon 日志会被归档。`0` 关闭轮转。 |
 | `PI_COFFEE_LOG_KEEP` | `1` | 每个日志保留的归档份数（`daemon.err.log.1`、`.2`……）。 |
+| `PI_COFFEE_LOG_FORMAT` | `text` | 设为 `json` 时每条 stderr 日志是一行 JSON；敏感值会脱敏。 |
+| `PI_COFFEE_RECOVER_ON_START` | `1` | daemon 崩溃后自动恢复崩溃时仍活跃的会话；`0` 表示留给人手动 `pi_resume`。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
@@ -609,11 +640,14 @@ docker-compose.yml 面向用户的 compose 文件
 
 ## 升级与卸载
 
-待活跃 worker 结束后，先按[部署](#部署)里的命令停止后台 daemon，再更新代码并运行同一条安装命令
-（macOS/Linux 终端或 Windows PowerShell）：
+先 drain，避免正在跑的 worker 被直接丢掉；然后按[部署](#部署)里的命令停止后台 daemon，更新代码并
+运行同一条安装命令（macOS/Linux 终端或 Windows PowerShell）：
 
 ```bash
+npm run upgrade -- --timeout=300
+# 更新后执行脚本打印的 supervisor 重启命令
 git pull
+npm install
 npm run install:local
 ```
 
@@ -644,8 +678,8 @@ daemon 状态，删除前先保留需要的数据。
 
 ## 已知限制
 
-- daemon 重启不恢复模型会话。正常关闭会停止 worker；崩溃遗留执行须核对所有权并确认停止，
-  否则保留锁。会话文件保留，安全收尾后重新派发。
+- 正常关闭 daemon 会停止 worker；非正常崩溃后的下次启动只会自动恢复崩溃时仍活跃的会话
+  （见 `PI_COFFEE_RECOVER_ON_START`）。显式停止的会话不会恢复，Windows 也不自动恢复孤立进程。
 - 文件声明是建议性的，而且只覆盖能识别出来的字面量目标。
 - worktree 模型假设一个分支只对应一个 worker。把同一个分支强行塞进两个 worktree 不在支持范围内。
 

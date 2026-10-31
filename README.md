@@ -40,6 +40,7 @@ agents or ask the orchestrator a question when something is unclear.
 - [Docker](#docker)
 - [A task, start to finish](#a-task-start-to-finish)
 - [Deployment](#deployment)
+- [Dashboard, metrics and upgrades](#dashboard-metrics-and-upgrades)
 - [Tool reference](#tool-reference)
 - [Worker-side tools](#worker-side-tools)
 - [How file claims work](#how-file-claims-work)
@@ -232,7 +233,9 @@ user signs in; it does not run before login.
 
 ## Pointing Codex at the daemon
 
-`npm run install:local` requires `codex` on your `PATH` and registers the proxy. For manual repair,
+For DeepSeek Harness (DSH), see [docs/integrations/dsh.md](docs/integrations/dsh.md) or run
+`node scripts/setup-dsh.mjs --print`. For Codex, `npm run install:local` requires `codex` on your
+`PATH` and registers the proxy. For manual repair,
 add the server in `~/.codex/config.toml` and restart Codex. The local proxy reads the setup file:
 
 ```toml
@@ -458,12 +461,40 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 `pi_diff`, `pi_commit`, `pi_merge`, and `pi_push` let Codex review and integrate code it cannot
 reach directly. Do this only on a network you trust; the default bind is loopback.
 
+## Dashboard, metrics and upgrades
+
+The daemon also serves two read-only operator surfaces. When `PI_COFFEE_TOKEN` is set, both require the
+same `x-pi-coord-token` / `Authorization: Bearer` credential as `/mcp`.
+
+- `GET /dashboard` — a small read-only console: sessions, status, cost, turns, model, and per-session
+  diff/tail. It has no spawn, stop, merge, or message actions.
+- `GET /metrics` — Prometheus text exposition (`pi_coffee_*`): uptime, active/max workers, drain state,
+  session counts by status, spawn/verify/merge totals, and worker-reported USD cost when complete.
+  Unknown cost is omitted rather than reported as zero.
+
+For a restart, drain first instead of dropping running workers:
+
+```bash
+npm run upgrade -- --timeout=300   # drain, wait for active=0, ask the daemon to stop
+# then run the supervisor command it prints, e.g. launchctl kickstart -k ...
+```
+
+`pi_drain` (MCP) and `POST /internal/drain` expose the same drain state (`start` / `status` / `cancel`).
+If the daemon crashes instead of stopping cleanly, the next start auto-resumes sessions that were
+active at the crash from their existing transcripts, preserving provider/model/thinking and the control
+key. Explicitly stopped or finished sessions are not resumed. Set `PI_COFFEE_RECOVER_ON_START=0` to
+disable that recovery and resume manually.
+
+Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `level`, `event`, `message`,
+`details`); credential-shaped values are redacted. The default text format is unchanged.
+
 ## Tool reference
 
 | Tool | What it does |
 |---|---|
 | `pi_spawn` | Create a worktree and branch, then start a worker. Returns its one-time `control_key` and a `scope_key`; pass the first scope key into later spawns that should coordinate. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
 | `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
+| `pi_drain` | `action=start\|status\|cancel`: drain the daemon before a restart. While draining, new spawns and resumes are rejected; existing workers finish. `status` reports `active` so an operator can wait for zero. |
 | `pi_wait` | Wait for sessions to settle, a question, or a new handoff notice. Defaults to a 30-second window; expiry does not stop workers. Re-poll across calls below the outer deadline; explicit windows up to 120 seconds require a compatible client. Returns concise snapshots; `detail=full` is available. |
 | `pi_status` / `pi_list` | Concise state and pending questions by default, including `control_required`. Pass `session_ids` to `pi_list` to include only your workstreams, including stopped history. Use `detail=full` for the contract, transcript excerpt, verification, and integration records; use `pi_metrics` for complete cost evidence. |
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
@@ -588,6 +619,8 @@ Everything is configured through environment variables.
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
 | `PI_COFFEE_LOG_MAX_MB` | `5` | Archive a daemon log at the next start once it exceeds this size. `0` disables rotation. |
 | `PI_COFFEE_LOG_KEEP` | `1` | Rotated archives kept per log (`daemon.err.log.1`, `.2`, ...). |
+| `PI_COFFEE_LOG_FORMAT` | `text` | `json` emits one JSON object per stderr line; secrets are redacted. |
+| `PI_COFFEE_RECOVER_ON_START` | `1` | Auto-resume sessions that were active when the daemon crashed. `0` leaves them stopped for an explicit `pi_resume`. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through
@@ -710,11 +743,15 @@ docker-compose.yml host-facing compose file
 
 ## Upgrade and uninstall
 
-After active workers finish, stop the background daemon with the command in [Deployment](#deployment),
-then update the checkout and rerun the same installer (macOS/Linux shell or Windows PowerShell):
+Drain first so running workers are not dropped, then stop the daemon with the command in
+[Deployment](#deployment), update the checkout, and rerun the same installer
+(macOS/Linux shell or Windows PowerShell):
 
 ```bash
+npm run upgrade -- --timeout=300
+# run the supervisor restart command printed by the script after updating
 git pull
+npm install
 npm run install:local
 ```
 
@@ -745,8 +782,9 @@ the latter deletes local credentials and daemon state, so preserve anything you 
 
 ## Known limitations
 
-- Workers do not survive a daemon restart. Shutting the daemon down stops them, and they are not
-  brought back automatically. Their session files are kept, but you spawn new sessions.
+- A graceful daemon shutdown stops workers; an unclean crash is recovered on the next start only for
+  sessions that were active at the crash (see `PI_COFFEE_RECOVER_ON_START`). Sessions stopped
+  explicitly are not resumed, and Windows has no automatic orphan-process recovery.
 - File claims are advisory and only cover literal, recognizable targets.
 - The git worktree model assumes one worker per branch. Forcing the same branch into two worktrees
   is not supported.

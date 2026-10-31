@@ -31,6 +31,12 @@ All notable changes to pi-coffee are recorded here. The format follows
 - Daemon test fixtures no longer read the real `~/.pi` credential store, so
   `npm run verify` can run while a daemon is active.
 
+### Verification
+
+- `npm run verify` passes 359/359 offline tests (typecheck, real pi extension types, offline MCP suite, playbook consistency).
+- CI matrix: Linux/macOS × Node 22.19.0/24/26 plus Windows startup.
+- s287/s288/s289 passed `pi_verify`/`pi_review`/`pi_merge`; s286 was taken over manually after a declared-scope omission (`src/mcp-server.ts` needed the required `pi_drain` tool) blocked `pi_verify`, and the merged tree was verified with the same full suite.
+
 ### Security
 
 - `npm audit --omit=dev` reports no known vulnerabilities after the dependency

@@ -8,9 +8,13 @@ import type { LockMode } from "./locks.js";
 import { z } from "zod";
 import { WORKER_STARTUP_POLICY } from "./worker-agent-dir.js";
 import { logLine } from "./log.js";
+import { createDashboardHandler } from "./dashboard.js";
+import { METRICS_CONTENT_TYPE, buildMetricsSnapshot, renderMetrics } from "./metrics.js";
 
 const config = loadConfig();
 const coord = new Coordinator(config);
+const startedAt = Date.now();
+const dashboard = createDashboardHandler({ coord, token: config.token });
 
 // Captured once at daemon startup: pi_status compares this in-memory value with
 // the current dist/manager.js mtime so a rebuilt dist without a restart is visible.
@@ -313,6 +317,32 @@ const server = createServer((req, res) => {
     return sendJson(res, 400, { error: "invalid request URL" });
   }
 
+  if (url.pathname === "/metrics") {
+    if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+    if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
+    void (async () => {
+      try {
+        const snapshot = await buildMetricsSnapshot(coord, startedAt, coord.isDraining());
+        res.writeHead(200, { "content-type": METRICS_CONTENT_TYPE, "cache-control": "no-store" });
+        res.end(renderMetrics(snapshot));
+      } catch (e) {
+        log("metrics error:", e);
+        if (!res.headersSent) sendJson(res, 500, { error: String(e) });
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/dashboard" || url.pathname.startsWith("/dashboard/")) {
+    void dashboard(req, res).then((handled) => {
+      if (!handled) sendJson(res, 404, { error: "not found" });
+    }).catch((e) => {
+      log("dashboard error:", e);
+      if (!res.headersSent) sendJson(res, 500, { error: String(e) });
+    });
+    return;
+  }
+
   if (url.pathname === "/mcp") {
     void (async () => {
       if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
@@ -360,6 +390,8 @@ async function main(): Promise<void> {
   server.listen(config.port, config.host, () => {
     log(`listening on http://${config.host}:${config.port}`);
     log(`  MCP endpoint:      http://${config.host}:${config.port}/mcp`);
+    log(`  dashboard:         http://${config.host}:${config.port}/dashboard`);
+    log(`  metrics:           http://${config.host}:${config.port}/metrics`);
     log(`  workspace root:    ${config.workspaceRoot}`);
     log(`  default repo:      ${config.defaultRepo}`);
     log(`  default model:     ${config.provider}/${config.model}`);
