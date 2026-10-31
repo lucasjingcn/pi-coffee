@@ -30,7 +30,8 @@
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
     "verify": "node scripts/ensure-deps.mjs && npm run typecheck && npm run typecheck:extensions && npm test && node scripts/sync-playbook.mjs --check",
     "install:cli": "node scripts/install-cli.mjs",
-    "upgrade": "node scripts/upgrade.mjs"
+    "upgrade": "node scripts/upgrade.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
