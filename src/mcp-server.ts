@@ -101,6 +101,15 @@ function sessionView(m: SessionMeta, detail: Detail) {
   return detail === "full" ? compactMeta(m) : summaryMeta(m);
 }
 
+/**
+ * Drain state for status views. Optional because lightweight test doubles register
+ * the server without a drain implementation; the daemon always provides it.
+ */
+function drainView(coord: Coordinator): ReturnType<Coordinator["drainStatus"]> | undefined {
+  const read = (coord as Partial<Pick<Coordinator, "drainStatus">>).drainStatus;
+  return typeof read === "function" ? read.call(coord) : undefined;
+}
+
 function auditBoard(m: SessionMeta): string {
   return m.scopeKeyHash ? `${m.scopeKeyHash}:pi-coffee` : "pi-coffee";
 }
@@ -533,8 +542,12 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     async ({ session_id, detail }) => {
       const view = detail ?? "summary";
       const code = checkCodeVersion(codeDir, runningDistMtimeMs);
-      if (session_id) return json({ ...sessionView(coord.snapshot(session_id), view), code });
+      const drain = drainView(coord);
+      const draining = drain ? { draining: drain.draining, drain_active: drain.active } : {};
+      if (session_id) return json({ ...sessionView(coord.snapshot(session_id), view), code, ...draining });
       return json({ sessions: coord.list().map((m) => sessionView(m, view)), code,
+        ...draining,
+        ...(drain ? { drain } : {}),
         ...(view === "full" ? { metrics: await coord.metrics() } : {}) });
     },
   );
@@ -869,6 +882,21 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       const entry = coord.boardPost(target, key, value, from ?? "codex");
       return json(scope_key ? { ...entry, board } : entry);
     },
+  );
+
+  server.registerTool(
+    "pi_drain",
+    {
+      title: "Drain the daemon for a restart",
+      description:
+        "Prepare a smooth daemon restart. action=start rejects new spawns and resumes while the workers already running finish; action=status reports draining plus the active worker count (wait for active=0); action=cancel returns to normal. Draining never stops a worker and is reversible.",
+      annotations: { readOnlyHint: false, idempotentHint: true },
+      inputSchema: {
+        action: z.enum(["start", "status", "cancel"]).optional().describe("Default: status"),
+        reason: z.string().optional().describe("Free-text operator note recorded with the drain (never credentials)"),
+      },
+    },
+    async ({ action, reason }) => json(coord.drain(action ?? "status", reason)),
   );
 
   server.registerTool(

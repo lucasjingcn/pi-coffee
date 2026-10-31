@@ -50,6 +50,11 @@ export interface Config {
   workerWarnMs: number;
   workerStallMs: number;
   workerIdleMs: number;
+  /**
+   * Auto-resume sessions that were active when the daemon died (default true).
+   * Disabling it leaves those sessions stopped for an explicit pi_resume.
+   */
+  recoverOnStartup: boolean;
 }
 
 /** Empty env vars count as unset so an exported "" doesn't shadow the default. */
@@ -112,7 +117,7 @@ function resolveNumber(
 /** Boolean env vars accept only "0"/"1"; overrides must be real booleans. */
 function resolveBoolean(
   overrides: Partial<Config>,
-  field: "autoClean" | "deleteBranches",
+  field: "autoClean" | "deleteBranches" | "recoverOnStartup",
   key: string,
   fallback: boolean,
 ): boolean {
@@ -214,6 +219,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     workerIdleMs: resolveNumber(overrides, "workerIdleMs", "PI_COFFEE_WORKER_IDLE_MS", 1_800_000,
       { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
+    recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),
   };
 

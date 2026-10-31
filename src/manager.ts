@@ -96,7 +96,7 @@ export type SessionStatus = "starting" | "idle" | "working" | "error" | "stoppin
 
 export type Outcome = "success_first" | "success_second" | "taken_over" | "abandoned";
 
-export const HANDOFF_KINDS = ["provider_wait", "provider_timeout", "provider_error", "worker_exited", "shutdown_failed", "awaiting_acceptance", "owner_timeout"] as const;
+export const HANDOFF_KINDS = ["provider_wait", "provider_timeout", "provider_error", "worker_exited", "shutdown_failed", "recovery_failed", "awaiting_acceptance", "owner_timeout"] as const;
 export interface WorkerHandoff {
   id: string;
   kind: typeof HANDOFF_KINDS[number];
@@ -223,6 +223,34 @@ export interface WaitResult {
   timedOut: boolean;
 }
 
+/** Drain mode blocks new spawns/resumes while a restart is being prepared. */
+export interface DrainState {
+  draining: boolean;
+  /** When the current drain started; null when not draining. */
+  startedAt: number | null;
+  /** Free-text operator reason, never credentials. */
+  reason: string | null;
+  /** Workers still occupying a concurrency slot: zero is the safe restart point. */
+  active: number;
+  /** Ids of those active workers, so an operator can see what is still running. */
+  activeSessions: string[];
+}
+
+/** Result of the startup auto-recovery pass over sessions active at an unclean shutdown. */
+export interface RecoveryReport {
+  recovered: { id: string; status: SessionStatus }[];
+  skipped: { id: string; reason: string }[];
+  failed: { id: string; reason: string }[];
+}
+
+/** Why one uncleanly-shutdown session was or was not auto-resumed at startup. */
+interface RecoveryCheck {
+  /** Set when the session must not be resumed; the text is the operator-facing reason. */
+  blocker?: string;
+  /** True when a live old worker may still own the worktree: fail closed with a handoff. */
+  failClosed?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator
 // ---------------------------------------------------------------------------
@@ -253,6 +281,20 @@ export class Coordinator {
   private busyRepos = new Set<string>();
   private dispatchingRepos = new Map<string, number>();
   private orchestratorCosts: OrchestratorCostRecord[] = [];
+  /**
+   * Ids the persisted state recorded as active (starting/idle/working) when the
+   * daemon died. `load()` rewrites their statuses, so the original activity is
+   * captured here to find what a restart may bring back.
+   */
+  private activeAtShutdown = new Set<string>();
+  /** Planned startup auto-resumes, decided once in `init()` before any sweep runs. */
+  private startupRecovery: { id: string; reason?: string; failClosed?: boolean }[] = [];
+  /** Sessions about to be auto-resumed: their evidence must survive startup sweeps. */
+  private pendingRecovery = new Set<string>();
+  /** Drain mode: new spawns/resumes are rejected until it is cancelled. */
+  private draining = false;
+  private drainStartedAt: number | undefined;
+  private drainReason: string | undefined;
 
   constructor(config: Config) {
     this.config = config;
@@ -265,6 +307,9 @@ export class Coordinator {
     await mkdir(join(this.config.dataDir, "sessions"), { recursive: true });
     await mkdir(this.config.workspaceRoot, { recursive: true });
     await this.load();
+    // Decide the auto-recovery set before any sweep: a session that is about to
+    // come back must not have its worktree or transcript cleaned underneath it.
+    await this.planStartupRecovery();
     // Sessions never survive a daemon restart, so any leftover worktree is an orphan.
     await this.sweepOnStartup();
     this.startSweeper();
@@ -342,6 +387,9 @@ export class Coordinator {
    * removing the worktree or transcript of the worker that is running again.
    */
   private isLive(id: string): boolean {
+    // A session the daemon is about to auto-resume counts as live for cleanup: its
+    // worktree and transcript are the evidence the resume needs.
+    if (this.pendingRecovery.has(id)) return true;
     const rt = this.runtimes.get(id);
     return rt !== undefined && rt.meta.status !== "stopped";
   }
@@ -407,6 +455,7 @@ export class Coordinator {
     }
     let removed = 0;
     for (const name of names) {
+      if (this.pendingRecovery.has(name)) continue;
       const meta = this.runtimes.get(name)?.meta ?? this.history.find((entry) => entry.id === name);
       if (!meta || meta.status !== "stopped") continue;
       const dir = join(sessionsRoot, name);
@@ -867,6 +916,9 @@ export class Coordinator {
     this.board.import(state.board);
     this.history = [];
     for (const original of state.history) {
+      // Captured before the shutdown handling below rewrites the status: only a
+      // session that was actually active when the daemon died is recoverable.
+      const wasActive = original.status === "starting" || original.status === "idle" || original.status === "working";
       const entry = { ...original, pendingQuestions: [] };
       if (entry.shutdownUnconfirmed) {
         try {
@@ -890,6 +942,7 @@ export class Coordinator {
         }
       } else if (["starting", "idle", "working", "stopping"].includes(entry.status)) entry.status = "stopped";
       this.history.push(entry);
+      if (wasActive) this.activeAtShutdown.add(entry.id);
     }
   }
 
@@ -965,6 +1018,198 @@ export class Coordinator {
   }
 
   // -------------------------------------------------------------------------
+  // Restart recovery
+  // -------------------------------------------------------------------------
+
+  /**
+   * Decide, once per startup and before any cleanup runs, which sessions were
+   * active at an unclean shutdown and could be resumed. Nothing is resumed here:
+   * `recoverSessionsAfterRestart()` runs after the HTTP endpoint is listening,
+   * because a resumed worker's extension calls back into the daemon.
+   */
+  private async planStartupRecovery(): Promise<void> {
+    this.startupRecovery = [];
+    this.pendingRecovery = new Set();
+    if (!this.config.recoverOnStartup || this.activeAtShutdown.size === 0) return;
+
+    for (const id of this.activeAtShutdown) {
+      const check = await this.checkRecoverable(id);
+      if (check.failClosed) {
+        // An old worker may still own this worktree and its ownership cannot be
+        // proven: fail closed with a handoff instead of starting a second writer.
+        this.markRecoveryFailure(id, check.blocker ?? "old worker shutdown unconfirmed", "shutdown_failed");
+        logLine("pi-coffee", `startup recovery: refusing ${id} (${check.blocker ?? "old worker shutdown unconfirmed"})`);
+        continue;
+      }
+      this.startupRecovery.push({ id, reason: check.blocker });
+      if (!check.blocker) this.pendingRecovery.add(id);
+    }
+
+    const planned = this.startupRecovery.filter((item) => !item.reason).length;
+    const skipped = this.startupRecovery.length - planned;
+    if (planned || skipped) {
+      logLine("pi-coffee", `startup recovery: ${planned} session(s) to resume, ${skipped} left alone`);
+    }
+  }
+
+  /**
+   * Why one session may (or may not) be resumed at startup. Every reason to say no
+   * is explicit: a session stopped by an explicit stop, finished, reclaimed, or with
+   * unconfirmed shutdown evidence is never resurrected.
+   */
+  private async checkRecoverable(id: string): Promise<RecoveryCheck> {
+    if (this.runtimes.has(id)) return { blocker: "session is already running" };
+    const meta = this.history.find((entry) => entry.id === id);
+    if (!meta) return { blocker: "session is not in history" };
+    if (meta.outcome !== undefined) return { blocker: `finished (${meta.outcome})` };
+    if (meta.reclaimed) return { blocker: "evidence was reclaimed" };
+    if (meta.shutdownUnconfirmed) return { blocker: "shutdown unconfirmed" };
+    if (meta.handoff?.kind === "shutdown_failed") return { blocker: "shutdown unconfirmed", failClosed: true };
+    if (meta.status !== "stopped") return { blocker: `status is ${meta.status}` };
+    if (!meta.repo || !existsSync(meta.repo)) return { blocker: "repository is missing" };
+    if (!meta.worktree || !existsSync(meta.worktree)) return { blocker: "worktree is missing" };
+    try { this.resumableTranscript(id); }
+    catch (error) { return { blocker: error instanceof Error ? error.message : String(error) }; }
+    try {
+      if (!await this.vault.read(id)) return { blocker: "control credential is missing" };
+    } catch {
+      return { blocker: "control credential is unreadable" };
+    }
+    // Survivor safety: reuse the persisted ownership proof. A group that is gone
+    // costs nothing; a group that is provably ours is stopped; anything else means
+    // ownership cannot be established, so no resume.
+    if (meta.workerProcess) {
+      try {
+        await stopOwnedWorker(meta.workerProcess);
+        meta.workerProcess = undefined;
+        this.scheduleSave();
+      } catch (error) {
+        return { blocker: `old worker ownership unproven: ${error instanceof Error ? error.message : String(error)}`, failClosed: true };
+      }
+    }
+    return {};
+  }
+
+  /**
+   * Bring back every session that was active when the daemon died by replaying the
+   * existing `resume()` path: same transcript, worktree, spec, control key and
+   * provider/model/thinking. Runs one at a time, in persisted order, and never
+   * throws: a failed recovery marks the session `error` and publishes a handoff so
+   * Codex can decide, and the daemon keeps serving.
+   */
+  async recoverSessionsAfterRestart(): Promise<RecoveryReport> {
+    const plan = this.startupRecovery;
+    this.startupRecovery = [];
+    const report: RecoveryReport = { recovered: [], skipped: [], failed: [] };
+    if (!plan.length) {
+      this.pendingRecovery = new Set();
+      return report;
+    }
+
+    for (const item of plan) {
+      // Re-check at execution time: an operator or a drain may have moved on while
+      // earlier resumes were still starting their workers.
+      let reason = item.reason ?? (await this.checkRecoverable(item.id)).blocker;
+      if (!reason && this.draining) reason = "drain in progress";
+      if (reason) {
+        this.pendingRecovery.delete(item.id);
+        report.skipped.push({ id: item.id, reason });
+        logLine("pi-coffee", `startup recovery: left ${item.id} alone (${reason})`);
+        continue;
+      }
+      try {
+        const meta = await this.resume(item.id);
+        report.recovered.push({ id: item.id, status: meta.status });
+        logLine("pi-coffee", `startup recovery: resumed ${item.id} on its existing transcript`);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.markRecoveryFailure(item.id, detail, "recovery_failed");
+        report.failed.push({ id: item.id, reason: detail });
+        logLine("pi-coffee", `startup recovery: failed to resume ${item.id}: ${detail}`);
+      } finally {
+        this.pendingRecovery.delete(item.id);
+      }
+    }
+    return report;
+  }
+
+  /**
+   * Record that a session could not be brought back. A shutdown that is still
+   * unconfirmed keeps its own fail-closed handoff (and any retained locks); every
+   * other failure becomes an actionable handoff instead of a silent stoppage.
+   */
+  private markRecoveryFailure(id: string, detail: string, kind: "recovery_failed" | "shutdown_failed"): void {
+    const meta = this.runtimes.get(id)?.meta ?? this.history.find((entry) => entry.id === id);
+    if (!meta) return;
+    if (kind === "recovery_failed" && meta.handoff?.kind === "shutdown_failed") return;
+    if (meta.status !== "stopping") meta.status = "error";
+    meta.error = kind === "recovery_failed" ? `startup recovery failed: ${detail}` : `old worker shutdown unconfirmed: ${detail}`;
+    meta.handoff = {
+      id: randomBytes(12).toString("hex"),
+      kind,
+      at: Date.now(),
+      safeToTakeOver: false,
+      locksReleased: false,
+      action: "resolve_shutdown",
+    };
+    this.archive(meta);
+    this.scheduleSave();
+    this.notifyWaiters();
+  }
+
+  // -------------------------------------------------------------------------
+  // Drain mode (smooth upgrade)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Drain stops accepting new work without touching the work already running, so
+   * an operator can wait for zero active workers and then restart the daemon.
+   * Cancel (or a fresh start) makes the daemon accept spawns/resumes again.
+   */
+  drain(action: "start" | "status" | "cancel" = "status", reason?: string): DrainState {
+    if (action === "start") {
+      if (!this.draining) {
+        this.draining = true;
+        this.drainStartedAt = Date.now();
+        this.drainReason = reason;
+        logLine("pi-coffee", "drain started: new spawns and resumes are rejected until it is cancelled");
+      } else if (reason) {
+        this.drainReason = reason;
+      }
+    } else if (action === "cancel") {
+      if (this.draining) logLine("pi-coffee", "drain cancelled: spawns and resumes are accepted again");
+      this.draining = false;
+      this.drainStartedAt = undefined;
+      this.drainReason = undefined;
+    }
+    return this.drainStatus();
+  }
+
+  drainStatus(): DrainState {
+    return {
+      draining: this.draining,
+      startedAt: this.drainStartedAt ?? null,
+      reason: this.drainReason ?? null,
+      active: this.activeWorkers(),
+      activeSessions: this.list()
+        .filter((meta) => meta.status === "starting" || meta.status === "idle" || meta.status === "working" || meta.status === "stopping")
+        .map((meta) => meta.id),
+    };
+  }
+
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  /** Reject new work while draining; cancellation is the only way back in. */
+  private assertNotDraining(operation: string): void {
+    if (!this.draining) return;
+    throw new Error(
+      `daemon is draining for a restart; ${operation} is rejected until the drain is cancelled (pi_drain action=cancel)`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Sessions: lifecycle
   // -------------------------------------------------------------------------
 
@@ -980,6 +1225,9 @@ export class Coordinator {
   }
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
+    // New work is refused while the daemon is draining for a restart. Checked
+    // before the slot reservation so a rejected spawn leaves no reservation behind.
+    this.assertNotDraining("spawn");
     // Reserve a concurrency slot synchronously, before the first await, so two
     // concurrent spawns cannot both pass the cap check and oversubscribe the
     // daemon. The slot is transferred to the runtime once it is registered;
@@ -1211,6 +1459,7 @@ export class Coordinator {
    * gone, when an outcome is already recorded, or when a shutdown is unconfirmed.
    */
   async resume(id: string, opts: ResumeOptions = {}): Promise<SessionMeta> {
+    this.assertNotDraining("resume");
     const running = this.runtimes.get(id);
     if (running && running.meta.status !== "stopped") {
       throw new Error(`session ${id} is ${running.meta.status}; stop it before resuming`);
