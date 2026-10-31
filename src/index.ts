@@ -129,6 +129,7 @@ const internalSchemas: Record<string, z.ZodTypeAny> = {
   "/internal/board/get": z.object({ board: internalString.optional(), key: internalString.optional(), latest: z.boolean().optional() }),
   "/internal/board/post": z.object({ board: internalString, key: internalString,
     value: z.unknown().refine(value => value !== undefined, "value required"), from: internalString.optional() }),
+  "/internal/drain": z.object({ action: z.enum(["start", "status", "cancel"]).optional(), reason: z.string().optional() }),
 };
 
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -136,7 +137,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
   const workerSid = token ? coord.workerSessionForToken(token) : undefined;
   const master = Boolean(config.token) && authorized(req) && !workerSid;
   const mutating = new Set(["/internal/hello", "/internal/claim", "/internal/authorize-write",
-    "/internal/release", "/internal/read", "/internal/send", "/internal/board/post"]);
+    "/internal/release", "/internal/read", "/internal/send", "/internal/board/post",
+    "/internal/drain", "/internal/shutdown"]);
   if (!workerSid && !master && (Boolean(config.token) || (coord.hasProtectedSessions() && mutating.has(url.pathname)))) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
@@ -164,7 +166,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
   try {
     switch (url.pathname) {
       case "/internal/health":
-        return sendJson(res, 200, { ok: true, sessions: coord.list().length, workerStartupPolicy: WORKER_STARTUP_POLICY });
+        return sendJson(res, 200, { ok: true, sessions: coord.list().length, workerStartupPolicy: WORKER_STARTUP_POLICY,
+          draining: coord.isDraining(), active: coord.activeWorkers() });
 
       case "/internal/hello": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
@@ -177,6 +180,32 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         return sendJson(res, 200, { sessions: coord.list()
           .filter((meta) => !workerSid || (meta.scopeKeyHash && meta.scopeKeyHash === coord.snapshot(workerSid).scopeKeyHash))
           .map(visibleSession) });
+
+      // Drain mode for a smooth restart: start/wait-for-zero/cancel. Only the
+      // operator side (never a worker token) may change it.
+      case "/internal/drain": {
+        if (workerSid) return sendJson(res, 403, { error: "worker token cannot control daemon draining" });
+        const requested = url.searchParams.get("action") ?? body.action ?? "status";
+        if (requested !== "start" && requested !== "status" && requested !== "cancel") {
+          return sendJson(res, 400, { error: "action must be start, status or cancel" });
+        }
+        return sendJson(res, 200, coord.drain(requested, typeof body.reason === "string" ? body.reason : undefined));
+      }
+
+      // Graceful self-shutdown for scripts/upgrade.mjs. It refuses while workers are
+      // still active and never signals a pid, so no unrelated process is ever killed.
+      case "/internal/shutdown": {
+        if (workerSid) return sendJson(res, 403, { error: "worker token cannot stop the daemon" });
+        const active = coord.activeWorkers();
+        if (active > 0) {
+          return sendJson(res, 409, { error: `refusing to stop with ${active} active worker(s); drain and wait for zero`, active });
+        }
+        sendJson(res, 200, { ok: true, stopping: true, draining: coord.isDraining(), active });
+        res.once("finish", () => {
+          void shutdown("upgrade-stop").catch((error) => { log("shutdown failed:", error); process.exit(1); });
+        });
+        return;
+      }
 
       case "/internal/status": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
@@ -335,6 +364,18 @@ async function main(): Promise<void> {
     log(`  default repo:      ${config.defaultRepo}`);
     log(`  default model:     ${config.provider}/${config.model}`);
     log(`  max sessions:      ${config.maxSessions}`);
+    // Sessions that were active at an unclean shutdown are resumed here, one at a
+    // time, once the endpoint above can answer their extension. This never blocks
+    // or crashes the daemon: a failed recovery becomes an error + handoff.
+    void coord.recoverSessionsAfterRestart()
+      .then((report) => {
+        if (report.recovered.length) {
+          log(`startup recovery: resumed ${report.recovered.map((item) => item.id).join(", ")}`);
+        }
+        for (const item of report.skipped) log(`startup recovery: left ${item.id} alone (${item.reason})`);
+        for (const item of report.failed) log(`startup recovery: failed ${item.id} (${item.reason})`);
+      })
+      .catch((error) => log("startup recovery error:", error));
   });
 }
 
