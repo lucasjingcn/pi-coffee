@@ -165,10 +165,10 @@ The daemon runs the pinned local pi CLI instead of importing pi's internal modul
 
 | | |
 |---|---|
-| **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19 and 24. |
+| **Node.js ≥ 22.19** | Runtime and test suite. CI covers 22.19, 24 and 26. |
 | **git** | Worktrees, diffs, merges, branch cleanup. |
 | **pi** | Installed as a pinned local npm dependency. It can authenticate from an API key in the environment, so `/login` is optional. |
-| **An MCP client** | Codex is the reference client; any MCP-capable client works. |
+| **An MCP client** | Codex and DSH are reference clients; any MCP-capable client works. |
 | **Windows 10+** | Git for Windows with Git Bash, plus Node and Codex CLI on `PATH`. |
 
 Run the daemon, Codex, and the workers as the **same user**. They need to share file ownership.
@@ -682,7 +682,7 @@ task-type gate, scope overlap, test-first acceptance, diffing, model overrides, 
 gate, finishing and reporting, and restart persistence — against a fake `pi` that speaks JSONL, so
 it needs no credentials and no network.
 
-GitHub Actions runs `npm ci` and `npm run verify` on Linux and macOS with Node 22.19.0 and 24.
+GitHub Actions runs `npm ci` and `npm run verify` on Linux and macOS with Node 22.19.0, 24 and 26.
 A separate Windows job builds, type-checks, starts the daemon with an isolated setup file, and parses
 the PowerShell installers. Check the actual run for remote results; workflow configuration alone is
 not evidence of a passing Windows installation. The pinned pi dependency is also the default local

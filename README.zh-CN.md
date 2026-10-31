@@ -132,7 +132,7 @@ pi 内部模块。
 
 | | |
 |---|---|
-| **Node.js ≥ 22.19** | 运行时和测试都需要。CI 覆盖 22.19 和 24。 |
+| **Node.js ≥ 22.19** | 运行时和测试都需要。CI 覆盖 22.19、24 和 26。 |
 | **git** | worktree、diff、merge、分支清理都靠它。 |
 | **pi** | 由 npm 安装固定版本；可从环境变量读 API key，交互式 `/login` 可选。 |
 | **MCP 客户端** | Codex 是参考实现，任何支持 MCP 的客户端都可用。 |
@@ -584,7 +584,7 @@ SMOKE_LIVE=0 ./smoke.sh   # 只跑确定性冒烟，不调用模型
 用一个只会说 JSONL 的假 `pi` 把整条控制链走一遍：spec 校验、task-type 关卡、scope 重叠、验收测试
 先行、diff、模型覆盖、two-strikes、finish/report、重启持久化。它不需要任何凭据，也不需要网络。
 
-GitHub Actions 在 Linux/macOS 上用 Node 22.19.0/24 跑 `npm ci` 和 `npm run verify`；另有 Windows
+GitHub Actions 在 Linux/macOS 上用 Node 22.19.0/24/26 跑 `npm ci` 和 `npm run verify`；另有 Windows
 任务构建、类型检查、使用隔离配置启动 daemon，并解析 PowerShell 安装脚本。远端结果以实际运行记录为准，
 workflow 文件存在不代表 Windows 安装已通过。固定版本的 pi 也是本地 worker 默认 CLI；CI 不登录、
 也不调用任何模型提供方。
