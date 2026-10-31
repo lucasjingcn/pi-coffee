@@ -70,6 +70,7 @@ async function daemonFixture(fn) {
     PI_COFFEE_PI_BIN: fake,
     PI_COFFEE_TOKEN: "master-for-test",
     PI_COFFEE_AUTO_CLEAN: "0",
+    PI_CODING_AGENT_DIR: join(root, "pi-agent"),
     FAKE_ARGV_FILE: argvFile,
   };
   const proc = spawn(process.execPath, ["dist/index.js"], { env, stdio: "ignore" });

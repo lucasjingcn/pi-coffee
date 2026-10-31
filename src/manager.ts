@@ -1094,6 +1094,8 @@ export class Coordinator {
         hashes: originalAcceptanceHashes,
       } : undefined,
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
+      provider: opts.provider ?? this.config.provider,
+      model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
       status: "starting",
       createdAt: Date.now(),
@@ -1311,12 +1313,18 @@ export class Coordinator {
 
     const workerToken = randomBytes(32).toString("base64url");
     const sessionDir = join(this.config.dataDir, "sessions", id);
+    const provider = opts.provider ?? entry.provider ?? this.config.provider;
+    const model = opts.model ?? entry.model ?? this.config.model;
+    const thinking = opts.thinking ?? entry.thinking ?? this.config.thinking;
+    meta.provider = provider;
+    meta.model = model;
+    meta.thinking = thinking;
     const client = new PiRpcClient({
       cwd: meta.worktree,
       piBin: this.config.piBin,
-      provider: opts.provider ?? entry.provider ?? this.config.provider,
-      model: opts.model ?? entry.model ?? this.config.model,
-      thinking: opts.thinking ?? entry.thinking ?? this.config.thinking,
+      provider,
+      model,
+      thinking,
       name: meta.name,
       sessionDir,
       resumeSession: transcript,
@@ -1539,8 +1547,11 @@ export class Coordinator {
   private async refreshStats(rt: Runtime, includeCost = false): Promise<void> {
     try {
       const state = await rt.client.getState();
-      rt.meta.provider = state.model?.provider;
-      rt.meta.model = state.model?.id;
+      // A worker that does not report a model (older pi, or a test double) must
+      // not erase the provider/model the session was started with: resume would
+      // otherwise silently fall back to the daemon default.
+      if (typeof state.model?.provider === "string" && state.model.provider) rt.meta.provider = state.model.provider;
+      if (typeof state.model?.id === "string" && state.model.id) rt.meta.model = state.model.id;
       if (typeof state.thinkingLevel === "string" && state.thinkingLevel) rt.meta.thinking = state.thinkingLevel;
       if (typeof state.sessionName === "string") rt.meta.name = state.sessionName;
 

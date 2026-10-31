@@ -28,7 +28,7 @@ if(cmd.type==='prompt')process.stdout.write(JSON.stringify({type:'agent_settled'
   const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
   const env={...process.env,PI_COFFEE_HOST:'127.0.0.1',PI_COFFEE_PORT:String(port),PI_COFFEE_DATA_DIR:join(root,'data'),
     PI_COFFEE_WORKSPACE_ROOT:join(root,'workers'),PI_COFFEE_DEFAULT_REPO:repo,PI_COFFEE_PI_BIN:fake,
-    PI_COFFEE_TOKEN:'master-for-test',PI_COFFEE_AUTO_CLEAN:'0',FAKE_TOKEN_FILE:tokenFile};
+    PI_COFFEE_TOKEN:'master-for-test',PI_COFFEE_AUTO_CLEAN:'0',PI_CODING_AGENT_DIR:join(root,'pi-agent'),FAKE_TOKEN_FILE:tokenFile};
   const proc=spawn(process.execPath,['dist/index.js'],{env,stdio:'ignore'});
   const closed=new Promise(resolve=>proc.once('close',resolve));
   const base=`http://127.0.0.1:${port}`;

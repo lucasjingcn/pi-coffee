@@ -15,7 +15,7 @@ test('daemon shutdown reports flush failure and exits nonzero', { timeout: 10000
   await new Promise(r => probe.close(r));
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('PI_COFFEE_')) delete env[key];
-  Object.assign(env, { PI_COFFEE_HOST: '127.0.0.1', PI_COFFEE_PORT: String(port), PI_COFFEE_DATA_DIR: data, PI_COFFEE_AUTO_CLEAN: '0' });
+  Object.assign(env, { PI_COFFEE_HOST: '127.0.0.1', PI_COFFEE_PORT: String(port), PI_COFFEE_DATA_DIR: data, PI_COFFEE_AUTO_CLEAN: '0', PI_CODING_AGENT_DIR: join(dir, 'pi-agent') });
   const proc = spawn(process.execPath, ['dist/index.js'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   proc.stderr.on('data', d => { stderr = (stderr + d.toString()).slice(-8000); });
