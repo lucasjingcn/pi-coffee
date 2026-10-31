@@ -557,7 +557,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     annotations: { readOnlyHint: false, idempotentHint: true },
     inputSchema: { id: z.string().min(1), amount: z.number().finite().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/),
       source: z.enum(["manual", "estimate", "provider"]), reference: z.string().min(1), session_ids: z.array(z.string()).min(1),
-      control_keys: z.record(z.string()).optional() },
+      control_keys: z.record(z.string(), z.string()).optional() },
   }, async ({ control_keys, ...record }) => {
     for (const id of record.session_ids) coord.assertControl(id, control_keys?.[id]);
     return json(coord.recordCost(record));
@@ -687,7 +687,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     {
       title: "Push a branch",
       description: "Push the main repo's current branch (or an explicit branch) to a remote.",
-      inputSchema: { session_id: z.string(), control_key: z.string().optional(), control_keys: z.record(z.string()).optional(), remote: z.string().optional(), branch: z.string().optional() },
+      inputSchema: { session_id: z.string(), control_key: z.string().optional(), control_keys: z.record(z.string(), z.string()).optional(), remote: z.string().optional(), branch: z.string().optional() },
     },
     async ({ session_id, control_key, control_keys, remote, branch }) => {
       coord.assertControl(session_id, control_key);
@@ -748,7 +748,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       title: "Clean up finished workers",
       description:
         "Clean selected stopped workers, including historical sessions: accepted work and abandoned work with no commit or dirty files. Branches are removed only when safely merged; dirty, unrecorded, and abandoned work with commits is retained. Also reclaims what a session beyond recovery still holds: once its worktree is gone and it has an outcome or no live worker branch, its transcript directory, control credential and the bulk evidence in its history entry are removed (reported as transcripts_reclaimed, credentials_reclaimed and history_compacted), while everything the scoreboard reads is kept. Supply session_ids and matching control_keys. Global cleanup requires keys for every protected session, including history.",
-      inputSchema: { session_ids: z.array(z.string()).min(1).optional(), control_keys: z.record(z.string()).optional() },
+      inputSchema: { session_ids: z.array(z.string()).min(1).optional(), control_keys: z.record(z.string(), z.string()).optional() },
     },
     async ({ session_ids, control_keys }) => {
       if (session_ids) {
@@ -773,7 +773,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       inputSchema: {
         session_id: z.string(),
         control_key: z.string().optional(),
-        control_keys: z.record(z.string()).optional().describe("Required for manual codex claims across protected sessions"),
+        control_keys: z.record(z.string(), z.string()).optional().describe("Required for manual codex claims across protected sessions"),
         paths: z.array(z.string()).min(1).describe("Repo-relative paths (POSIX separators)"),
         mode: z.enum(["rw", "ro"]).optional(),
         repo: z
@@ -797,7 +797,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       inputSchema: {
         session_id: z.string(),
         control_key: z.string().optional(),
-        control_keys: z.record(z.string()).optional().describe("Required for manual codex releases across protected sessions"),
+        control_keys: z.record(z.string(), z.string()).optional().describe("Required for manual codex releases across protected sessions"),
         paths: z.array(z.string()).optional(),
         repo: z
           .string()
@@ -831,7 +831,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       inputSchema: {
         session_id: z.string().describe("Recipient session id, or '*' to broadcast"),
         control_key: z.string().optional(),
-        control_keys: z.record(z.string()).optional().describe("Required to broadcast across protected sessions"),
+        control_keys: z.record(z.string(), z.string()).optional().describe("Required to broadcast across protected sessions"),
         message: z.string(),
         kind: z.enum(["note", "question", "answer", "broadcast"]).optional(),
         from: z.string().optional(),
@@ -861,7 +861,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     {
       title: "Post to the shared board",
       description: "Append a fact/decision/interface to a shared blackboard that every worker can read (e.g. API contracts, ownership).",
-      inputSchema: { board: z.string(), key: z.string(), value: z.string(), from: z.string().optional(), scope_key: z.string().optional(), control_keys: z.record(z.string()).optional() },
+      inputSchema: { board: z.string(), key: z.string(), value: z.string(), from: z.string().optional(), scope_key: z.string().optional(), control_keys: z.record(z.string(), z.string()).optional() },
     },
     async ({ board, key, value, from, scope_key, control_keys }) => {
       if (!scope_key) coord.assertControlsForAll(control_keys);

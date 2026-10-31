@@ -1,6 +1,6 @@
 {
   "name": "pi-coffee",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -29,18 +29,22 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
     "verify": "node scripts/ensure-deps.mjs && npm run typecheck && npm run typecheck:extensions && npm test && node scripts/sync-playbook.mjs --check",
-    "install:cli": "node scripts/install-cli.mjs"
+    "install:cli": "node scripts/install-cli.mjs",
+    "upgrade": "node scripts/upgrade.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "proper-lockfile": "^4.1.2",
-    "typebox": "^1.3.34",
-    "zod": "^3.25.0"
+    "typebox": "^1.4.3",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }
