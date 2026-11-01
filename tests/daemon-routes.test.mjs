@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AuditLog } from "../dist/audit.js";
 
 const token = "route-token";
 
@@ -114,14 +115,40 @@ test("capabilities lists every internal route the daemon serves", async () => {
     assert.equal(response.status, 200);
     const body = await response.json();
     for (const route of ["/internal/sessions", "/internal/locks", "/internal/health", "/internal/shutdown",
-      "/internal/claim", "/internal/board/post"]) {
+      "/internal/audit/verify", "/internal/claim", "/internal/board/post"]) {
       assert.ok(body.internal_endpoints.includes(route), `missing ${route}`);
     }
     // Every advertised route must really answer.
-    for (const route of ["/internal/sessions", "/internal/locks"]) {
+    for (const route of ["/internal/sessions", "/internal/locks", "/internal/audit/verify"]) {
       const probe = await fetch(`${base}${route}`, { headers: auth });
       assert.equal(probe.status, 200, route);
     }
+  });
+});
+
+test("the audit verification route reports a tampered chain, not a healthy one", async () => {
+  await daemonFixture(async ({ base, auth, root }) => {
+    // The route is operator-facing: without the token it must not answer.
+    assert.equal((await fetch(`${base}/internal/audit/verify`)).status, 401);
+
+    const log = new AuditLog({ dir: join(root, "data", "audit") });
+    await log.append("orchestrator", "spawn", "s1");
+    await log.append("orchestrator", "merge", "s1");
+
+    const clean = await (await fetch(`${base}/internal/audit/verify`, { headers: auth })).json();
+    assert.equal(clean.ok, true);
+    assert.equal(clean.entries, 2);
+
+    const file = join(root, "data", "audit", "audit-0001.jsonl");
+    const lines = (await readFile(file, "utf8")).trim().split("\n");
+    const entry = JSON.parse(lines[0]);
+    entry.target = "someone-else";
+    lines[0] = JSON.stringify(entry);
+    await writeFile(file, lines.join("\n") + "\n");
+
+    const broken = await (await fetch(`${base}/internal/audit/verify`, { headers: auth })).json();
+    assert.equal(broken.ok, false);
+    assert.equal(broken.firstBrokenSeq, 1);
   });
 });
 

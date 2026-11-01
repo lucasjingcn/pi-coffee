@@ -245,7 +245,9 @@ Run each item against the final branch. Record evidence (command + output) in th
 
 **Coordination and audit**
 - [ ] Read-back mismatch simulated (state store throws after write) → call fails, no ghost entry.
-- [ ] Audit chain: edit/reorder/delete/truncate → `pi_audit verify` reports the first broken seq.
+- [x] Audit chain: edit/reorder/delete/truncate → `pi_audit verify` reports the first broken seq
+  (also `GET /internal/audit/verify` and a startup check; `tests/audit-mcp.test.mjs`,
+  `tests/daemon-routes.test.mjs`).
 - [ ] Secret patterns: `sk-`, `ghp_`, `AKIA`, JWT, private key blocks rejected; hashes/base64 prose not false-positived.
 - [ ] Mailbox/board/outcome notes cannot persist secrets (grep the state file in the test).
 - [ ] Every state-changing tool produces exactly one audit entry (snapshot test).

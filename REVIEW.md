@@ -102,3 +102,55 @@ bogus 锁补修单独统计：委派 1 项（s16），首次完成 0%，一次�
 - GitHub Actions 与 release workflow 只有推送/tag 后才会在远端运行；本轮未推送。
 - 真实模型调用与生产部署不在本轮验收内；daemon 重启后以 `/internal/health`、`/metrics`、`/dashboard` 和 `pi_status` 做本地加载验证。
 
+
+## 2026-11-01 审计链生产可验证 + Linux 安装护栏实测
+
+两条遗留缺口，本轮关闭。
+
+### 1. 审计链 `verify()` 生产路径从不调用
+
+此前 `AuditLog.verify()`（`src/audit.ts:301`）只有 `tests/audit.test.mjs` 调用；生产代码只 append，
+没有任何入口重算哈希链，篡改/重排/截断在真实部署里不可见。
+
+- `pi_audit`（`action: verify|tail`）：`src/mcp-server.ts` 注册，排在 `MCP_TOOL_ORDER` 末尾；
+  `verify` 返回 `{ok, entries, files, firstBrokenSeq?, reason?}`，链断时以 `isError` 返回，
+  不会伪装成健康。`tail` 返回最新若干条（默认 50，最多 1000）。
+- `GET /internal/audit/verify`：`src/index.ts` 新增只读路由并列入 `INTERNAL_SCHEMALESS_ROUTES`
+  （因此出现在 `/internal/capabilities`）；配置了 token 时与其他内部路由同一鉴权口径。
+- daemon 启动时校验一次（`main()`，`coord.init()` 之后）：成功记 `audit chain verified: N entries`，
+  失败记 `audit chain BROKEN: <reason> (first broken seq N)`。校验失败不阻塞启动（恢复与既有 worker
+  结果仍然有用），但不再静默。
+
+证据：`tests/audit-mcp.test.mjs`（干净链 → `ok:true`；改一条记录 → `isError` + `firstBrokenSeq:1`）、
+`tests/daemon-routes.test.mjs`（无 token 401、干净链 200/ok、改记录后 `ok:false`）。
+
+### 2. Linux sudo + 用户级 unit 护栏只在 Linux 可验证
+
+`install.sh` 的 Linux 分支（`da90504` 修）改为：root 升级时用
+`sudo -u "$SUDO_USER" XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user is-active pi-coffee`
+询问发起者自己的 systemd，并同时检查系统 unit（`systemctl is-active --quiet pi-coffee`）。
+原逻辑在 root 下只剩 `systemctl --user`（连不上用户总线）与系统 unit 检查，用户级安装根本拦不住。
+
+本轮补两层证据：
+
+- 跨平台回归测试：`tests/service-paths.test.mjs` 新增用例，用 `uname`/`id`/`sudo`/`systemctl`
+  假命令覆盖四种情形——root + 用户 unit 活跃（断言真的走了 `sudo -u alice XDG_RUNTIME_DIR=…`）、
+  仅系统 unit 活跃、非 root + 用户 unit 活跃、以及都不活跃时护栏放行（install 继续到版本探测）。
+- 真实 Linux 实测（colima VM，Ubuntu + systemd 255，per-instance 手工验收）：
+
+  | 场景 | 旧 `install.sh`（`03d0fa4`） | 新 `install.sh` |
+  | --- | --- | --- |
+  | 仅用户级 unit 活跃，`sudo bash install.sh` | 未拦（继续到 `node is required`） | `exit 1` + `pi-coffee is running…` |
+  | 仅用户级 unit 活跃，非 root 运行 | 拦（`systemctl --user` 可达） | 拦 |
+  | 系统 unit 活跃（非 root / sudo） | 拦 | 拦 |
+  | 无 unit 活跃 | 放行 | 放行（停在 `node is required`） |
+
+  关键实测：root 下 `systemctl --user is-active pi-coffee` 输出
+  `Failed to connect to bus: No medium found`；`sudo -u lucasjing XDG_RUNTIME_DIR=/run/user/501 …`
+  输出 `active`——这正是旧代码静默放行的原因。VM fixture（系统/用户 unit、临时目录）已清理，
+  事后 `is-active` 均为 `inactive`，`/etc/systemd/system/pi-coffee.service` 已删除。
+
+### 本轮验证
+
+- `npm run verify`：491 项通过、0 失败、0 跳过（typecheck、扩展 typecheck、离线套件、编排一致性）。
+- 未做的部分：GitHub Actions 需推送后才有远端结果；真实模型调用与生产部署不在本轮范围。

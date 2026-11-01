@@ -180,7 +180,7 @@ const internalString = z.string().min(1);
  * the switch cannot drift apart.
  */
 const INTERNAL_SCHEMALESS_ROUTES = ["/internal/health", "/internal/capabilities", "/internal/sessions",
-  "/internal/locks", "/internal/shutdown"] as const;
+  "/internal/locks", "/internal/audit/verify", "/internal/shutdown"] as const;
 
 const internalSchemas: Record<string, z.ZodTypeAny> = {
   "/internal/hello": z.object({ sessionId: internalString.optional() }),
@@ -347,6 +347,12 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       case "/internal/locks":
         return sendJson(res, 200, { locks: coord.locksList() });
 
+      // Append-only chain, no production reader used to exist: `AuditLog.verify()`
+      // was reachable from the test suite only, so a tampered log stayed invisible
+      // to every deployed daemon. Recompute on demand here (and once at startup).
+      case "/internal/audit/verify":
+        return sendJson(res, 200, await coord.audit.verify());
+
       case "/internal/inbox": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
         own(sid);
@@ -501,6 +507,21 @@ const server = createServer((req, res) => {
 
 async function main(): Promise<void> {
   await coord.init();
+  // Tamper evidence is only worth the hashing if something reads it. Verify the
+  // whole chain once per start and make a break loud; a broken chain does not
+  // abort startup (recovery and existing worker results are still useful), but
+  // pi_audit and GET /internal/audit/verify report the same verdict on demand.
+  try {
+    const audit = await coord.audit.verify();
+    if (audit.ok) {
+      log(`audit chain verified: ${audit.entries} entries in ${audit.files.length || 0} file(s)`);
+    } else {
+      log(`audit chain BROKEN: ${audit.reason ?? "unknown reason"}`
+        + (audit.firstBrokenSeq !== undefined ? ` (first broken seq ${audit.firstBrokenSeq})` : ""));
+    }
+  } catch (error) {
+    log("audit chain verification error:", error);
+  }
   server.listen(config.port, config.host, () => {
     log(`listening on http://${config.host}:${config.port}`);
     log(`  MCP endpoint:      http://${config.host}:${config.port}/mcp`);

@@ -160,7 +160,7 @@ export const MCP_TOOL_ORDER = [
   "pi_status", "pi_metrics", "pi_record_cost", "pi_tail", "pi_diff", "pi_list", "pi_report",
   "pi_commit", "pi_verify", "pi_evidence", "pi_review", "pi_merge", "pi_pr", "pi_push", "pi_exec",
   "pi_answer", "pi_gc", "pi_claim", "pi_release", "pi_locks", "pi_message", "pi_inbox",
-  "pi_board_post", "pi_drain", "pi_board_read",
+  "pi_board_post", "pi_drain", "pi_board_read", "pi_audit",
 ] as const;
 
 /** Fail fast when a tool is added/removed/reordered without updating MCP_TOOL_ORDER. */
@@ -1021,6 +1021,25 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       const target = scope_key ? `${createHash("sha256").update(scope_key).digest("hex")}:${board}` : board;
       const entries = latest ? coord.boardLatest(target) : coord.boardRead(target, key);
       return json({ entries: scope_key ? entries.map((entry) => ({ ...entry, board })) : entries });
+    },
+  );
+
+  server.registerTool(
+    "pi_audit",
+    {
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      title: "Verify the audit chain",
+      description:
+        "Check the hash-chained audit log that records every coordinator action. action=verify (default) recomputes the chain and compares its tail with the head sidecar, reporting {ok, entries, files, firstBrokenSeq?, reason?} — an edited, reordered or truncated entry surfaces as ok:false. action=tail returns the newest entries (oldest first). Read-only; the daemon also verifies the chain at startup and GET /internal/audit/verify answers the same question.",
+      inputSchema: {
+        action: z.enum(["verify", "tail"]).optional().describe("Default: verify"),
+        limit: z.number().int().min(1).max(1000).optional().describe("Tail size (default 50)"),
+      },
+    },
+    async ({ action, limit }) => {
+      if ((action ?? "verify") === "tail") return json({ entries: await coord.audit.tail(limit ?? 50) });
+      const result = await coord.audit.verify();
+      return result.ok ? json(result) : errorJson(result);
     },
   );
 

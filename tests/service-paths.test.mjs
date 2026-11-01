@@ -52,23 +52,49 @@ function writeFakeCommands(binDir) {
   };
   write("id", `#!/bin/sh
 # Always report a normal user: a real root run would write /etc/systemd/system.
+# \`id -u <user>\` answers FAKE_TARGET_UID so a sudo upgrade can be simulated.
 if [ "$1" = "-u" ]; then
-  printf '%s\\n' "\${FAKE_ID_UID:-1000}"
+  if [ -n "$2" ]; then
+    printf '%s\\n' "\${FAKE_TARGET_UID:-1001}"
+  else
+    printf '%s\\n' "\${FAKE_ID_UID:-1000}"
+  fi
   exit 0
 fi
 exit 1
+`);
+  write("uname", `#!/bin/sh
+printf '%s\\n' "\${FAKE_UNAME:-Darwin}"
 `);
   write("sleep", `#!/bin/sh
 printf '%s %s\\n' "sleep" "$*" >> "$FAKE_CMD_LOG"
 exit 0
 `);
-  // FAKE_SYSTEMCTL_ACTIVE=1 makes `is-active` succeed, like a running service.
+  // FAKE_SYSTEMCTL_ACTIVE=1 / FAKE_SYSTEMCTL_USER_ACTIVE=1 make the matching
+  // \`is-active\` probe report "active", like a running system or user unit.
   write("systemctl", `#!/bin/sh
 printf '%s %s\\n' "systemctl" "$*" >> "$FAKE_CMD_LOG"
-if [ "\${FAKE_SYSTEMCTL_ACTIVE:-0}" = "1" ]; then
-  case "$*" in *is-active*) exit 0 ;; esac
-fi
+case "$*" in
+  *is-active*)
+    case " $* " in
+      *" --user "*)
+        if [ "\${FAKE_SYSTEMCTL_USER_ACTIVE:-0}" = "1" ]; then printf '%s\\n' active; exit 0; fi
+        printf '%s\\n' inactive; exit 3 ;;
+      *)
+        if [ "\${FAKE_SYSTEMCTL_ACTIVE:-0}" = "1" ]; then printf '%s\\n' active; exit 0; fi
+        printf '%s\\n' inactive; exit 3 ;;
+    esac ;;
+esac
 exit 0
+`);
+  // Root asking the invoking user's own systemd: strip \`-u <user>\` and any
+  // leading VAR=VALUE assignments, then run the rest through the fakes.
+  write("sudo", `#!/bin/sh
+printf '%s %s\\n' "sudo" "$*" >> "$FAKE_CMD_LOG"
+shift 2
+while [ $# -gt 0 ] && [ "\${1%%=*}" != "$1" ]; do shift; done
+[ $# -gt 0 ] || exit 0
+exec "$@"
 `);
   // FAKE_LAUNCHCTL_RUNNING=1 makes `print` report a live LaunchAgent.
   write("launchctl", `#!/bin/sh
@@ -79,6 +105,10 @@ fi
 exit 0
 `);
   write("node", `#!/bin/sh
+if [ "\${FAKE_NODE_PROBE_FAIL:-0}" = "1" ]; then
+  printf '%s\\n' "fake node probe" >&2
+  exit 1
+fi
 exit 0
 `);
 }
@@ -380,6 +410,58 @@ test("install-daemon.sh refuses to interrupt a running daemon unless forced", (t
   const forced = spawnSync(bash, [script, "--force"], { cwd: project, env, encoding: "utf8" });
   assert.equal(forced.status, 0, `forced install failed\nstdout:\n${forced.stdout}\nstderr:\n${forced.stderr}`);
   assert.match(readFileSync(logPath, "utf8"), /^launchctl bootout/m);
+});
+
+test("install.sh blocks a Linux upgrade while a systemd unit is running, including under sudo", (t) => {
+  const root = scratchRoot("install-guard");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const home = join(root, "home");
+  const binDir = join(project, "fake-bin");
+  const logPath = join(root, "commands.log");
+  // The guard runs before the prerequisites, so only the files it reads are seeded.
+  seedTree(project, ["install.sh", "codex/pi-orchestrator/SKILL.md"]);
+  writeFakeCommands(binDir);
+  const script = join(project, "install.sh");
+  const run = (extra) =>
+    spawnSync(bash, [script], {
+      cwd: project,
+      env: { ...buildEnv({ home, binDir, logPath, envFile: "" }), FAKE_UNAME: "Linux", ...extra },
+      encoding: "utf8",
+    });
+
+  // Root upgrade while the invoking user's own unit is active. `systemctl --user`
+  // cannot reach the user bus as root, so the guard has to ask that user's
+  // systemd — the check that used to pass silently and interrupt live workers.
+  const userUnit = run({
+    FAKE_ID_UID: "0", SUDO_USER: "alice", FAKE_TARGET_UID: "1001", FAKE_SYSTEMCTL_USER_ACTIVE: "1",
+  });
+  assert.notEqual(userUnit.status, 0, "a root upgrade must not interrupt the user unit");
+  assert.match(userUnit.stderr, /pi-coffee is running/);
+  assert.ok(
+    readFileSync(logPath, "utf8").split("\n").includes(
+      "sudo -u alice XDG_RUNTIME_DIR=/run/user/1001 systemctl --user is-active pi-coffee",
+    ),
+    "the guard must ask the invoking user's own systemd",
+  );
+
+  // A running system unit blocks on its own, with the user unit inert.
+  const systemUnit = run({ FAKE_ID_UID: "0", SUDO_USER: "alice", FAKE_TARGET_UID: "1001", FAKE_SYSTEMCTL_ACTIVE: "1" });
+  assert.notEqual(systemUnit.status, 0);
+  assert.match(systemUnit.stderr, /pi-coffee is running/);
+
+  // Not elevated: the same user unit is checked through the user's own bus.
+  const direct = run({ FAKE_ID_UID: "1000", FAKE_SYSTEMCTL_USER_ACTIVE: "1" });
+  assert.notEqual(direct.status, 0);
+  assert.match(direct.stderr, /pi-coffee is running/);
+
+  // Nothing is running: the guard must let the install continue to the version
+  // probe instead of failing closed on its own.
+  const clear = run({
+    FAKE_ID_UID: "0", SUDO_USER: "alice", FAKE_TARGET_UID: "1001", FAKE_NODE_PROBE_FAIL: "1",
+  });
+  assert.doesNotMatch(clear.stderr, /pi-coffee is running/);
+  assert.match(clear.stderr, /fake node probe/, "the install has to get past the guard");
 });
 
 test("launchd plist is valid XML and decodes to the original special paths", (t) => {
