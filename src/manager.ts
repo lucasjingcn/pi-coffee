@@ -167,6 +167,8 @@ export interface SessionMeta {
   runner?: { kind: "pi" | "acp"; command?: string[] };
   /** Pull request created by pi_pr (idempotently reused by later calls). */
   pr?: { number: number; url: string; state?: string };
+  /** Session ids this workstream was declared dependent on at spawn. */
+  blockedBy?: string[];
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
   orchestratorChars?: number;
   /** Set once the worker-side coordinator extension checked in. */
@@ -216,6 +218,8 @@ export interface SpawnOptions {
   acceptanceCommand?: string;
   /** Structured task spec (goal/scope/contracts/...). Rendered into the worker prompt. */
   spec?: DelegationSpec;
+  /** Session ids that must be integrated before this spawn is accepted. */
+  blocked_by?: string[];
   controlKeyHash?: string;
   scopeKeyHash?: string;
   controlKey?: string;
@@ -1403,6 +1407,8 @@ export class Coordinator {
     validateReviewSpec(opts.spec);
     const runnerKind = opts.spec?.runner?.kind ?? this.config.runner;
     const acpCommand = opts.spec?.runner?.command ?? this.config.acpCommand;
+    const blockedBy = [...new Set(opts.blocked_by ?? [])].filter((value) => value.trim() !== "");
+    if (blockedBy.length) this.assertDependenciesSatisfied(blockedBy);
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_COFFEE_DEFAULT_REPO for the daemon");
@@ -1492,6 +1498,7 @@ export class Coordinator {
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
       ...(this.sandbox ? { sandbox: this.sandbox.record() } : {}),
       runner: { kind: runnerKind, ...(runnerKind === "acp" ? { command: acpCommand } : {}) },
+      ...(blockedBy.length ? { blockedBy } : {}),
       provider: opts.provider ?? this.config.provider,
       model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
@@ -2188,6 +2195,58 @@ export class Coordinator {
 
   private snapshotOf(rt: Runtime): SessionMeta {
     return { ...rt.meta, pendingQuestions: [...rt.meta.pendingQuestions] };
+  }
+
+  private knownSessions(): SessionMeta[] {
+    return [...this.runtimes.values()].map((rt) => rt.meta).concat(this.history);
+  }
+
+  /** Reject dependency graphs with cycles (including cycles already recorded in history). */
+  private assertDependencyGraphAcyclic(): void {
+    const graph = new Map<string, string[]>();
+    for (const meta of this.knownSessions()) graph.set(meta.id, meta.blockedBy ?? []);
+    const visiting = new Set<string>();
+    const done = new Set<string>();
+    const visit = (id: string, path: string[]): void => {
+      if (done.has(id)) return;
+      if (visiting.has(id)) throw new Error(`dependency cycle detected: ${[...path, id].join(" -> ")}`);
+      visiting.add(id);
+      for (const dep of graph.get(id) ?? []) {
+        if (!graph.has(dep)) continue;
+        visit(dep, [...path, id]);
+      }
+      visiting.delete(id);
+      done.add(id);
+    };
+    for (const id of graph.keys()) visit(id, []);
+  }
+
+  private dependencySatisfied(meta: SessionMeta): { satisfied: boolean; failed: boolean; label: string } {
+    const label = `${meta.id} (${meta.outcome ?? meta.status})`;
+    if (meta.integration) return { satisfied: true, failed: false, label };
+    if (meta.outcome === "abandoned" || meta.status === "error") return { satisfied: false, failed: true, label };
+    if (meta.outcome !== undefined && meta.verification?.passed && !meta.verification.codeChanged) {
+      return { satisfied: true, failed: false, label };
+    }
+    return { satisfied: false, failed: false, label };
+  }
+
+  /**
+   * `blocked_by` is a hard spawn gate: dependencies must already be integrated.
+   * Cycles, unknown ids and failed dependencies fail closed instead of queuing a
+   * session nobody will start.
+   */
+  private assertDependenciesSatisfied(ids: string[]): void {
+    if (ids.length > 32) throw new Error("blocked_by accepts at most 32 session ids");
+    this.assertDependencyGraphAcyclic();
+    const known = new Map(this.knownSessions().map((meta) => [meta.id, meta] as const));
+    const unknown = ids.filter((id) => !known.has(id));
+    if (unknown.length) throw new Error(`unknown dependency: ${unknown.join(", ")}`);
+    const results = ids.map((id) => ({ ...this.dependencySatisfied(known.get(id)!), id }));
+    const failed = results.filter((result) => result.failed);
+    if (failed.length) throw new Error(`deps_failed: ${failed.map((result) => result.label).join(", ")}`);
+    const blocked = results.filter((result) => !result.satisfied);
+    if (blocked.length) throw new Error(`blocked_by sessions are not integrated yet: ${blocked.map((result) => result.label).join(", ")}`);
   }
 
   private assertUnfinished(rt: Runtime): void {

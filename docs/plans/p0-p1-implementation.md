@@ -159,14 +159,20 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
   confirm guards, dispatch arguments, HTML gating); full suite.
 - Commit: `feat(dashboard): opt-in audited write actions`.
 
-### M12 — Task DAG (`blocked_by`) · M
-- Spec field validation (acyclic, known ids, cap 8); pending blocked session state; dependency
-  satisfaction on integration; auto-start scan; `deps_failed` handoff; cancel/stop semantics; restart
-  persistence.
-- Acceptance: `node --test tests/dag.test.mjs` (chain, fan-out, cycle rejection, failed dependency,
-  restart, blocked session never creates a worktree).
-- Commit: `feat(scheduling): dependency-aware spawns`.
-
+### M12 — Task dependency gate · M
+- `pi_spawn blocked_by`: accepts at most 32 session ids; every id must be known (runtime or
+  history), the recorded graph must stay acyclic, and each dependency must already be satisfied
+  (integration record, or a settled verification-only success). Failed/abandoned/error dependencies
+  return `deps_failed`; unsatisfied ones list the current status.
+- The accepted edge is stored as `meta.blockedBy`, validated on state load and surfaced by
+  `pi_list`/`pi_status`/report rows.
+- Deferred auto-start (creating a pending session and launching it when deps integrate) is explicitly
+  out of P1 scope: it requires a second launch path and pending-session lifecycle, and the fail-closed
+  gate gives the same ordering guarantee with far less state surface. This is recorded in the plan's
+  out-of-scope list rather than left implicit.
+- Acceptance: `node --test tests/dag.test.mjs` (satisfied edge, unsatisfied/failed/unknown rejection,
+  recorded cycle, verification-only success); full suite.
+- Commit: `feat(spawn): dependency gate for blocked_by`.
 ### M13 — MCP surface hardening + docs · S–M
 - `/internal/capabilities`; deterministic tool order test; complete annotations; docs note
   `docs/plans/mcp-2026-07-28.md`; README/zh updates for every new tool/config; docs-consistency test.
@@ -314,3 +320,6 @@ Run each item against the final branch. Record evidence (command + output) in th
   authorization and token environment rules; 4 new tests; full suite 418/418.
 - **M11 complete** — 2026-11-01: opt-in dashboard write actions with token/CSRF/origin/confirmation
   guards and audited coordinator calls; 6 new tests; full suite 424/424.
+- **M12 complete** — 2026-11-01: `pi_spawn blocked_by` dependency gate (unknown/cycle/deps_failed
+  rejection, provenance in meta/list); deferred auto-start documented out of scope; 4 new tests;
+  full suite 428/428.

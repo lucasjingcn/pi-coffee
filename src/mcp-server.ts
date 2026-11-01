@@ -182,6 +182,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       description:
         "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Returns a one-time control_key; retain it in this chat for later worker writes. It is never shown by list/status/report.",
       inputSchema: {
+        blocked_by: z.array(z.string().min(1)).max(32).optional().describe("Session ids that must already be integrated before this spawn is accepted (dependency gate)"),
         task: z.string().optional().describe("Short task label (used in the session/branch name)"),
         repo: z.string().optional().describe("Repository path (defaults to daemon config)"),
         name: z.string().optional(),

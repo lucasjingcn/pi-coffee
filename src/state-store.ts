@@ -236,6 +236,12 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       fail(file, `${at}.handoff is invalid`);
   }
 
+  if (entry.blockedBy !== undefined) {
+    if (!Array.isArray(entry.blockedBy) || entry.blockedBy.length > 32
+      || !entry.blockedBy.every((id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id))) {
+      fail(file, `${at}.blockedBy is invalid`);
+    }
+  }
   if (entry.pr !== undefined) {
     const pr = entry.pr;
     if (!isRecord(pr) || typeof pr.number !== "number" || !Number.isSafeInteger(pr.number) || pr.number <= 0

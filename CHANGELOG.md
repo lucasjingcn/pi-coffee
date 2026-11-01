@@ -30,6 +30,9 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Task dependency gate: `pi_spawn blocked_by` accepts already-integrated session ids, rejects
+  unknown ids, recorded cycles and failed dependencies (`deps_failed`), and exposes the dependency
+  edge in status/list. Deferred auto-start remains documented future work.
 - Opt-in dashboard write actions (`PI_COFFEE_DASHBOARD_ACTIONS=1`, requires `PI_COFFEE_TOKEN`):
   send/finish/merge/stop guarded by token + CSRF header + JSON content type + same-origin Origin, with
   per-session confirmation for destructive actions and coordinator audit entries.
