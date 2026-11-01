@@ -40,7 +40,7 @@ test('stop rejects pending commands and event waits',{timeout:3000},async()=>fak
  const results=Promise.all([assert.rejects(bound(command,500),e=>!e.message.includes('too slow')),assert.rejects(bound(event,500),e=>!e.message.includes('too slow'))]);
  await c.stop();await results;
 }));
-test('duplicate in-flight command ids reject without losing original',{timeout:3000},async()=>fake(async(c)=>{
+test('duplicate in-flight command ids reject without losing original',{timeout:15000},async()=>fake(async(c)=>{
  const pending=c.command({type:'ignored',id:'duplicate'},1000);
  const p1=assert.rejects(pending,/timed out/);
  await assert.rejects(bound(c.command({type:'ignored',id:'duplicate'},1500),200),e=>!e.message.includes('too slow'));

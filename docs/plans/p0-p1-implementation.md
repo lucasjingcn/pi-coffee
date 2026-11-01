@@ -63,12 +63,15 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(coordination): read-back receipts for mailbox and board`.
 
 ### M4 — Evidence bundle core · M–L
-- `src/evidence.ts`: atomic writer, manifest v1, size caps, redaction, listing/verify helpers.
-- `IntegrationGate.verify`: capture diff, changed files, stdout/stderr, validator work dir, sandbox
-  record; write bundle before returning; attach `evidence` ref to verification record.
-- `pi_verify` result gains `evidence`.
-- Acceptance: `node --test tests/evidence.test.mjs` (manifest hashes round-trip, traversal rejection,
-  truncation markers, redaction counting, crash-window `.tmp` cleanup).
+- `src/evidence.ts`: atomic writer (temp dir + rename, manifest last), manifest v1 with file
+  sizes/sha256, per-file and total caps with tail truncation, secret redaction, `verifyEvidenceBundle`,
+  `listEvidenceBundles`, id and path-escape guards.
+- `IntegrationGate.verify`: one `git diff <baseRef>` call for the reviewed patch (worktree is clean),
+  plus changed files, stdout/stderr, validator records; writes the bundle before returning and links
+  `evidence` (relative dir + manifest sha256) into the verification record.
+- `pi_verify` result carries `evidence`; audit entry records the evidence dir and manifest hash.
+- Acceptance: `node --test tests/evidence.test.mjs` (manifest round-trip, truncation, redaction,
+  tamper detection, path traversal, listing, full daemon verify); full suite stable across repeats.
 - Commit: `feat(verify): durable evidence bundles`.
 
 ### M5 — Validator chain · M
@@ -259,3 +262,7 @@ Run each item against the final branch. Record evidence (command + output) in th
 - **M3 complete** — 2026-11-01: canonical `sha256` on mailbox/board entries, read-back receipts in
   `pi_message` / `pi_board_post` / internal endpoints, legacy entries still verify, tamper and missing
   entries fail closed; 7 new tests; full suite 381/381.
+- **M4 complete** — 2026-11-01: evidence bundle writer + verifier, daemon verification links the
+  bundle, config keys and README rows, 8 new tests; load-sensitive RPC/smoke test bounds hardened
+  (baseline `main` also flakes under this host's load, verified separately); full suite 389/389
+  three consecutive runs.

@@ -281,7 +281,7 @@ export class Coordinator {
   private saveChain: Promise<void> = Promise.resolve();
   /** Validated primary/backup store: atomic writes, corruption recovery, contextual errors. */
   private store: StateStore;
-  private integrationGate = new IntegrationGate();
+  private integrationGate: IntegrationGate;
   private busyRepos = new Set<string>();
   private dispatchingRepos = new Map<string, number>();
   private orchestratorCosts: OrchestratorCostRecord[] = [];
@@ -305,6 +305,12 @@ export class Coordinator {
     this.vault = new ControlVault(config.dataDir);
     this.store = new StateStore(join(config.dataDir, "state.json"));
     this.audit = new AuditLog({ dir: join(config.dataDir, "audit"), maxBytes: config.auditMaxMb * 1024 * 1024 });
+    this.integrationGate = new IntegrationGate({
+      dataDir: config.dataDir,
+      secretPolicy: config.secretPolicy,
+      maxFileBytes: config.evidenceMaxFileMb * 1024 * 1024,
+      maxTotalBytes: config.evidenceMaxMb * 1024 * 1024,
+    });
   }
 
   /**
@@ -2202,7 +2208,8 @@ export class Coordinator {
       rt.meta.verification = proof;
       this.scheduleSave();
       await this.auditStrict("orchestrator", "verify", id, { verificationId: proof.id, passed: proof.passed,
-        targetBranch: proof.targetBranch });
+        targetBranch: proof.targetBranch, evidence: proof.evidence?.dir ?? null,
+        evidenceManifestSha256: proof.evidence?.manifestSha256 ?? null });
       return proof;
     });
   }

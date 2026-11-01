@@ -43,6 +43,14 @@ export interface Config {
   secretPolicy: SecretPolicy;
   /** Rotate the hash-chained audit log once the active file reaches this size (MiB). */
   auditMaxMb: number;
+  /** Days a verification evidence bundle is retained (0 disables TTL cleanup). */
+  evidenceTtlDays: number;
+  /** Newest evidence bundles kept per session, regardless of TTL. */
+  evidenceKeepPerSession: number;
+  /** Total size budget for one evidence bundle (MiB). */
+  evidenceMaxMb: number;
+  /** Per-file size budget inside an evidence bundle (MiB; oversized logs keep a tail). */
+  evidenceMaxFileMb: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -100,7 +108,7 @@ function validateNumber(field: string, key: string, value: number, rules: Number
  */
 function resolveNumber(
   overrides: Partial<Config>,
-  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs" | "auditMaxMb",
+  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs" | "auditMaxMb" | "evidenceTtlDays" | "evidenceKeepPerSession" | "evidenceMaxMb" | "evidenceMaxFileMb",
   key: string,
   fallback: number,
   rules: NumberRules,
@@ -246,6 +254,30 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       min: 1,
       max: 1_048_576,
       description: "a positive integer number of MiB",
+    }),
+    evidenceTtlDays: resolveNumber(overrides, "evidenceTtlDays", "PI_COFFEE_EVIDENCE_TTL_DAYS", 30, {
+      integer: true,
+      min: 0,
+      max: 3650,
+      description: "an integer number of days between 0 and 3650",
+    }),
+    evidenceKeepPerSession: resolveNumber(overrides, "evidenceKeepPerSession", "PI_COFFEE_EVIDENCE_KEEP_PER_SESSION", 10, {
+      integer: true,
+      min: 1,
+      max: 1000,
+      description: "a positive integer up to 1000",
+    }),
+    evidenceMaxMb: resolveNumber(overrides, "evidenceMaxMb", "PI_COFFEE_EVIDENCE_MAX_MB", 64, {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      description: "a positive integer number of MiB",
+    }),
+    evidenceMaxFileMb: resolveNumber(overrides, "evidenceMaxFileMb", "PI_COFFEE_EVIDENCE_MAX_FILE_MB", 8, {
+      integer: true,
+      min: 1,
+      max: 1024,
+      description: "a positive integer up to 1024 MiB",
     }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),

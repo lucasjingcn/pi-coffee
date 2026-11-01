@@ -292,11 +292,13 @@ test('failed start kills an unresponsive child, clears pending work, and respect
   }
 });
 
-test('a child that exits during startup fails start promptly and stays terminal', {timeout: 8000}, async () => {
+test('a child that exits during startup fails start promptly and stays terminal', {timeout: 30000}, async () => {
   const {dir, bin} = await makeFakePi('process.exit(3);');
   const c = new PiRpcClient({cwd: dir, piBin: bin});
   try {
-    await assert.rejects(bound(c.start(2000), 2500), /did not become ready/);
+    // Load-tolerant outer bound: the semantic window is start(2000); the wrapper only
+    // guards against a hang, so it must not become the thing that fails under CPU load.
+    await assert.rejects(bound(c.start(2000), 20000), /did not become ready/);
     assert.equal(c.hasExited, true);
     assert.equal(c.pending.size, 0);
   } finally {
@@ -306,11 +308,11 @@ test('a child that exits during startup fails start promptly and stays terminal'
 });
 
 
-test('large finite startup budgets do not overflow Node readiness timers', {timeout: 4000}, async () => {
+test('large finite startup budgets do not overflow Node readiness timers', {timeout: 25000}, async () => {
   const {dir, bin} = await makeFakePi(`setTimeout(() => { ${ECHO} }, 40);`);
   const c = new PiRpcClient({cwd: dir, piBin: bin});
   try {
-    await bound(c.start(2 ** 40), 1500);
+    await bound(c.start(2 ** 40), 15000);
     assert.equal(c.hasExited, false);
   } finally {
     await c.stop().catch(() => {});

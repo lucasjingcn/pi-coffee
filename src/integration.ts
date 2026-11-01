@@ -8,9 +8,13 @@ import { currentBranch, git, isWorktreeClean, resolveRef, worktreeDiff } from ".
 import { existingValidationChanges } from "./validation-changes.js";
 import { reviewContractHash, validateCandidateReview, validateReviewSpec, type CandidateReview } from "./candidate-review.js";
 import type { DelegationSpec } from "./types.js";
+import { writeEvidenceBundle, type EvidenceRef, type EvidenceValidatorResult } from "./evidence.js";
+import type { SecretPolicy } from "./secrets.js";
 
 export interface Verification {
   id: string;
+  /** Durable evidence bundle written by this run, when evidence storage is configured. */
+  evidence?: EvidenceRef;
   epoch: string;
   workerSha: string;
   targetSha: string;
@@ -38,6 +42,8 @@ export interface IntegrationRecord {
 }
 
 export interface VerifiableSession {
+  /** Session id; required for durable evidence bundles. */
+  id?: string;
   repo: string;
   worktree: string;
   branch: string;
@@ -98,8 +104,22 @@ export async function assertTarget(repo: string, branch: string): Promise<string
   return resolveRef(repo, `refs/heads/${branch}`);
 }
 
+export interface IntegrationGateOptions {
+  /** Daemon data directory; evidence bundles are written when set. */
+  dataDir?: string;
+  secretPolicy?: SecretPolicy;
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+  now?: () => number;
+}
+
 export class IntegrationGate {
   readonly epoch = randomUUID();
+  private readonly options: IntegrationGateOptions;
+
+  constructor(options: IntegrationGateOptions = {}) {
+    this.options = options;
+  }
 
   async verify(
     meta: VerifiableSession,
@@ -141,9 +161,46 @@ export class IntegrationGate {
         || !(await isWorktreeClean(meta.worktree))) throw new Error("worker or target changed during verification");
       await checkChanges(meta);
       if (contractHash !== reviewContractHash(meta)) throw new Error("task contract changed during verification");
-      return { id: randomUUID(), epoch: this.epoch, workerSha, targetSha, targetBranch: branch, candidateTree,
+      const id = randomUUID();
+      const validators: EvidenceValidatorResult[] = [{
+        id: "acceptance",
+        required: true,
+        command: meta.acceptance.command,
+        code: result.code,
+        timedOut: result.timedOut,
+        passed,
+      }];
+      let evidence: EvidenceRef | undefined;
+      const dataDir = this.options.dataDir;
+      if (dataDir && meta.id) {
+        // One git call: the worktree is clean at this point, so a plain diff against
+        // the spawn base captures the whole reviewed change set as a patch.
+        const diff = await git(meta.worktree, ["diff", meta.baseRef]);
+        evidence = await writeEvidenceBundle(dataDir, {
+          sessionId: meta.id,
+          verificationId: id,
+          repo: meta.repo,
+          workerSha,
+          targetSha,
+          targetBranch: branch,
+          candidateTree,
+          baseRef: meta.baseRef,
+          command: meta.acceptance.command,
+          validators,
+          passed,
+          ...(failure !== undefined ? { failure } : {}),
+          changedFiles,
+          logs: { stdout: result.stdout, stderr: result.stderr, diff },
+          secretPolicy: this.options.secretPolicy,
+          ...(this.options.maxFileBytes !== undefined ? { maxFileBytes: this.options.maxFileBytes } : {}),
+          ...(this.options.maxTotalBytes !== undefined ? { maxTotalBytes: this.options.maxTotalBytes } : {}),
+          ...(this.options.now ? { now: this.options.now } : {}),
+        });
+      }
+      return { id, epoch: this.epoch, workerSha, targetSha, targetBranch: branch, candidateTree,
         command: meta.acceptance.command, verifiedAt: Date.now(), passed, failure, changedFiles,
         existingValidationChanges: validationChanges, reviewContractHash: contractHash,
+        ...(evidence ? { evidence } : {}),
         codeChanged: changedFiles.some((file) => !meta.acceptance!.files.includes(file)), result };
     } finally {
       if (added) await git(meta.repo, ["worktree", "remove", "--force", candidate]);

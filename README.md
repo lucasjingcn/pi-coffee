@@ -500,7 +500,7 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
-| `pi_verify` | Run the fixed acceptance command against the exact worker + target candidate; record exit code, timeout, output and commit/tree evidence. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_verify` | Run the fixed acceptance command against the exact worker + target candidate; record exit code, timeout, output and commit/tree evidence, and write a durable evidence bundle (manifest + hashes + logs + diff) under `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/`. The tool result carries the `evidence` reference (manifest sha256, file count, bytes). Failed, stale or restarted evidence cannot authorize integration. |
 | `pi_review` | Record one evidence verdict per requirement and one approval reason per modified existing validation file, bound to the exact verification ID. Incomplete or stale reviews cannot authorize integration. |
 | `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |
@@ -623,6 +623,10 @@ Everything is configured through environment variables.
 | `PI_COFFEE_RECOVER_ON_START` | `1` | Auto-resume sessions that were active when the daemon crashed. `0` leaves them stopped for an explicit `pi_resume`. |
 | `PI_COFFEE_SECRET_POLICY` | `reject` | How coordination surfaces handle detected secrets: `reject` fails the write, `redact` replaces the span with a marker. |
 | `PI_COFFEE_AUDIT_MAX_MB` | `32` | Rotate the hash-chained audit log once the active file reaches this size (MiB). |
+| `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | Days a verification evidence bundle is retained (`0` disables TTL cleanup). |
+| `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | Newest evidence bundles kept per session regardless of TTL. |
+| `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | Total size budget for one evidence bundle (MiB). |
+| `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | Per-file budget inside a bundle; oversized logs keep a tail and are listed in `truncated`. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through

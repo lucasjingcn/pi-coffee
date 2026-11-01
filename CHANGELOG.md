@@ -19,6 +19,12 @@ All notable changes to pi-coffee are recorded here. The format follows
 - Read-back receipts for coordination writes: mailbox messages and board entries persist a canonical
   `sha256`, and `pi_message` / the internal send endpoint / `pi_board_post` verify it against durable
   state before reporting `readBack: true`. A missing or mismatched entry fails the call.
+- Durable verification evidence bundles (`PI_COFFEE_DATA_DIR/evidence/<session>/<verification>/`):
+  manifest with file sizes and sha256 hashes, combined stdout/stderr, the reviewed diff, changed
+  files, validator records and sandbox metadata. Written atomically (temp directory + rename);
+  `pi_verify` returns an `evidence` reference, and oversized logs keep a tail recorded in `truncated`.
+  Retention is configured with `PI_COFFEE_EVIDENCE_TTL_DAYS`, `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION`,
+  `PI_COFFEE_EVIDENCE_MAX_MB` and `PI_COFFEE_EVIDENCE_MAX_FILE_MB`.
 
 ### Security
 

@@ -437,7 +437,7 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_tail` | 增量读会话记录，把上次的 `lastEntryId` 作为 `since` 传进去。 |
 | `pi_diff` | 某个 worker 分支的已提交、未提交和未跟踪改动。 |
 | `pi_commit` | 把 worker worktree 里的改动全部提交。 |
-| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，保存退出码、超时、输出和提交/候选树证据；失败、过时或重启前的证据不授权集成。 |
+| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，保存退出码、超时、输出和提交/候选树证据，并在 `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/` 写一份可归档的证据包（manifest + 哈希 + 日志 + diff）。返回结果带 `evidence` 引用（manifest sha256、文件数、字节数）；失败、过时或重启前的证据不授权集成。 |
 | `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；来源或目标变化须重验。 |
 | `pi_push` | 把当前分支（或指定分支）推到远端。 |
 | `pi_exec` | 在 worker worktree 用非登录 shell 运行诊断命令；不会产生合并验收证据。 |
@@ -540,6 +540,10 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_RECOVER_ON_START` | `1` | daemon 崩溃后自动恢复崩溃时仍活跃的会话；`0` 表示留给人手动 `pi_resume`。 |
 | `PI_COFFEE_SECRET_POLICY` | `reject` | 协调面遇到疑似密钥时的策略：`reject` 拒绝写入，`redact` 用标记替换。 |
 | `PI_COFFEE_AUDIT_MAX_MB` | `32` | 审计日志（哈希链）单个文件达到该大小（MiB）后轮转。 |
+| `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | 验收证据包保留天数（`0` 关闭 TTL 清理）。 |
+| `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | 每个会话至少保留的最新证据包数量。 |
+| `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | 单个证据包总大小上限（MiB）。 |
+| `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | 包内单文件上限（MiB）；超长日志保留尾部并记入 `truncated`。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
