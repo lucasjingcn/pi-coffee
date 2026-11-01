@@ -81,6 +81,8 @@ export interface Config {
   ghAllowEnvToken: boolean;
   /** Explicit opt-in for pi_pr / merge-queue push operations. */
   allowPush: boolean;
+  /** Opt-in write actions in the dashboard (finish/send/merge/stop). */
+  dashboardActions: boolean;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -160,7 +162,7 @@ function resolveNumber(
 /** Boolean env vars accept only "0"/"1"; overrides must be real booleans. */
 function resolveBoolean(
   overrides: Partial<Config>,
-  field: "autoClean" | "deleteBranches" | "recoverOnStartup" | "ghAllowEnvToken" | "allowPush",
+  field: "autoClean" | "deleteBranches" | "recoverOnStartup" | "ghAllowEnvToken" | "allowPush" | "dashboardActions",
   key: string,
   fallback: boolean,
 ): boolean {
@@ -409,6 +411,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     ghToken: overrides.ghToken ?? env("PI_COFFEE_GH_TOKEN") ?? "",
     ghAllowEnvToken: resolveBoolean(overrides, "ghAllowEnvToken", "PI_COFFEE_GH_ALLOW_ENV_TOKEN", false),
     allowPush: resolveBoolean(overrides, "allowPush", "PI_COFFEE_ALLOW_PUSH", false),
+    dashboardActions: resolveBoolean(overrides, "dashboardActions", "PI_COFFEE_DASHBOARD_ACTIONS", false),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),
@@ -417,6 +420,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");
   if (base.sandbox === "docker" && base.sandboxImage.trim() === "") {
     invalid("sandboxImage", "PI_COFFEE_SANDBOX_IMAGE", "is required when PI_COFFEE_SANDBOX=docker");
+  }
+  if (base.dashboardActions && !base.token) {
+    invalid("dashboardActions", "PI_COFFEE_DASHBOARD_ACTIONS", "requires PI_COFFEE_TOKEN to be set");
   }
   if (base.runner === "acp" && base.acpCommand.length === 0) {
     invalid("acpCommand", "PI_COFFEE_ACP_COMMAND", "is required when PI_COFFEE_RUNNER=acp");

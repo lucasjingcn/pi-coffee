@@ -477,6 +477,12 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 
 ## Dashboard, metrics and upgrades
 
+The console is read-only by default. `PI_COFFEE_DASHBOARD_ACTIONS=1` (which requires `PI_COFFEE_TOKEN`)
+adds audited `send`, `finish`, `merge` and `stop` actions: every POST needs the token, the
+`x-pi-coffee-action: 1` CSRF header, a JSON content type and a same-origin origin; destructive actions
+also require `x-pi-coffee-confirm: <session id>`. The token is entered in the browser and kept in that
+tab's sessionStorage; no token is embedded in HTML.
+
 The daemon also serves two read-only operator surfaces. When `PI_COFFEE_TOKEN` is set, both require the
 same `x-pi-coord-token` / `Authorization: Bearer` credential as `/mcp`.
 
@@ -671,6 +677,7 @@ Everything is configured through environment variables.
 | `PI_COFFEE_GH_TOKEN` | *(empty)* | Token passed to `gh` as `GH_TOKEN` (never argv). |
 | `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | Allow an ambient `GH_TOKEN` to reach `gh` when no explicit token is set. |
 | `PI_COFFEE_ALLOW_PUSH` | `0` | Explicit opt-in for `pi_pr` and merge-queue pushes. |
+| `PI_COFFEE_DASHBOARD_ACTIONS` | `0` | Opt-in write actions in the dashboard (send/finish/merge/stop); requires `PI_COFFEE_TOKEN`. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through

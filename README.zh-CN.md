@@ -408,6 +408,11 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 ## Dashboard、指标与升级
 
+控制台默认只读。`PI_COFFEE_DASHBOARD_ACTIONS=1`（必须同时设置 `PI_COFFEE_TOKEN`）会打开带审计的
+`send`/`finish`/`merge`/`stop` 操作：每个 POST 都需要 token、`x-pi-coffee-action: 1` CSRF 头、JSON
+content-type 和同源 Origin；破坏性操作还要求 `x-pi-coffee-confirm: <session id>`。token 由浏览器输入并
+只存在该标签页的 sessionStorage，不会写进 HTML。
+
 daemon 还提供两个只读的运维界面。设置 `PI_COFFEE_TOKEN` 时，两者与 `/mcp` 使用同一个
 `x-pi-coord-token` / `Authorization: Bearer` 凭据。
 
@@ -577,6 +582,7 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_GH_TOKEN` | *(空)* | 以 `GH_TOKEN` 传给 gh（不走 argv）。 |
 | `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | 没有显式 token 时是否允许环境里的 `GH_TOKEN` 传给 gh。 |
 | `PI_COFFEE_ALLOW_PUSH` | `0` | `pi_pr` 与 merge-queue 推送的显式开关。 |
+| `PI_COFFEE_DASHBOARD_ACTIONS` | `0` | dashboard 写操作开关（send/finish/merge/stop），需要 `PI_COFFEE_TOKEN`。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。

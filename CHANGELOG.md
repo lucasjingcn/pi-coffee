@@ -30,6 +30,9 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Opt-in dashboard write actions (`PI_COFFEE_DASHBOARD_ACTIONS=1`, requires `PI_COFFEE_TOKEN`):
+  send/finish/merge/stop guarded by token + CSRF header + JSON content type + same-origin Origin, with
+  per-session confirmation for destructive actions and coordinator audit entries.
 - GitHub integration: `pi_pr` pushes a verified branch and creates (or reuses) a PR whose body carries
   the verification id, candidate SHAs and evidence manifest hash; `pi_merge mode=merge-queue` queues it
   with the GitHub merge queue. Both require `PI_COFFEE_ALLOW_PUSH=1`; tokens travel only through the

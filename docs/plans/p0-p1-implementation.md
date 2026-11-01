@@ -148,12 +148,16 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
   refusal, gh failure); full suite.
 - Commit: `feat(integration): PR creation and merge-queue mode`.
 
-### M11 — Dashboard actions · M
-- Opt-in write endpoints + token/CSRF/confirm guards; action-capable UI; evidence viewer; diff
-  browser improvements; audit entries.
-- Acceptance: `node --test tests/dashboard-actions.test.mjs` (auth matrix, disabled-by-default,
-  replay/confirm checks).
-- Commit: `feat(dashboard): opt-in review and merge actions`.
+### M11 — Dashboard write actions · M
+- `createDashboardHandler({actions})`; config `PI_COFFEE_DASHBOARD_ACTIONS` requires `PI_COFFEE_TOKEN`.
+- POST `/dashboard/api/actions/sessions/:id/{send,finish,merge,stop}`: token auth, `x-pi-coffee-action`
+  CSRF header, JSON content type, same-origin Origin, `x-pi-coffee-confirm: <id>` for destructive
+  actions, 64 KiB body cap; calls the same coordinator methods as MCP (audited upstream).
+- HTML only advertises actions when enabled; the token is entered by the operator and kept in
+  sessionStorage (never rendered).
+- Acceptance: `node --test tests/dashboard-actions.test.mjs` (disabled/enabled, auth, header/origin/
+  confirm guards, dispatch arguments, HTML gating); full suite.
+- Commit: `feat(dashboard): opt-in audited write actions`.
 
 ### M12 — Task DAG (`blocked_by`) · M
 - Spec field validation (acyclic, known ids, cap 8); pending blocked session state; dependency
@@ -308,3 +312,5 @@ Run each item against the final branch. Record evidence (command + output) in th
   permissions, transcript), spec/config selection, explicit non-goals; 4 new tests; full suite 414/414.
 - **M10 complete** — 2026-11-01: GitHub PR/merge-queue integration (`pi_pr`, `pi_merge mode`), push
   authorization and token environment rules; 4 new tests; full suite 418/418.
+- **M11 complete** — 2026-11-01: opt-in dashboard write actions with token/CSRF/origin/confirmation
+  guards and audited coordinator calls; 6 new tests; full suite 424/424.

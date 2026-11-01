@@ -14,7 +14,7 @@ import { METRICS_CONTENT_TYPE, buildMetricsSnapshot, renderMetrics } from "./met
 const config = loadConfig();
 const coord = new Coordinator(config);
 const startedAt = Date.now();
-const dashboard = createDashboardHandler({ coord, token: config.token });
+const dashboard = createDashboardHandler({ coord, token: config.token, actions: config.dashboardActions });
 
 // Captured once at daemon startup: pi_status compares this in-memory value with
 // the current dist/manager.js mtime so a rebuilt dist without a restart is visible.
