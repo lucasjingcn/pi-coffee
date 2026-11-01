@@ -285,6 +285,16 @@ url = "http://daemon-host:8787/mcp"
 PI_COFFEE_TOKEN = "your-secret"
 ```
 
+### Worker runners
+
+Workers run the pinned pi CLI by default. Set `PI_COFFEE_RUNNER=acp` (or `spec.runner` on one
+spawn) to drive any ACP agent over stdio instead; `PI_COFFEE_ACP_COMMAND` (or `spec.runner.command`)
+is the agent argv. ACP v1 has no model-selection or transcript-replay contract, so `pi_send` model
+overrides are refused and ACP sessions cannot be resumed (spawn a new one); permissions surface as
+normal `pi_answer` questions, and raw frames are kept in `sessions/<id>/acp.jsonl` for `pi_tail`.
+ACP runners are host-only: the docker sandbox rejects them rather than wrapping an agent it cannot
+verify.
+
 ## Docker
 
 The included `Dockerfile` bundles Node, git, and pi, so the only host requirement is Docker.
@@ -356,6 +366,10 @@ repositories retain their own rules.
 7. Close with `pi_finish`, which stops the worker, then inspect `pi_report` / `pi_metrics`.
    A successful outcome needs passing acceptance and, if code changed, an integration record.
    Check `inconsistent_outcomes` before citing recorded successes. Clean up with `pi_gc` when authorized.
+   For GitHub teams, `pi_pr` pushes the verified branch and opens a PR carrying the evidence summary;
+   `pi_merge` with `mode=merge-queue` queues it instead of merging locally. Both require
+   `PI_COFFEE_ALLOW_PUSH=1`; the merge-queue path does not write an integration record, so a later
+   verification of the merged commit is still required before a success outcome.
 
 Candidate review: declare hard requirements in `spec.requirements: [{id,text}]`. Built-in validation
 detection covers conventional test paths, `package.json`, lockfiles, `Makefile`, Docker/Compose files,
@@ -464,12 +478,19 @@ reach directly. Do this only on a network you trust; the default bind is loopbac
 
 ## Dashboard, metrics and upgrades
 
+The console is read-only by default. `PI_COFFEE_DASHBOARD_ACTIONS=1` (which requires `PI_COFFEE_TOKEN`)
+adds audited `send`, `finish`, `merge` and `stop` actions: every POST needs the token, the
+`x-pi-coffee-action: 1` CSRF header, a JSON content type and a same-origin origin; destructive actions
+also require `x-pi-coffee-confirm: <session id>`. The token is entered in the browser and kept in that
+tab's sessionStorage; no token is embedded in HTML.
+
 The daemon also serves two read-only operator surfaces. When `PI_COFFEE_TOKEN` is set, both require the
 same `x-pi-coord-token` / `Authorization: Bearer` credential as `/mcp`.
 
 - `GET /dashboard` — a small read-only console: sessions, status, cost, turns, model, and per-session
   diff/tail. It has no spawn, stop, merge, or message actions.
 - `GET /metrics` — Prometheus text exposition (`pi_coffee_*`): uptime, active/max workers, drain state,
+- `GET /internal/capabilities` - daemon version, feature list, MCP tool order and internal endpoints (used by operators and the worker extension).
   session counts by status, spawn/verify/merge totals, and worker-reported USD cost when complete.
   Unknown cost is omitted rather than reported as zero.
 
@@ -493,7 +514,7 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 
 | Tool | What it does |
 |---|---|
-| `pi_spawn` | Create a worktree and branch, then start a worker. Returns its one-time `control_key` and a `scope_key`; pass the first scope key into later spawns that should coordinate. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. |
+| `pi_spawn` | Create a worktree and branch, then start a worker. Returns its one-time `control_key` and a `scope_key`; pass the first scope key into later spawns that should coordinate. Takes a structured `spec` (`goal`, `scope` required; `purpose`, `non_goals`, `contracts`, `constraints`, `task_type` optional). Set `purpose=implementation\|review\|investigation`; omission is reported as unspecified. The scope is claimed immediately, so an overlapping workstream is rejected before any code is written. `task_type=design\|security` is blocked unless you pass `spec_override`. `acceptance_files` and `acceptance_command` write and lock Codex-authored tests before the worker starts. `blocked_by` accepts already-integrated session ids and records the dependency edge after cycle/failure checks. |
 | `pi_send` | Send an instruction: `mode=prompt\|steer\|followup`. A third instruction is blocked by the two-strikes rule unless `override:true`. Retries keep the same model. |
 | `pi_drain` | `action=start\|status\|cancel`: drain the daemon before a restart. While draining, new spawns and resumes are rejected; existing workers finish. `status` reports `active` so an operator can wait for zero. |
 | `pi_wait` | Wait for sessions to settle, a question, or a new handoff notice. Defaults to a 30-second window; expiry does not stop workers. Re-poll across calls below the outer deadline; explicit windows up to 120 seconds require a compatible client. Returns concise snapshots; `detail=full` is available. |
@@ -501,17 +522,20 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_tail` | Read the transcript incrementally by passing the previous `lastEntryId` as `since`. |
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
-| `pi_verify` | Run the fixed acceptance command against the exact worker + target candidate; record exit code, timeout, output and commit/tree evidence. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_verify` | Run the fixed acceptance command or the `spec.validators` chain (ordered, per-validator timeout, required/optional, artifact globs) against the exact worker + target candidate; record per-step exit codes, timeouts, output and commit/tree evidence, and write a durable evidence bundle (manifest + hashes + per-validator logs + artifacts + diff) under `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/`. The tool result carries the `evidence` reference. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_evidence` | `action: list\|get\|verify` (default `list`): inspect the durable bundle written by `pi_verify`; `verify` recomputes every file sha256 and reports mismatches. Read-only. |
 | `pi_review` | Record one evidence verdict per requirement and one approval reason per modified existing validation file, bound to the exact verification ID. Incomplete or stale reviews cannot authorize integration. |
-| `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
+| `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. `mode=merge-queue` instead queues the PR with the GitHub merge queue (requires `pi_pr` and `PI_COFFEE_ALLOW_PUSH=1`). A changed source or target requires reverification. |
+| `pi_pr` | Push the verified worker branch and create (or reuse) a GitHub PR whose body carries the verification id, candidate SHAs and evidence manifest hash. Requires `PI_COFFEE_ALLOW_PUSH=1` and current successful `pi_verify` evidence. Idempotent per branch. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |
 | `pi_exec` | Run a non-login shell command in a worker worktree for diagnostics. This does not create merge evidence. |
 | `pi_answer` | Answer a worker's pending question with `confirmed`, `value`, or `cancelled`. |
 | `pi_claim` / `pi_release` / `pi_locks` | Claim paths by hand, release them, or list what is held. |
-| `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. |
-| `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. |
+| `pi_message` / `pi_inbox` | Send durable mail to a worker (optionally injecting it into the conversation) and read it back. Each send returns a read-back receipt (`sha256`, `readBack`) recomputed from persisted state; a mismatch fails the call instead of claiming delivery. |
+| `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. Posts return the same persisted-hash read-back receipt. |
 | `pi_stop` | Stop an unfinished worker early, optionally removing its worktree and branch. |
 | `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record, control key and its provider/model/thinking level, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, whose evidence was reclaimed, have an unconfirmed shutdown, or have lost their transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
+| `pi_recover_control` | Recover a lost worker control/scope key with the scope key; keys are never echoed back. |
 | `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
 | `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
 | `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also reclaims what a session beyond recovery still holds (`transcripts_reclaimed`, `credentials_reclaimed`, `history_compacted`). |
@@ -542,7 +566,20 @@ are hashed. `pi_claim` and `pi_release` can target a specific `repo`; if you lea
 default is used, while worker sessions always use their own repository.
 
 The locks are coordination protection, not a security sandbox. They cover recognizable literal
-targets; dynamic scripts, variables, command substitution and globs are not fully contained. Digest
+targets; dynamic scripts, variables, command substitution and globs are not fully contained.
+
+Verification commands and workers can run in a Docker sandbox instead of the host
+(`PI_COFFEE_SANDBOX=docker`, `PI_COFFEE_SANDBOX_IMAGE`): each verification run gets a fresh container
+that mounts only the candidate at `/workspace`; each worker gets a deterministic `pi-coffee-worker-<id>`
+container that mounts its worktree at `/workspace`, its session directory at `/session` and the
+coordinator extension read-only. Only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW` (plus the
+`PI_COORD_*` handshake) are forwarded; the worker reaches the daemon through
+`host.docker.internal`. Containers are removed on stop, failed startup and restart recovery; a docker
+request fails closed when the daemon or image is unavailable — there is no host fallback. This isolates
+commands and worker processes, not the daemon: give the sandbox its own provider credential (or
+snapshot) and remember that `--network none` means no provider access.
+
+Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.
 Untrusted workers require separate OS/container isolation, credential restrictions, and appropriate
 read-only acceptance mounts; that isolation is not provided by this release.
@@ -623,6 +660,29 @@ Everything is configured through environment variables.
 | `PI_COFFEE_LOG_KEEP` | `1` | Rotated archives kept per log (`daemon.err.log.1`, `.2`, ...). |
 | `PI_COFFEE_LOG_FORMAT` | `text` | `json` emits one JSON object per stderr line; secrets are redacted. |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | Auto-resume sessions that were active when the daemon crashed. `0` leaves them stopped for an explicit `pi_resume`. |
+| `PI_COFFEE_SECRET_POLICY` | `reject` | How coordination surfaces handle detected secrets: `reject` fails the write, `redact` replaces the span with a marker. |
+| `PI_COFFEE_EXTENSION` | `extensions/pi-coordinator.ts` | Path to the worker-side coordinator extension. |
+| `PI_COFFEE_AUDIT_MAX_MB` | `32` | Rotate the hash-chained audit log once the active file reaches this size (MiB). |
+| `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | Days a verification evidence bundle is retained (`0` disables TTL cleanup). |
+| `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | Newest evidence bundles kept per session regardless of TTL. |
+| `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | Total size budget for one evidence bundle (MiB). |
+| `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | Per-file budget inside a bundle; oversized logs keep a tail and are listed in `truncated`. |
+| `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | Default per-validator timeout (ms) when a validator does not set `timeoutMs`. |
+| `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | Overall budget (ms) for the whole validator chain. |
+| `PI_COFFEE_SANDBOX` | `worktree` | Execution backend: `worktree` (today's host behavior) or `docker`. |
+| `PI_COFFEE_SANDBOX_IMAGE` | *(empty)* | Required for `docker`: image containing bash and the project toolchain. |
+| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access. |
+| `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(empty)* | Comma-separated host env names forwarded into containers (nothing else is passed). |
+| `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
+| `PI_COFFEE_RUNNER` | `pi` | Default worker runner: `pi` (pinned CLI) or `acp` (Agent Client Protocol). |
+| `PI_COFFEE_ACP_COMMAND` | *(empty)* | ACP agent argv (JSON array or whitespace-separated); required when `PI_COFFEE_RUNNER=acp`. |
+| `PI_COFFEE_GH_BIN` | `gh` | GitHub CLI path for `pi_pr`. |
+| `PI_COFFEE_GH_REMOTE` | `origin` | Remote pushed by `pi_pr`. |
+| `PI_COFFEE_PR_LABEL` | `pi-coffee` | Label applied to created PRs. |
+| `PI_COFFEE_GH_TOKEN` | *(empty)* | Token passed to `gh` as `GH_TOKEN` (never argv). |
+| `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | Allow an ambient `GH_TOKEN` to reach `gh` when no explicit token is set. |
+| `PI_COFFEE_ALLOW_PUSH` | `0` | Explicit opt-in for `pi_pr` and merge-queue pushes. |
+| `PI_COFFEE_DASHBOARD_ACTIONS` | `0` | Opt-in write actions in the dashboard (send/finish/merge/stop); requires `PI_COFFEE_TOKEN`. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through
@@ -742,6 +802,15 @@ Dockerfile         image with Node, git, and pi bundled
 docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker
 ```
+
+### Roadmap and plans
+
+The P0/P1 hardening line — durable evidence bundles, validator chains, sandboxed workers, receipted
+coordination with a hash-chained audit log, pluggable runners with ACP support, PR and merge-queue
+integration, dashboard actions, dependency-aware spawns, and MCP surface hardening — is designed in
+[docs/plans/p0-p1-development.md](docs/plans/p0-p1-development.md) and sequenced in
+[docs/plans/p0-p1-implementation.md](docs/plans/p0-p1-implementation.md). Every item is opt-in; the
+default daemon behavior stays unchanged.
 
 ### Release
 

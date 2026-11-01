@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { loadConfig } from "./config.js";
 import { Coordinator } from "./manager.js";
 import { buildServer } from "./mcp-server.js";
+import { capabilitiesPayload } from "./capabilities.js";
 import { daemonCodeDir, recordCodeVersion } from "./code-version.js";
 import type { LockMode } from "./locks.js";
 import { z } from "zod";
@@ -14,7 +15,7 @@ import { METRICS_CONTENT_TYPE, buildMetricsSnapshot, renderMetrics } from "./met
 const config = loadConfig();
 const coord = new Coordinator(config);
 const startedAt = Date.now();
-const dashboard = createDashboardHandler({ coord, token: config.token });
+const dashboard = createDashboardHandler({ coord, token: config.token, actions: config.dashboardActions });
 
 // Captured once at daemon startup: pi_status compares this in-memory value with
 // the current dist/manager.js mtime so a rebuilt dist without a restart is visible.
@@ -186,6 +187,12 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         return sendJson(res, 200, { ok: true, sessions: coord.list().length, workerStartupPolicy: WORKER_STARTUP_POLICY,
           draining: coord.isDraining(), active: coord.activeWorkers() });
 
+      case "/internal/capabilities":
+        return sendJson(res, 200, capabilitiesPayload({
+          workerStartupPolicy: WORKER_STARTUP_POLICY,
+          internalEndpoints: Object.keys(internalSchemas),
+        }));
+
       case "/internal/hello": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;
         own(sid);
@@ -286,7 +293,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
           if (to === "*") throw new Error("worker broadcast is unavailable across session scopes");
           coord.assertSameScope(workerSid, to);
         }
-        return sendJson(res, 200, coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
+        const result = coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true);
+        const receipt = await coord.messageReceipt(result.id);
+        return sendJson(res, 200, { ...result, sha256: receipt.sha256, readBack: receipt.readBack });
       }
 
       case "/internal/board/get": {
@@ -306,7 +315,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         }
         const entry = coord.boardPost(workerSid ? coord.scopedBoardName(workerSid, board) : board,
           key, String(value), workerSid ?? from ?? "unknown");
-        return sendJson(res, 200, workerSid ? { ...entry, board } : entry);
+        const receipt = await coord.boardReceipt(entry.board, entry.key);
+        return sendJson(res, 200, { ...(workerSid ? { ...entry, board } : entry), sha256: entry.sha256, readBack: receipt.readBack });
       }
 
       default:

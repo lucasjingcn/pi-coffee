@@ -245,6 +245,14 @@ url = "http://daemon-host:8787/mcp"
 PI_COFFEE_TOKEN = "your-secret"
 ```
 
+### Worker runner
+
+worker 默认跑固定版本的 pi CLI。设置 `PI_COFFEE_RUNNER=acp`（或单次 spawn 的 `spec.runner`）可以用
+ACP 协议驱动任意 agent；`PI_COFFEE_ACP_COMMAND`（或 `spec.runner.command`）是 agent 的 argv。ACP v1
+没有模型选择/会话回放契约，因此 `pi_send` 的 model 覆盖会被拒绝、ACP 会话不能 resume（只能重新 spawn）；
+权限请求会作为普通 `pi_answer` 问题抛出，原始帧保存在 `sessions/<id>/acp.jsonl` 供 `pi_tail` 查看。
+ACP runner 只支持宿主运行：docker 沙箱会直接拒绝，而不是包一层无法验证的 agent。
+
 ## Docker
 
 仓库里的 `Dockerfile` 已经把 Node、git 和 pi 都打进去了，宿主机只需要有 Docker。
@@ -401,6 +409,11 @@ PI_COFFEE_TOKEN=<secret> codex mcp add pi \
 
 ## Dashboard、指标与升级
 
+控制台默认只读。`PI_COFFEE_DASHBOARD_ACTIONS=1`（必须同时设置 `PI_COFFEE_TOKEN`）会打开带审计的
+`send`/`finish`/`merge`/`stop` 操作：每个 POST 都需要 token、`x-pi-coffee-action: 1` CSRF 头、JSON
+content-type 和同源 Origin；破坏性操作还要求 `x-pi-coffee-confirm: <session id>`。token 由浏览器输入并
+只存在该标签页的 sessionStorage，不会写进 HTML。
+
 daemon 还提供两个只读的运维界面。设置 `PI_COFFEE_TOKEN` 时，两者与 `/mcp` 使用同一个
 `x-pi-coord-token` / `Authorization: Bearer` 凭据。
 
@@ -429,7 +442,8 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 
 | 工具 | 作用 |
 |---|---|
-| `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
+| `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 `blocked_by` 接受已集成的 session id，经过环/失败检查后记录依赖边。 |
+| `pi_evidence` | `action: list\|get\|verify`（默认 `list`）：查看 `pi_verify` 写的证据包；`verify` 会重算每个文件的 sha256 并报告不一致。只读。 |
 | `pi_review` | 记录准确候选的统筹方审查。接收 `verification_id`、逐项 `requirements` 和逐文件 `test_changes`；硬性要求或既有验证文件变更未完整确认时，禁止合并。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
 | `pi_drain` | `action=start\|status\|cancel`：重启前开始 drain。drain 期间拒绝新的 spawn/resume，已有 worker 继续跑完；`status` 返回 `active`，可据此等到 0。 |
@@ -438,16 +452,18 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_tail` | 增量读会话记录，把上次的 `lastEntryId` 作为 `since` 传进去。 |
 | `pi_diff` | 某个 worker 分支的已提交、未提交和未跟踪改动。 |
 | `pi_commit` | 把 worker worktree 里的改动全部提交。 |
-| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，保存退出码、超时、输出和提交/候选树证据；失败、过时或重启前的证据不授权集成。 |
-| `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；来源或目标变化须重验。 |
+| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，或运行 `spec.validators` 验证器链（按顺序、可配单个超时、required/optional、artifact glob），保存每一步的退出码、超时、输出和提交/候选树证据，并在 `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/` 写可归档证据包（manifest + 哈希 + 每步日志 + artifacts + diff）。返回结果带 `evidence` 引用；失败、过时或重启前的证据不授权集成。 |
+| `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；`mode=merge-queue` 改为交给 GitHub merge queue（需要先 `pi_pr` 且 `PI_COFFEE_ALLOW_PUSH=1`）。来源或目标变化须重验。 |
+| `pi_pr` | 推送已验证的 worker 分支并创建（或复用）GitHub PR，正文带 verification id、候选 SHA 和证据包 manifest 哈希；需要 `PI_COFFEE_ALLOW_PUSH=1` 和当前成功的 `pi_verify` 证据，按分支幂等。 |
 | `pi_push` | 把当前分支（或指定分支）推到远端。 |
 | `pi_exec` | 在 worker worktree 用非登录 shell 运行诊断命令；不会产生合并验收证据。 |
 | `pi_answer` | 回答 worker 的待处理问题，用 `confirmed`、`value` 或 `cancelled`。 |
 | `pi_claim` / `pi_release` / `pi_locks` | 手动声明、释放路径，或查看当前都有哪些声明。 |
-| `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。 |
-| `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。 |
+| `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。每次发送都会从持久化状态回读并返回 `sha256` / `readBack` 回执，回读不一致直接报错而不是假装投递成功。 |
+| `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。写入同样返回持久化回读回执（`sha256` / `readBack`）。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
 | `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录、控制密钥以及 provider/model/thinking 全部保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、证据已被回收、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
+| `pi_recover_control` | 用 scope key 恢复丢失的 worker control/scope key；key 本身不会回显。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对工作已无法挽救的会话还会回收其转录目录、控制凭据、裁掉 history 里的大块证据（`transcripts_reclaimed`、`credentials_reclaimed`、`history_compacted`）。 |
@@ -476,6 +492,14 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 这些锁提供协作保护，不是安全沙箱。动态脚本、变量、命令替换和 glob 的任意写入不受完整隔离；
 摘要和范围检查能阻止错误成果集成，但不能撤销任意脚本的写入。不可信 worker 需要独立设计的 OS/容器
 隔离、凭据限制和只读验收挂载；本版本不提供该强隔离。
+
+验证命令和 worker 都可以改为在 Docker 沙箱里运行（`PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`）：
+验证命令每次起一个只挂载候选目录到 `/workspace` 的临时容器；worker 则使用确定性的
+`pi-coffee-worker-<id>` 容器，挂载 worktree 到 `/workspace`、会话目录到 `/session`，并以只读方式挂载
+协调扩展。只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW`（外加 `PI_COORD_*` 握手变量）里的环境变量，worker 通过
+`host.docker.internal` 访问 daemon。停止、启动失败和重启恢复都会删除容器；docker 或镜像不可用时直接
+失败，不会回退到宿主执行。它隔离的是命令和 worker 进程，不是 daemon：请给沙箱准备独立的 provider
+凭据（或快照），并注意 `--network none` 时没有 provider 访问。
 
 ## 清理已完成的工作
 
@@ -540,6 +564,29 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_LOG_KEEP` | `1` | 每个日志保留的归档份数（`daemon.err.log.1`、`.2`……）。 |
 | `PI_COFFEE_LOG_FORMAT` | `text` | 设为 `json` 时每条 stderr 日志是一行 JSON；敏感值会脱敏。 |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | daemon 崩溃后自动恢复崩溃时仍活跃的会话；`0` 表示留给人手动 `pi_resume`。 |
+| `PI_COFFEE_SECRET_POLICY` | `reject` | 协调面遇到疑似密钥时的策略：`reject` 拒绝写入，`redact` 用标记替换。 |
+| `PI_COFFEE_EXTENSION` | `extensions/pi-coordinator.ts` | worker 侧协调扩展路径。 |
+| `PI_COFFEE_AUDIT_MAX_MB` | `32` | 审计日志（哈希链）单个文件达到该大小（MiB）后轮转。 |
+| `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | 验收证据包保留天数（`0` 关闭 TTL 清理）。 |
+| `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | 每个会话至少保留的最新证据包数量。 |
+| `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | 单个证据包总大小上限（MiB）。 |
+| `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | 包内单文件上限（MiB）；超长日志保留尾部并记入 `truncated`。 |
+| `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | 验证器未写 `timeoutMs` 时的默认单步超时（毫秒）。 |
+| `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | 整条验证器链的总预算（毫秒）。 |
+| `PI_COFFEE_SANDBOX` | `worktree` | 执行后端：`worktree`（当前宿主行为）或 `docker`。 |
+| `PI_COFFEE_SANDBOX_IMAGE` | *(空)* | `docker` 必填：包含 bash 和项目工具链的镜像。 |
+| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | 容器网络模式；`none` 关闭 provider 访问。 |
+| `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(空)* | 逗号分隔的宿主环境变量名，只把这些传进容器。 |
+| `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI 路径（测试里用 fake binary）。 |
+| `PI_COFFEE_RUNNER` | `pi` | 默认 worker runner：`pi`（固定 CLI）或 `acp`（Agent Client Protocol）。 |
+| `PI_COFFEE_ACP_COMMAND` | *(空)* | ACP agent argv（JSON 数组或空格分隔）；`PI_COFFEE_RUNNER=acp` 时必填。 |
+| `PI_COFFEE_GH_BIN` | `gh` | `pi_pr` 用的 GitHub CLI 路径。 |
+| `PI_COFFEE_GH_REMOTE` | `origin` | `pi_pr` 推送的远端。 |
+| `PI_COFFEE_PR_LABEL` | `pi-coffee` | 新建 PR 的标签。 |
+| `PI_COFFEE_GH_TOKEN` | *(空)* | 以 `GH_TOKEN` 传给 gh（不走 argv）。 |
+| `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | 没有显式 token 时是否允许环境里的 `GH_TOKEN` 传给 gh。 |
+| `PI_COFFEE_ALLOW_PUSH` | `0` | `pi_pr` 与 merge-queue 推送的显式开关。 |
+| `PI_COFFEE_DASHBOARD_ACTIONS` | `0` | dashboard 写操作开关（send/finish/merge/stop），需要 `PI_COFFEE_TOKEN`。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
@@ -639,6 +686,14 @@ Dockerfile         内置 Node、git、pi 的镜像
 docker-compose.yml 面向用户的 compose 文件
 .env.example       Docker 用的 provider 密钥 / model 模板
 ```
+
+### 路线图与计划
+
+P0/P1 加固线（可归档的证据包、验证器链、沙箱 worker、带回执与哈希链审计日志的协调、可插拔
+runner 与 ACP 支持、PR 与 merge-queue 集成、dashboard 写操作、依赖感知的 spawn、MCP 表面加固）
+的设计见 [docs/plans/p0-p1-development.md](docs/plans/p0-p1-development.md)，实施顺序见
+[docs/plans/p0-p1-implementation.md](docs/plans/p0-p1-implementation.md)。所有条目都是可选项，
+默认 daemon 行为保持不变。
 
 ### 发布
 

@@ -7,6 +7,7 @@ import { WORKSTREAM_PURPOSES } from "./types.js";
 import { validateReviewSpec } from "./candidate-review.js";
 import { checkCodeVersion, daemonCodeDir, recordCodeVersion, type CodeVersionRecord } from "./code-version.js";
 import { MCP_INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
+import { PI_COFFEE_VERSION } from "./version.js";
 
 function json(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
@@ -53,6 +54,10 @@ function compactMeta(m: SessionMeta) {
     reviewAcceptance: m.reviewAcceptance ?? null,
     candidateReview: m.candidateReview ?? null,
     integration: m.integration ?? null,
+    blockedBy: m.blockedBy ?? [],
+    sandbox: m.sandbox ?? null,
+    runner: m.runner ?? null,
+    pr: m.pr ?? null,
     spec: m.spec ?? null,
     pendingQuestions: m.pendingQuestions.map((q) => ({
       id: q.id,
@@ -149,13 +154,33 @@ export function summaryReport(report: Record<string, unknown>, detail: Detail = 
   };
 }
 
+/** Deterministic MCP tool order; buildServer fails if registration drifts from it. */
+export const MCP_TOOL_ORDER = [
+  "pi_spawn", "pi_send", "pi_wait", "pi_recover_control", "pi_stop", "pi_resume", "pi_finish",
+  "pi_status", "pi_metrics", "pi_record_cost", "pi_tail", "pi_diff", "pi_list", "pi_report",
+  "pi_commit", "pi_verify", "pi_evidence", "pi_review", "pi_merge", "pi_pr", "pi_push", "pi_exec",
+  "pi_answer", "pi_gc", "pi_claim", "pi_release", "pi_locks", "pi_message", "pi_inbox",
+  "pi_board_post", "pi_drain", "pi_board_read",
+] as const;
+
+/** Fail fast when a tool is added/removed/reordered without updating MCP_TOOL_ORDER. */
+function assertToolOrder(server: McpServer): void {
+  const registry = (server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools;
+  if (!registry) return; // SDK internals changed; the docs-consistency test still enforces the order.
+  const actual = Object.keys(registry);
+  const expected = [...MCP_TOOL_ORDER];
+  if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+    throw new Error(`MCP tool registration order drifted from MCP_TOOL_ORDER: ${actual.join(", ")}`);
+  }
+}
+
 export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord): McpServer {
   // The daemon passes the value it recorded at startup; direct callers (tests)
   // record now so pi_status still has a baseline to compare against disk.
   const codeDir = codeVersion ? codeVersion.dir : daemonCodeDir();
   const runningDistMtimeMs = codeVersion ? codeVersion.distMtimeMs : recordCodeVersion(codeDir);
   const server = new McpServer(
-    { name: "pi-coffee", version: "0.1.0" },
+    { name: "pi-coffee", version: PI_COFFEE_VERSION },
     { instructions: MCP_INSTRUCTIONS },
   );
 
@@ -178,10 +203,12 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_spawn",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       title: "Spawn a pi worker session",
       description:
         "Create an isolated git worktree + branch and start a long-lived pi coding session in it. Returns a one-time control_key; retain it in this chat for later worker writes. It is never shown by list/status/report.",
       inputSchema: {
+        blocked_by: z.array(z.string().min(1)).max(32).optional().describe("Session ids that must already be integrated before this spawn is accepted (dependency gate)"),
         task: z.string().optional().describe("Short task label (used in the session/branch name)"),
         repo: z.string().optional().describe("Repository path (defaults to daemon config)"),
         name: z.string().optional(),
@@ -208,6 +235,20 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
               .describe("Coordinator-authored hard requirements with unique IDs; each needs met=true and evidence in pi_review before merge."),
             validation_paths: z.array(z.string()).optional()
               .describe("Additional worktree-relative validation files/directories; edits to existing definitions need per-file pi_review approval."),
+            runner: z.object({
+              kind: z.enum(["pi", "acp"]),
+              command: z.array(z.string().min(1)).min(1).max(32).optional().describe("ACP agent argv; defaults to PI_COFFEE_ACP_COMMAND"),
+              env: z.record(z.string(), z.string()).optional().describe("Non-secret environment for the runner"),
+            }).optional().describe("Worker runner; defaults to PI_COFFEE_RUNNER (pi)"),
+            validators: z.array(z.object({
+              id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).describe("Unique id; also the evidence folder name"),
+              command: z.string().min(1).max(8192),
+              required: z.boolean().optional().describe("Default true: a failure blocks integration"),
+              timeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
+              artifacts: z.array(z.string()).max(32).optional().describe("Worktree-relative glob patterns copied into the evidence bundle"),
+              env: z.record(z.string(), z.string()).optional().describe("Non-secret environment values for this validator only"),
+            })).max(16).optional()
+              .describe("Ordered verification chain run in the merged candidate. When present, omit acceptance_command."),
           })
           .optional()
           .describe("Structured task contract. Required: goal, scope. Rendered into the worker prompt."),
@@ -222,7 +263,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
           .describe(
             "Coordinator-authored acceptance files written before startup. Advisory locks plus content hashes protect integration; this is not an OS sandbox.",
           ),
-        acceptance_command: z.string().optional().describe("Fixed acceptance command executed by pi_verify against the merged candidate; required for verification/integration"),
+        acceptance_command: z.string().optional().describe("Fixed acceptance command executed by pi_verify against the merged candidate; required for verification/integration unless spec.validators is provided"),
       },
     },
     async (args) => {
@@ -334,6 +375,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_send",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Send an instruction to a pi worker",
       description:
         "Deliver a message to a running worker. mode=prompt starts a turn (auto-queued as follow-up if busy); mode=steer interrupts after the current tool batch; mode=followup waits until the worker is otherwise done. TWO-STRIKES GATE: after 2 instructions to the same session, further sends are blocked unless override:true — take the work over yourself instead.",
@@ -403,6 +445,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_wait",
     {
+      annotations: { readOnlyHint: true },
       title: "Wait for workers",
       description:
         "Block until all listed sessions settle (until=settled), any worker asks a question (until=question), or a new daemon handoff notice requires attention. Returns concise snapshots by default. " +
@@ -431,6 +474,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   );
 
   server.registerTool("pi_recover_control", {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     title: "Recover this scope's worker control",
     description: "Explicitly recover a persisted worker control key using this chat's scope_key. Does not expose other scopes or legacy credentials; if both keys were lost, use the protected local worker-control CLI. Never display recovered keys to users.",
     inputSchema: { session_id: z.string(), scope_key: z.string().min(1) },
@@ -442,6 +486,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_stop",
     {
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       title: "Stop a worker",
       description: "Stop an unfinished worker early, optionally recording an outcome and removing its git worktree/branch. pi_finish already stops completed workstreams.",
       inputSchema: {
@@ -500,6 +545,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_finish",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Close a workstream with an outcome",
       description:
         "Record the final disposition and stop the worker. Implementation success/takeover requires verification and integration; read-only review/investigation success requires a settled worker report, no worktree changes, and an acceptance note. Archived unfinished sessions may only be marked abandoned.",
@@ -535,6 +581,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_status",
     {
+      annotations: { readOnlyHint: true },
       title: "Worker status",
       description: "Get concise status and pending questions for one or all sessions. Use detail=full for contracts, transcript excerpt, verification and integration records; pi_metrics provides full cost evidence. The top-level code field flags a daemon still running stale dist code; each session carries statsAt (last successful turns/tokens refresh, null=never).",
       inputSchema: { session_id: z.string().optional(), detail: z.enum(["summary", "full"]).optional() },
@@ -567,7 +614,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool("pi_record_cost", {
     title: "Record orchestrator cost evidence",
     description: "Register a sourced orchestrator cost for explicit sessions. Use a stable record id; identical repeats are idempotent and conflicting repeats fail. Never invent missing usage or savings.",
-    annotations: { readOnlyHint: false, idempotentHint: true },
+    annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
     inputSchema: { id: z.string().min(1), amount: z.number().finite().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/),
       source: z.enum(["manual", "estimate", "provider"]), reference: z.string().min(1), session_ids: z.array(z.string()).min(1),
       control_keys: z.record(z.string(), z.string()).optional() },
@@ -579,6 +626,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_tail",
     {
+      annotations: { readOnlyHint: true },
       title: "Tail a worker transcript",
       description:
         "Incrementally read session entries. Pass the lastEntryId from a previous call as `since` to get only new entries (cheap polling).",
@@ -597,6 +645,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_diff",
     {
+      annotations: { readOnlyHint: true },
       title: "Worker diff",
       description: "Show the worker branch's committed changes since base plus uncommitted edits, for integration decisions.",
       inputSchema: { session_id: z.string() },
@@ -606,7 +655,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
 
   server.registerTool(
     "pi_list",
-    { title: "List workers", description: "List concise worker states. Supply session_ids to inspect only your workstreams, including stopped history; use detail=full for complete records. Each session carries statsAt (last successful turns/tokens refresh, null=never).",
+    { annotations: { readOnlyHint: true }, title: "List workers", description: "List concise worker states. Supply session_ids to inspect only your workstreams, including stopped history; use detail=full for complete records. Each session carries statsAt (last successful turns/tokens refresh, null=never).",
       inputSchema: { session_ids: z.array(z.string()).min(1).optional(), detail: z.enum(["summary", "full"]).optional() } },
     async ({ session_ids, detail }) => {
       const sessions = session_ids === undefined ? coord.list() : [...new Set(session_ids)].map((id) => coord.snapshot(id));
@@ -617,6 +666,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_report",
     {
+      annotations: { readOnlyHint: true, openWorldHint: false },
       title: "Delegation scoreboard",
       description:
         "Report concise outcomes by purpose, takeover reasons, cost coverage, and inconsistent recorded successes. Supply session_ids to scope a chat's workstreams; omit it only for global audit. Use detail=full for complete evidence; pi_metrics gives full per-session costs.",
@@ -632,6 +682,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_commit",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Commit a worker's changes",
       description: "Stage and commit all changes in a worker's worktree. Use before merging.",
       inputSchema: { session_id: z.string(), control_key: z.string().optional(), message: z.string() },
@@ -646,7 +697,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     "pi_verify",
     {
       title: "Verify the exact integration candidate",
-      description: "Execute the registered acceptance command in an isolated merged candidate. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
+      description: "Execute the registered acceptance command or validator chain in an isolated merged candidate, then write a durable evidence bundle (manifest + logs + diff) and return its reference. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
       annotations: { readOnlyHint: false, idempotentHint: false },
       inputSchema: { session_id: z.string(), control_key: z.string().optional(), into: z.string().optional(), timeout_ms: z.number().int().min(1000).max(1_800_000).optional() },
     },
@@ -654,6 +705,28 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       coord.assertControl(session_id, control_key);
       const proof = await coord.verify(session_id, into, timeout_ms);
       return proof.passed ? json(proof) : errorJson(proof);
+    },
+  );
+
+  server.registerTool(
+    "pi_evidence",
+    {
+      title: "Inspect verification evidence",
+      description: "List, read or re-verify the durable evidence bundle written by pi_verify (manifest with file hashes, per-validator logs, artifacts and the reviewed diff). Read-only; bundles live under <PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/.",
+      annotations: { readOnlyHint: true, idempotentHint: true },
+      inputSchema: {
+        session_id: z.string(),
+        control_key: z.string().optional(),
+        action: z.enum(["list", "get", "verify"]).optional().describe("Default: list"),
+        verification_id: z.string().optional().describe("Bundle to read; default: newest"),
+      },
+    },
+    async ({ session_id, control_key, action, verification_id }) => {
+      coord.assertControl(session_id, control_key);
+      const view = action ?? "list";
+      if (view === "list") return json(await coord.evidenceList(session_id));
+      if (view === "get") return json(await coord.evidenceGet(session_id, verification_id));
+      return json(await coord.evidenceVerify(session_id, verification_id));
     },
   );
 
@@ -687,17 +760,41 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
         control_key: z.string().optional(),
         into: z.string().optional().describe("Target branch in the main repo (default: current)"),
         no_ff: z.boolean().optional(),
+        mode: z.enum(["local", "merge-queue"]).optional().describe("local (default) merges locally; merge-queue queues the PR with the GitHub merge queue"),
       },
     },
-    async ({ session_id, control_key, into, no_ff }) => {
+    async ({ session_id, control_key, into, no_ff, mode }) => {
       coord.assertControl(session_id, control_key);
+      if (mode === "merge-queue") return json(await coord.mergeViaQueue(session_id, into));
       return json(await coord.merge(session_id, into, no_ff ?? true));
+    },
+  );
+
+  server.registerTool(
+    "pi_pr",
+    {
+      title: "Create a pull request",
+      description: "Push the verified worker branch and create (or reuse) a GitHub PR whose body carries the verification id, candidate SHAs and evidence manifest hash. Requires PI_COFFEE_ALLOW_PUSH=1 and current successful pi_verify evidence.",
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        session_id: z.string(),
+        control_key: z.string().optional(),
+        base: z.string().optional().describe("Target branch (default: the verification target)"),
+        title: z.string().optional(),
+        body: z.string().optional().describe("Override the generated evidence summary"),
+        label: z.string().optional(),
+      },
+    },
+    async ({ session_id, control_key, base, title, body, label }) => {
+      coord.assertControl(session_id, control_key);
+      return json(await coord.createPr(session_id, { base, title, body, label }));
     },
   );
 
   server.registerTool(
     "pi_push",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       title: "Push a branch",
       description: "Push the main repo's current branch (or an explicit branch) to a remote.",
       inputSchema: { session_id: z.string(), control_key: z.string().optional(), control_keys: z.record(z.string(), z.string()).optional(), remote: z.string().optional(), branch: z.string().optional() },
@@ -712,6 +809,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_exec",
     {
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       title: "Run a command in a worker's worktree",
       description:
         "Execute a shell command (e.g. the acceptance test/build) inside a worker's worktree and return exit code, stdout, stderr. Use this to verify a worker's work yourself before merging.",
@@ -732,6 +830,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_answer",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Answer a worker's question",
       description:
         "Respond to a pending question surfaced by pi_wait(until=question)/pi_status. For confirm use confirmed; for select/input/editor use value; use cancelled to dismiss.",
@@ -758,6 +857,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_gc",
     {
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       title: "Clean up finished workers",
       description:
         "Clean selected stopped workers, including historical sessions: accepted work and abandoned work with no commit or dirty files. Branches are removed only when safely merged; dirty, unrecorded, and abandoned work with commits is retained. Also reclaims what a session beyond recovery still holds: once its worktree is gone and it has an outcome or no live worker branch, its transcript directory, control credential and the bulk evidence in its history entry are removed (reported as transcripts_reclaimed, credentials_reclaimed and history_compacted), while everything the scoreboard reads is kept. Supply session_ids and matching control_keys. Global cleanup requires keys for every protected session, including history.",
@@ -780,6 +880,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_claim",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       title: "Claim files",
       description:
         "Claim repo-relative paths (files or directories) so other workers cannot write them. Workers auto-claim on edit/write; use this to reserve files up front.",
@@ -805,6 +906,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_release",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       title: "Release file claims",
       description: "Release claims for a session. Omit paths to release everything it holds in its repository namespace.",
       inputSchema: {
@@ -827,7 +929,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
 
   server.registerTool(
     "pi_locks",
-    { title: "List file claims", description: "List all active file claims across sessions.", inputSchema: {} },
+    { annotations: { readOnlyHint: true }, title: "List file claims", description: "List all active file claims across sessions.", inputSchema: {} },
     async () => json({ locks: coord.locksList() }),
   );
 
@@ -838,6 +940,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_message",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Message a worker (peer channel)",
       description:
         "Post a durable message to a worker's mailbox and (optionally) inject it into that worker's conversation. Use for coordination between Codex and workers or between workers.",
@@ -855,13 +958,15 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       if (session_id === "*") coord.assertControlsForAll(control_keys);
       else coord.assertControl(session_id, control_key);
       const res = coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
-      return json(res);
+      const receipt = await coord.messageReceipt(res.id);
+      return json({ ...res, sha256: receipt.sha256, readBack: receipt.readBack });
     },
   );
 
   server.registerTool(
     "pi_inbox",
     {
+      annotations: { readOnlyHint: true },
       title: "Read a worker's mailbox",
       description: "Read messages addressed to a worker.",
       inputSchema: { session_id: z.string(), unread_only: z.boolean().optional() },
@@ -872,6 +977,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_board_post",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       title: "Post to the shared board",
       description: "Append a fact/decision/interface to a shared blackboard that every worker can read (e.g. API contracts, ownership).",
       inputSchema: { board: z.string(), key: z.string(), value: z.string(), from: z.string().optional(), scope_key: z.string().optional(), control_keys: z.record(z.string(), z.string()).optional() },
@@ -880,7 +986,8 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       if (!scope_key) coord.assertControlsForAll(control_keys);
       const target = scope_key ? `${createHash("sha256").update(scope_key).digest("hex")}:${board}` : board;
       const entry = coord.boardPost(target, key, value, from ?? "codex");
-      return json(scope_key ? { ...entry, board } : entry);
+      const receipt = await coord.boardReceipt(entry.board, entry.key);
+      return json({ ...(scope_key ? { ...entry, board } : entry), sha256: entry.sha256, readBack: receipt.readBack });
     },
   );
 
@@ -890,7 +997,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       title: "Drain the daemon for a restart",
       description:
         "Prepare a smooth daemon restart. action=start rejects new spawns and resumes while the workers already running finish; action=status reports draining plus the active worker count (wait for active=0); action=cancel returns to normal. Draining never stops a worker and is reversible.",
-      annotations: { readOnlyHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
       inputSchema: {
         action: z.enum(["start", "status", "cancel"]).optional().describe("Default: status"),
         reason: z.string().optional().describe("Free-text operator note recorded with the drain (never credentials)"),
@@ -902,6 +1009,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   server.registerTool(
     "pi_board_read",
     {
+      annotations: { readOnlyHint: true },
       title: "Read the shared board",
       description: "Read board entries. Pass latest=true to get only the newest entry per key.",
       inputSchema: { board: z.string(), key: z.string().optional(), latest: z.boolean().optional(), scope_key: z.string().optional() },
@@ -913,5 +1021,6 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     },
   );
 
+  assertToolOrder(server);
   return server;
 }

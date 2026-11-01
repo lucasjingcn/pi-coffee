@@ -6,6 +6,8 @@ All notable changes to pi-coffee are recorded here. The format follows
 
 ## [Unreleased]
 
+## [Unreleased]
+
 ### Fixed
 
 - The Docker runtime image now installs `procps`: the worker-ownership probe uses
@@ -43,6 +45,65 @@ All notable changes to pi-coffee are recorded here. The format follows
 - `npm test` now passes `--test-timeout` and `--test-force-exit`, and the two
   worker-ownership tests skip when `ps` is unavailable instead of leaking a
   detached fixture child and hanging the runner.
+
+## [0.3.0] - 2026-11-01
+
+### Added
+
+- P0/P1 design and implementation plans under `docs/plans/` (durable evidence bundles, validator
+  chains, sandboxed workers, receipted coordination with a hash-chained audit log, pluggable runners
+  with ACP support, PR and merge-queue integration, dashboard actions, dependency-aware spawns, and
+  MCP surface hardening).
+- Secret detection on coordination surfaces (`PI_COFFEE_SECRET_POLICY=reject|redact`, default
+  `reject`) covering mailbox text, board values, outcome notes, and evidence logs.
+- Hash-chained audit log for coordinator actions (`PI_COFFEE_AUDIT_MAX_MB`, default 32) with best-effort
+  appends for delivery/cleanup paths and fail-closed appends for authority gates.
+- Read-back receipts for coordination writes: mailbox messages and board entries persist a canonical
+  `sha256`, and `pi_message` / the internal send endpoint / `pi_board_post` verify it against durable
+  state before reporting `readBack: true`. A missing or mismatched entry fails the call.
+- Durable verification evidence bundles (`PI_COFFEE_DATA_DIR/evidence/<session>/<verification>/`):
+  manifest with file sizes and sha256 hashes, combined stdout/stderr, the reviewed diff, changed
+  files, validator records and sandbox metadata. Written atomically (temp directory + rename);
+  `pi_verify` returns an `evidence` reference, and oversized logs keep a tail recorded in `truncated`.
+  Retention is configured with `PI_COFFEE_EVIDENCE_TTL_DAYS`, `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION`,
+  `PI_COFFEE_EVIDENCE_MAX_MB` and `PI_COFFEE_EVIDENCE_MAX_FILE_MB`.
+- Validator chains: `spec.validators` runs an ordered list of commands in the merged candidate with
+  per-validator timeouts (`PI_COFFEE_VALIDATOR_TIMEOUT_MS`), required/optional semantics, an overall
+  budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
+  `acceptance_command` remains the single-validator default and cannot be combined with
+  `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Task dependency gate: `pi_spawn blocked_by` accepts already-integrated session ids, rejects
+  unknown ids, recorded cycles and failed dependencies (`deps_failed`), and exposes the dependency
+  edge in status/list. Deferred auto-start remains documented future work.
+- Opt-in dashboard write actions (`PI_COFFEE_DASHBOARD_ACTIONS=1`, requires `PI_COFFEE_TOKEN`):
+  send/finish/merge/stop guarded by token + CSRF header + JSON content type + same-origin Origin, with
+  per-session confirmation for destructive actions and coordinator audit entries.
+- GitHub integration: `pi_pr` pushes a verified branch and creates (or reuses) a PR whose body carries
+  the verification id, candidate SHAs and evidence manifest hash; `pi_merge mode=merge-queue` queues it
+  with the GitHub merge queue. Both require `PI_COFFEE_ALLOW_PUSH=1`; tokens travel only through the
+  child environment (`PI_COFFEE_GH_TOKEN` / explicit `PI_COFFEE_GH_ALLOW_ENV_TOKEN`).
+- Pluggable worker runners: `PI_COFFEE_RUNNER=acp` / `spec.runner` drives an ACP v1 agent over stdio
+  with the same lifecycle surface as pi (prompt, events, permissions, stop), a raw
+  `sessions/<id>/acp.jsonl` transcript, and explicit non-goals (no model overrides, no resume, no
+  docker sandbox).
+- Docker sandbox phase B: workers run inside a deterministic `pi-coffee-worker-<id>` container that
+  mounts only the worktree (`/workspace`), session directory (`/session`) and the worker extension
+  (read-only); `PI_COORD_*` handshake values and allowlisted env names are forwarded, and containers
+  are removed on stop, failed startup and restart recovery. `spec.isolation` cannot bypass policy.
+- Docker sandbox phase A: verification/validator commands run in a fresh per-run container that
+  mounts only the candidate at `/workspace`, forwards only `PI_COFFEE_SANDBOX_ENV_ALLOW` names and is
+  removed after the run or timeout. `PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`;
+  `spec.isolation` can request a backend but cannot bypass the daemon policy. Docker/image absence
+  fails closed with no host fallback, and evidence records the sandbox image/digest/network.
+- Evidence lifecycle: `pi_evidence` (`list|get|verify`) exposes bundles over MCP, `pi_merge` and
+  successful outcomes fail closed when the recorded bundle is missing or modified, and the sweeper /
+  `pi_gc` prune expired bundles (`evidence_removed`, `evidence_bytes`) while always keeping the newest
+  `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` per session.
+
+### Security
+
+- Secret-like values in mailbox messages, board entries, and outcome notes are rejected (or redacted)
+  before they are persisted.
 
 ## [0.2.0] - 2026-10-31
 

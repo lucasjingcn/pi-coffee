@@ -106,7 +106,7 @@ function optionalArray<T>(
 function validateMailboxEntry(entry: unknown, index: number, file: string): MailMessage {
   const at = `mailbox[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
-  const { id, from, to, kind, text, ts, read, readBy } = entry;
+  const { id, from, to, kind, text, ts, read, readBy, sha256 } = entry;
 
   if (typeof id !== "string") fail(file, `${at}.id must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
@@ -126,6 +126,12 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
     normalizedReadBy = [...readBy];
   }
 
+  let normalizedSha256: string | undefined;
+  if (sha256 !== undefined) {
+    if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) fail(file, `${at}.sha256 must be a 64-character lowercase hex string`);
+    normalizedSha256 = sha256;
+  }
+
   return {
     id,
     from,
@@ -133,6 +139,7 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
     kind: kind as MessageKind,
     text,
     ts,
+    ...(normalizedSha256 !== undefined ? { sha256: normalizedSha256 } : {}),
     read,
     ...(normalizedReadBy !== undefined ? { readBy: normalizedReadBy } : {}),
   };
@@ -141,15 +148,20 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
 function validateBoardEntry(entry: unknown, index: number, file: string): BoardEntry {
   const at = `board[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
-  const { board, key, value, from, ts } = entry;
+  const { board, key, value, from, ts, sha256 } = entry;
 
   if (typeof board !== "string") fail(file, `${at}.board must be a string`);
   if (typeof key !== "string") fail(file, `${at}.key must be a string`);
   if (typeof value !== "string") fail(file, `${at}.value must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
   if (typeof ts !== "number" || !Number.isFinite(ts)) fail(file, `${at}.ts must be a finite number`);
+  let normalizedSha256: string | undefined;
+  if (sha256 !== undefined) {
+    if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) fail(file, `${at}.sha256 must be a 64-character lowercase hex string`);
+    normalizedSha256 = sha256;
+  }
 
-  return { board, key, value, from, ts };
+  return { board, key, value, from, ts, ...(normalizedSha256 !== undefined ? { sha256: normalizedSha256 } : {}) };
 }
 
 function validateHistoryEntry(entry: unknown, index: number, file: string): SessionMeta {
@@ -224,6 +236,37 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       fail(file, `${at}.handoff is invalid`);
   }
 
+  if (entry.blockedBy !== undefined) {
+    if (!Array.isArray(entry.blockedBy) || entry.blockedBy.length > 32
+      || !entry.blockedBy.every((id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id))) {
+      fail(file, `${at}.blockedBy is invalid`);
+    }
+  }
+  if (entry.pr !== undefined) {
+    const pr = entry.pr;
+    if (!isRecord(pr) || typeof pr.number !== "number" || !Number.isSafeInteger(pr.number) || pr.number <= 0
+      || typeof pr.url !== "string" || !pr.url.trim()
+      || (pr.state !== undefined && typeof pr.state !== "string")) {
+      fail(file, `${at}.pr is invalid`);
+    }
+  }
+  if (entry.runner !== undefined) {
+    const runner = entry.runner;
+    if (!isRecord(runner) || (runner.kind !== "pi" && runner.kind !== "acp")
+      || (runner.command !== undefined && (!Array.isArray(runner.command)
+        || !runner.command.every((part) => typeof part === "string" && part !== "")))) {
+      fail(file, `${at}.runner is invalid`);
+    }
+  }
+  if (entry.sandbox !== undefined) {
+    const sandbox = entry.sandbox;
+    if (!isRecord(sandbox) || (sandbox.kind !== "worktree" && sandbox.kind !== "docker")
+      || (sandbox.image !== undefined && typeof sandbox.image !== "string")
+      || (sandbox.imageDigest !== undefined && typeof sandbox.imageDigest !== "string")
+      || (sandbox.network !== undefined && sandbox.network !== "bridge" && sandbox.network !== "none")) {
+      fail(file, `${at}.sandbox is invalid`);
+    }
+  }
   if (entry.spec !== undefined) {
     const spec = entry.spec;
     if (!isRecord(spec)) fail(file, `${at}.spec must be an object`);
@@ -254,6 +297,23 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       || !isRecord(proof.result) || typeof proof.result.stdout !== "string" || typeof proof.result.stderr !== "string"
       || typeof proof.result.timedOut !== "boolean" || !(proof.result.code === null || Number.isInteger(proof.result.code))) {
       fail(file, `${at}.verification is invalid`);
+    }
+    if (proof.evidence !== undefined) {
+      const evidence = proof.evidence;
+      if (!isRecord(evidence) || typeof evidence.dir !== "string"
+        || typeof evidence.manifestSha256 !== "string" || !/^[a-f0-9]{64}$/.test(evidence.manifestSha256)
+        || typeof evidence.files !== "number" || typeof evidence.bytes !== "number"
+        || !Array.isArray(evidence.truncated) || !evidence.truncated.every((v) => typeof v === "string")) {
+        fail(file, `${at}.verification.evidence is invalid`);
+      }
+    }
+    if (proof.validators !== undefined) {
+      if (!Array.isArray(proof.validators) || !proof.validators.every((run) =>
+        isRecord(run) && typeof run.id === "string" && typeof run.required === "boolean"
+        && typeof run.command === "string" && typeof run.timedOut === "boolean"
+        && typeof run.passed === "boolean" && (run.code === null || Number.isInteger(run.code)))) {
+        fail(file, `${at}.verification.validators is invalid`);
+      }
     }
     if ((proof.id !== undefined && (typeof proof.id !== "string" || !proof.id.trim()))
       || (proof.reviewContractHash !== undefined && (typeof proof.reviewContractHash !== "string" || !/^[a-f0-9]{64}$/.test(proof.reviewContractHash)))
