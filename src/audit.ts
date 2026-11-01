@@ -263,6 +263,11 @@ export class AuditLog {
       const entry = buildAuditEntry(head.hash, head.seq + 1, this.now(), actor, action, target, detail);
       await appendFile(this.filePath(file), JSON.stringify(entry) + "\n", { mode: 0o600 });
       head = { file, seq: entry.seq, hash: entry.hash };
+      // The entry is durable from here on, so advance the cached head before the
+      // sidecar write: otherwise a failed writeHead leaves the in-memory head on
+      // the previous sequence and the next append reuses this seq, breaking the
+      // chain permanently (`resolveHead` repairs the sidecar from the file).
+      this.cachedHead = head;
       await this.writeHead(head);
       return entry;
     });

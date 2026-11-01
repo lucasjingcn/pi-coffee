@@ -107,3 +107,33 @@ test("health exposes drain state for the upgrade script", async () => {
     assert.equal(health.active, 0);
   });
 });
+
+test("capabilities lists every internal route the daemon serves", async () => {
+  await daemonFixture(async ({ base, auth }) => {
+    const response = await fetch(`${base}/internal/capabilities`, { headers: auth });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    for (const route of ["/internal/sessions", "/internal/locks", "/internal/health", "/internal/shutdown",
+      "/internal/claim", "/internal/board/post"]) {
+      assert.ok(body.internal_endpoints.includes(route), `missing ${route}`);
+    }
+    // Every advertised route must really answer.
+    for (const route of ["/internal/sessions", "/internal/locks"]) {
+      const probe = await fetch(`${base}${route}`, { headers: auth });
+      assert.equal(probe.status, 200, route);
+    }
+  });
+});
+
+test("an oversized internal body is reported as 413", async () => {
+  await daemonFixture(async ({ base, auth }) => {
+    const response = await fetch(`${base}/internal/send`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ to: "s1", text: "x".repeat(33 * 1024 * 1024) }),
+    });
+    assert.equal(response.status, 413);
+    const body = await response.json();
+    assert.match(body.error, /exceeds 32 MiB/);
+  });
+});

@@ -18,7 +18,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { loadDaemonEnv } from "./lib/env.mjs";
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
@@ -39,7 +39,7 @@ if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > 
 }
 const reason = flag("reason", `upgrade via scripts/upgrade.mjs (pid ${process.pid})`);
 
-loadEnvFile(envFilePath(), { override: true });
+loadDaemonEnv();
 
 const base = new URL(process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}`).origin;
 const headers = { "content-type": "application/json" };
@@ -121,7 +121,9 @@ while (status.active > 0 && Date.now() < deadline) {
   await sleep(500);
   const polled = await request("/internal/drain", { action: "status" }).catch(() => undefined);
   if (!polled?.ok) await fail("the daemon stopped answering drain status during the wait");
-  status = polled.body;
+  // A truncated reply must not crash the poller with a TypeError and leave the
+  // daemon draining: keep the last good state instead.
+  if (typeof polled.body?.active === "number") status = polled.body;
 }
 
 if (status.active > 0) {
@@ -136,9 +138,10 @@ const stop = await request("/internal/shutdown", { action: "stop" }).catch((erro
   body: { error: error instanceof Error ? error.message : String(error) },
 }));
 if (!stop.ok) {
-  console.error(`error: the daemon refused to stop (HTTP ${stop.status}: ${JSON.stringify(stop.body)})`);
-  console.error(`stop it yourself once you are ready, then restart it with: ${restartCommand()}`);
-  process.exit(1);
+  // `fail` cancels the drain first: leaving the daemon draining would reject
+  // every later pi_spawn/pi_resume until an operator noticed.
+  await fail(`the daemon refused to stop (HTTP ${stop.status}: ${JSON.stringify(stop.body)}). `
+    + `Stop it yourself once you are ready, then restart it with: ${restartCommand()}`);
 }
 console.log("the daemon accepted a graceful shutdown (no process was signalled by this script)");
 

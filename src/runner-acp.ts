@@ -32,6 +32,13 @@ interface PendingRequest {
 
 const PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * Cap for one unterminated stdout line. An agent that never emits the newline
+ * would otherwise grow the buffer until the daemon runs out of memory; the pi
+ * runner fails closed the same way.
+ */
+const MAX_ACP_LINE_BYTES = 8 * 1024 * 1024;
+
 export class AcpClient extends EventEmitter implements WorkerTransport {
   readonly opts: AcpClientOptions;
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -232,6 +239,11 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
 
   private onData(chunk: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, chunk]);
+    if (this.buffer.length > MAX_ACP_LINE_BYTES && this.buffer.indexOf(0x0a) < 0) {
+      this.buffer = Buffer.alloc(0);
+      this.terminate(new Error(`acp output line exceeded ${MAX_ACP_LINE_BYTES} bytes; protocol desynchronized`));
+      return;
+    }
     for (;;) {
       const index = this.buffer.indexOf(0x0a);
       if (index < 0) break;

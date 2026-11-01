@@ -21,12 +21,16 @@ fi
 
 # bootout sends SIGTERM, and the daemon stops its workers on SIGTERM. Refuse to
 # interrupt a live coordinator unless the operator explicitly forces it.
-if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state = running'; then
-  if [ "${1:-}" != "--force" ]; then
-    echo "error: pi-coffee daemon is running. Stop it after workers finish, or rerun with --force." >&2
-    exit 1
-  fi
-fi
+# Capture first: `launchctl ... | grep -q` returns 141 under `pipefail` whenever
+# grep exits before launchctl finishes writing, which silently disabled this guard.
+DAEMON_STATE="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null || true)"
+case "$DAEMON_STATE" in
+  *"state = running"*)
+    if [ "${1:-}" != "--force" ]; then
+      echo "error: pi-coffee daemon is running. Stop it after workers finish, or rerun with --force." >&2
+      exit 1
+    fi ;;
+esac
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
 chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true

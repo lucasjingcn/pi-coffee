@@ -22,7 +22,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { IntegrationRecord, Verification } from "./integration.js";
-import type { Coordinator, SessionMeta } from "./manager.js";
+import type { Coordinator, Outcome, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
 
 /** Tail entries a dashboard page may request in one call (matches the MCP cap). */
@@ -263,7 +263,7 @@ const ACTION_SCRIPT = `
   }
   run.addEventListener("click", async () => {
     const session = document.getElementById("act-session").value.trim();
-    const action = kind.value;
+    const action = kind.value === "finish_second" ? "finish" : kind.value;
     const text = document.getElementById("act-text").value;
     const out = document.getElementById("act-result");
     if (!session) { out.textContent = "session is required"; return; }
@@ -274,7 +274,9 @@ const ACTION_SCRIPT = `
       "x-pi-coffee-confirm": session,
       "authorization": "Bearer " + token(),
     };
-    const body = action === "send" ? { message: text } : action === "finish" ? { note: text } : {};
+    const body = action === "send" ? { message: text }
+      : action === "finish" ? { note: text, outcome: kind.value === "finish_second" ? "success_second" : "success_first" }
+      : {};
     try {
       const response = await fetch("/dashboard/api/actions/sessions/" + encodeURIComponent(session) + "/" + action, {
         method: "POST", headers, body: JSON.stringify(body),
@@ -445,7 +447,8 @@ ${actions ? `<section id="actions">
   <label>session <input id="act-session" placeholder="s1"></label>
   <label>action <select id="act-kind">
     <option value="send">send</option>
-    <option value="finish">finish (read-only acceptance)</option>
+    <option value="finish">finish (first-try acceptance)</option>
+    <option value="finish_second">finish (second-try acceptance)</option>
     <option value="merge">merge</option>
     <option value="stop">stop (keep worktree)</option>
   </select></label>
@@ -539,6 +542,13 @@ function tailLimit(url: URL): { ok: true; max?: number } | { ok: false } {
 
 /** Write actions exposed only when the dashboard is started with `actions: true`. */
 const DASHBOARD_ACTIONS = new Set(["send", "finish", "merge", "stop"]);
+
+/** Outcomes the console may record; `abandoned` goes through pi_stop. */
+const DASHBOARD_OUTCOMES = new Map<string, Outcome>([
+  ["success_first", "success_first"],
+  ["success_second", "success_second"],
+  ["taken_over", "taken_over"],
+]);
 const ACTION_HEADER = "x-pi-coffee-action";
 const CONFIRM_HEADER = "x-pi-coffee-confirm";
 const MAX_ACTION_BODY = 64 * 1024;
@@ -623,7 +633,13 @@ async function handleAction(coord: Coordinator, req: IncomingMessage, res: Serve
       await coord.send(id, message, "prompt");
     } else if (action === "finish") {
       const note = typeof body.note === "string" ? body.note : undefined;
-      await coord.setOutcome(id, "success_first", note);
+      // A retried or taken-over session is not a first-try success; without this
+      // the console could only ever record success_first, which polluted the
+      // first_try_rate the scoreboard reads.
+      const requested = typeof body.outcome === "string" ? body.outcome : "success_first";
+      const outcome = DASHBOARD_OUTCOMES.get(requested);
+      if (!outcome) return sendJson(res, 400, { error: `outcome must be one of ${[...DASHBOARD_OUTCOMES.keys()].join(", ")}` });
+      await coord.setOutcome(id, outcome, note);
     } else if (action === "merge") {
       await coord.merge(id);
     } else {
@@ -644,7 +660,7 @@ async function serve(coord: Coordinator, url: URL, res: ServerResponse, actions 
   if (segments.length === 0) {
     // Fresh CSP nonce per response; the shell carries no other dynamic value.
     const nonce = randomBytes(16).toString("hex");
-    return sendHtml(res, renderPage(coord.list().map(summarize), nonce, actions), nonce);
+    return sendHtml(res, renderPage(coord.allSessions().map(summarize), nonce, actions), nonce);
   }
 
   if (segments[0] !== "api" || segments.length < 2) {
@@ -659,7 +675,7 @@ async function serve(coord: Coordinator, url: URL, res: ServerResponse, actions 
       ok: true,
       service: "pi-coffee-dashboard",
       readOnly: true,
-      sessions: coord.list().length,
+      sessions: coord.allSessions().length,
       time: new Date().toISOString(),
     });
   }
@@ -669,7 +685,7 @@ async function serve(coord: Coordinator, url: URL, res: ServerResponse, actions 
   }
 
   if (rest.length === 0) {
-    const sessions = coord.list().map(summarize);
+    const sessions = coord.allSessions().map(summarize);
     return sendJson(res, 200, { sessions, count: sessions.length, generatedAt: new Date().toISOString() });
   }
 

@@ -44,6 +44,23 @@ test("does not flag hashes, prose, uuids or short values", () => {
   for (const text of clean) assert.equal(containsSecret(text), false, text);
 });
 
+test("detects lower-case assignments and Authorization headers", () => {
+  // The default policy is `reject`, so a case-sensitive rule silently let the
+  // most common spellings through to mailbox/board/outcome text.
+  for (const text of [
+    "password: hunter2hunter2",
+    "api_key=abcdefghijklmnop",
+    "mysql_password=correcthorsebattery",
+    "Authorization: Bearer abcdefghijklmnopqrst",
+    "authorization=Bearer abcdefghijklmnopqrst",
+  ]) {
+    assert.equal(containsSecret(text), true, text);
+  }
+  assert.deepEqual(secretKinds("Authorization: Bearer abcdefghijklmnopqrst"), ["bearer-token"]);
+  // Prose that merely mentions the words stays clean.
+  assert.equal(containsSecret("rotate the bearer token before release"), false);
+});
+
 test("redaction replaces spans and is idempotent", () => {
   const text = `use ${OPENAI} then ${GITHUB} now`;
   const result = redactSecrets(text);

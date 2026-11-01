@@ -5,9 +5,9 @@
  *   node scripts/status.mjs             # one snapshot
  *   watch -n2 'node scripts/status.mjs' # live
  */
-import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { loadDaemonEnv } from "./lib/env.mjs";
 
-loadEnvFile(envFilePath(), { override: true });
+loadDaemonEnv();
 const endpoint = new URL(process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}`);
 const BASE = endpoint.origin;
 const headers = process.env.PI_COFFEE_TOKEN ? { "x-pi-coord-token": process.env.PI_COFFEE_TOKEN } : {};

@@ -119,18 +119,19 @@ export class DockerSandbox {
     const name = `pi-coffee-verify-${randomBytes(6).toString("hex")}`;
     const envArgs: string[] = [];
     const seen = new Set<string>();
-    // Allowlisted host names are forwarded by reference (`-e NAME`) so their
-    // values never appear in the docker argv. Validator-provided extras are
-    // inline because they exist only in the gate, not in the daemon env.
-    for (const key of this.config.envAllow) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-      envArgs.push("-e", key);
-    }
+    // Validator-provided values win, exactly like the worktree backend
+    // (`{...process.env, ...extraEnv}`): an explicit `env.NODE_ENV=test` must not
+    // be silently replaced by the daemon's value. Allowlisted host names are
+    // forwarded by reference (`-e NAME`) so their values never appear in argv.
     for (const [key, value] of Object.entries(extraEnv ?? {})) {
       if (seen.has(key)) continue;
       seen.add(key);
       envArgs.push("-e", `${key}=${value}`);
+    }
+    for (const key of this.config.envAllow) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      envArgs.push("-e", key);
     }
     const argv = [
       shellQuote(this.config.dockerBin), "run", "--rm", "--name", shellQuote(name),
@@ -149,11 +150,21 @@ export class DockerSandbox {
     return result;
   }
 
-  /** Remove the per-worker container (idempotent; missing containers are ignored). */
+  /**
+   * Remove the per-worker container. A container that is already gone is fine;
+   * anything else is reported, because `docker run` keeps running after its CLI
+   * is killed — only `rm -f` stops it, and the caller must not release locks for
+   * a container that may still be writing to the worktree.
+   */
   async removeWorker(sessionId: string): Promise<void> {
     const name = workerContainerName(sessionId);
-    await this.runner(`${shellQuote(this.config.dockerBin)} rm -f ${shellQuote(name)}`, process.cwd(), 15_000)
-      .catch(() => undefined);
+    const result = await this.runner(`${shellQuote(this.config.dockerBin)} rm -f ${shellQuote(name)}`, process.cwd(), 15_000)
+      .catch((error: unknown) => ({ code: null, stdout: "", stderr: String(error), timedOut: false }));
+    if (result.timedOut || result.code !== 0) {
+      if (/no such container/i.test(`${result.stdout}${result.stderr}`)) return;
+      const detail = (result.stderr || result.stdout || "").trim().slice(0, 200) || "no output";
+      throw new Error(`docker rm -f ${name} failed (code ${String(result.code)}): ${detail}`);
+    }
   }
 }
 
@@ -178,6 +189,8 @@ export interface WorkerContainerOptions {
   envAllow: string[];
   port: number;
   dockerBin: string;
+  /** Host name the container uses to reach the daemon (`host.docker.internal` by default). */
+  coordHost: string;
 }
 
 /**
@@ -192,13 +205,14 @@ export function buildWorkerDockerPrefix(opts: WorkerContainerOptions): { bin: st
     args: [
       "run", "--rm", "-i", "--name", workerContainerName(opts.sessionId),
       "--network", opts.network,
+      // Only meaningful for the gateway alias; harmless for any other coord host.
       "--add-host", "host.docker.internal:host-gateway",
       "-v", `${resolve(opts.worktree)}:${WORKER_WORKSPACE}`,
       "-w", WORKER_WORKSPACE,
       "-v", `${resolve(opts.sessionDir)}:${WORKER_SESSION_DIR}`,
       "-v", `${resolve(opts.extensionPath)}:${WORKER_EXTENSION}:ro`,
       "-e", "PI_CODING_AGENT_DIR=/session/agent",
-      "-e", `PI_COORD_URL=http://host.docker.internal:${opts.port}`,
+      "-e", `PI_COORD_URL=http://${opts.coordHost}:${opts.port}`,
       "-e", `PI_COORD_SESSION_ID=${opts.sessionId}`,
       "-e", "PI_COORD_TOKEN",
       ...opts.envAllow.flatMap((key) => ["-e", key]),

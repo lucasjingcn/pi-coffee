@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -89,6 +89,25 @@ test("deleting the head sidecar fails closed until the next append repairs it", 
     assert.equal(appended.seq, 2);
     const repaired = await new AuditLog({ dir }).verify();
     assert.equal(repaired.ok, true, repaired.reason);
+  });
+});
+
+test("a failed head-sidecar write does not make the next append reuse its seq", async () => {
+  await withLog(async (dir, log) => {
+    await log.append("orchestrator", "spawn", "s1");
+    // Make the sidecar write fail once: replace the head file with a directory so
+    // the atomic rename cannot land, then restore it.
+    const head = join(dir, "audit.head.json");
+    const saved = await readFile(head, "utf8");
+    await rm(head);
+    await mkdir(head, { recursive: true });
+    await assert.rejects(log.append("orchestrator", "verify", "s1"));
+    await rm(head, { recursive: true, force: true });
+    await writeFile(head, saved);
+    const next = await log.append("orchestrator", "merge", "s1");
+    assert.equal(next.seq, 3, "the durable entry from the failed append still owns seq 2");
+    const verified = await log.verify();
+    assert.equal(verified.ok, true, verified.reason);
   });
 });
 

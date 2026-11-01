@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { apiKeyVarFor, envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { apiKeyVarFor, envFilePath, loadDaemonEnv } from "./lib/env.mjs";
 import { resolvePiBin, piVersion } from "./lib/pi.mjs";
 import { resolveBashBin } from "./lib/bash.mjs";
 
@@ -31,7 +31,7 @@ function check(name, ok, detail, hint) {
 
 // Load the generated env file first so its provider/model/pi settings are visible.
 const envFile = envFilePath();
-const { loaded, values } = loadEnvFile(envFile, { override: true });
+const { loaded, values } = loadDaemonEnv(envFile);
 const background = process.argv.includes("--background");
 
 // --- Node ---

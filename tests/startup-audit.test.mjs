@@ -41,8 +41,10 @@ async function fixture(fn) {
 
 test('status loads daemon settings, authenticates and accepts MCP endpoint URLs', async () => fixture(async (dir, port) => {
   const file = join(dir, 'env');
-  writeEnvFile({PI_COFFEE_PORT: port, PI_COFFEE_TOKEN: 'fixture-token'}, file);
-  const env = {...cleanEnv(), PI_COFFEE_ENV_FILE: file, PI_COFFEE_PORT: '1', PI_COFFEE_TOKEN: 'wrong'};
+  // The file only fills gaps: the exported port wins (the file's `1` is a trap)
+  // while the token, which the shell does not export, still comes from the file.
+  writeEnvFile({PI_COFFEE_PORT: '1', PI_COFFEE_TOKEN: 'fixture-token'}, file);
+  const env = {...cleanEnv(), PI_COFFEE_ENV_FILE: file, PI_COFFEE_PORT: port};
   const result = await run('scripts/status.mjs', env);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /sessions: 1/);
@@ -81,18 +83,30 @@ test('doctor uses daemon env precedence and background checks require persisted 
   writeEnvFile({PI_COFFEE_PROVIDER: 'deepseek', PI_COFFEE_DATA_DIR: join(dir, 'data'), DEEPSEEK_API_KEY: 'fixture-key'}, file);
   const env = {...cleanEnv(), PI_COFFEE_ENV_FILE: file, PI_COFFEE_PROVIDER: 'openai', OPENAI_API_KEY: 'fixture-only-shell-key'};
   const result = await run('scripts/doctor.mjs', env, ['--background']);
-  assert.match(result.stdout, /ok\s+credentials for deepseek/);
-  assert.doesNotMatch(result.stdout, /credentials for openai/);
+  // An exported value wins over the settings file, exactly like scripts/start.mjs:
+  // otherwise the doctor reports on a provider the daemon is not running with.
+  assert.match(result.stdout, /ok\s+credentials for openai/);
+  assert.doesNotMatch(result.stdout, /credentials for deepseek/);
   assert.doesNotMatch(result.stdout + result.stderr, /fixture-key|fixture-only-shell-key/);
   writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-no-auth-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
   // A private HOME ensures no real pi auth.json is inspected or supplies credentials.
+  // The exported provider still wins, and its key exists only in the shell, so the
+  // background check must fail: nothing persisted would let a service start.
   const background = await run('scripts/doctor.mjs', {...env, HOME: dir, USERPROFILE: dir, PI_AUDIT_NO_AUTH_PROVIDER_API_KEY: 'shell-only'}, ['--background']);
-  assert.match(background.stdout, /FAIL\s+credentials for pi-audit-no-auth-provider/);
+  assert.match(background.stdout, /FAIL\s+credentials for openai/);
   assert.equal(background.code, 1);
 }));
 
-test('the foreground launcher lets the process environment override the settings file', async () => {
+test('every launcher and client script uses the daemon env precedence', async () => {
   const start = await readFile('scripts/start.mjs', 'utf8');
   assert.match(start, /loadEnvFile\(envFilePath\(\), \{ override: false \}\)/);
   assert.doesNotMatch(start, /override: true/);
+  // The proxy, health probe, status, inspect, doctor, upgrade and setup-dsh used
+  // to let the file win, so a conflicting PI_COFFEE_PORT/TOKEN/DATA_DIR made them
+  // talk to a different daemon than the launcher started.
+  for (const script of ['proxy', 'check-health', 'status', 'inspect', 'doctor', 'upgrade', 'setup-dsh']) {
+    const text = await readFile(`scripts/${script}.mjs`, 'utf8');
+    assert.match(text, /loadDaemonEnv\(/, `${script} must load the settings file like the daemon`);
+    assert.doesNotMatch(text, /override: true/, `${script} must not let the file override the environment`);
+  }
 });

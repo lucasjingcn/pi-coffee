@@ -66,6 +66,65 @@ All notable changes to pi-coffee are recorded here. The format follows
 - CI runs the extension typecheck plus platform-neutral suites on Windows, and a
   release refuses a tag that does not match `package.json`.
 
+### Fixed (post-merge review of the 0.3.x hardening)
+
+- A shutdown confirmed by the worker's stdin-EOF exit now samples and verifies the
+  process tree too: pi's graceful path skips the SIGTERM handler that kills its
+  detached bash tools, so a confirmed stop could release locks (and delete the
+  worktree) while a tool was still writing. Surviving descendants are terminated,
+  and only then is the stop confirmed.
+- `/internal/drain` and `/internal/shutdown` stay reachable for a loopback caller
+  when no `PI_COFFEE_TOKEN` is configured. Gating them on "protected sessions
+  exist" locked `npm run upgrade` and HTTP graceful shutdown out of their own
+  daemon for good, since that deployment has no credential that can satisfy the
+  rule. Other mutating endpoints keep the rule, and POST-only still applies.
+- A `cp`/`mv`/`install`/`ln`/`rsync`/`scp` destination followed by `&&`, `;`, `|`
+  or a newline is no longer dropped, so the escape check and the write claim see
+  it again; `/dev/fd/../..`-style paths stop being treated as discard devices.
+- `pi_verify(timeout_ms)` bounds a single acceptance command again: the
+  per-validator default (10 minutes) no longer caps a chain of one, where nothing
+  needs protecting from a greedy predecessor.
+- The proxy, health probe, `status`, `inspect`, `doctor`, `upgrade` and `setup-dsh`
+  load `~/.pi-coffee/env` with the daemon's precedence (exported value wins, file
+  fills gaps). They used to let the file win, so one duplicated key could point
+  them at a different port, token or data directory than the running daemon.
+- An artifact glob now tolerates a rewritten *tracked* report file: the candidate
+  status is parsed untrimmed, so the leading column of ` M path` no longer eats
+  two characters of every tracked path.
+- `gh pr create` adopts the pull request that exists when the label step fails,
+  instead of retrying into "already exists" and reporting a failure for work that
+  happened; both error messages are preserved when it really fails.
+- A failed `vault.save` during spawn removes the worktree and branch it created,
+  matching what the changelog already claimed; `pi_resume` audits before taking
+  claims, so a failed append can no longer strand scope/acceptance locks; a
+  successful verification is only recorded after its audit entry is durable.
+- The periodic sweeper also reclaims archived sessions (no runtime), which used to
+  wait for another restart once the startup sweep hit its TTL skip.
+- An audit head-sidecar write failure no longer reuses the sequence number: the
+  durable entry owns it, and `resolveHead` repairs the sidecar.
+- Oversized `/internal/*` bodies answer `413` again (the `PayloadTooLargeError`
+  was mapped to 400 before the handler that special-cases it).
+- The dashboard lists archived sessions (matching `/metrics`) and can record
+  `success_second`/`taken_over` instead of always writing `success_first`, which
+  distorted `first_try_rate`.
+- Secret detection is case-insensitive and covers `Authorization: Bearer …`, so
+  `password:`/`api_key=` values are rejected on coordination surfaces too.
+- `PI_COFFEE_SANDBOX=docker` refuses `PI_COFFEE_SANDBOX_NETWORK=none` and, on
+  Linux, a loopback listener with the default `host.docker.internal` coord host:
+  the container could reach neither the daemon nor authorize a write. The coord
+  host is now configurable with `PI_COFFEE_SANDBOX_COORD_HOST`.
+- A validator's explicit `env` wins over an allowlisted host name in the docker
+  sandbox (it was silently replaced by the daemon's value), and a container that
+  cannot be removed fails the stop instead of releasing locks.
+- The ACP runner caps one unterminated stdout line at 8 MiB.
+- `install.sh` and `deploy/macos/install-daemon.sh` detect a running daemon by
+  capturing `launchctl print` output: `… | grep -q` returns 141 under `pipefail`,
+  which silently disabled the guard. Under sudo, `install.sh` now asks the
+  invoking user's systemd about their `--user` unit as well.
+- `npm run upgrade` cancels the drain when the shutdown is refused, and a
+  truncated drain-status reply no longer crash-loops the poller; the health probe
+  prints the endpoint it actually probed.
+
 ## [0.3.1] - 2026-11-01
 
 ### Fixed

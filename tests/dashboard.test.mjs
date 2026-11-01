@@ -72,6 +72,7 @@ function fakeCoordinator() {
   return {
     calls,
     list: () => sessions,
+    allSessions: () => sessions,
     snapshot: (id) => {
       const found = find(id);
       if (!found) throw new Error(`unknown session: ${id}`);
@@ -371,7 +372,7 @@ test("non-GET methods are rejected and unrelated paths are not handled", async (
   });
 });
 
-test("dashboard stays read-only: only list, snapshot, diff and tail are used", async () => {
+test("dashboard stays read-only: only allSessions, snapshot, diff and tail are used", async () => {
   const coord = fakeCoordinator();
   const used = new Set();
   const spy = new Proxy(coord, {
@@ -388,5 +389,5 @@ test("dashboard stays read-only: only list, snapshot, diff and tail are used", a
     await fetch(`${base}/dashboard/api/sessions/s1/diff`);
     await fetch(`${base}/dashboard/api/sessions/s1/tail`);
   });
-  assert.deepEqual([...used].sort(), ["diff", "list", "snapshot", "tail"]);
+  assert.deepEqual([...used].sort(), ["allSessions", "diff", "snapshot", "tail"]);
 });

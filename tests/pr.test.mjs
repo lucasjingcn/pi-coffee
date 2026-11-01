@@ -22,6 +22,13 @@ if (args[0] === "pr" && args[1] === "list") {
 if (args[0] === "pr" && args[1] === "create") {
   const pr = { number: 7, url: "https://example.test/pull/7", state: "OPEN", headRefOid: process.env.FAKE_GH_HEAD ?? "" };
   const labelIndex = args.indexOf("--label");
+  if (labelIndex >= 0 && process.env.FAKE_GH_LABEL_FAIL_AFTER === "1") {
+    // Real gh creates the pull request first and applies the label afterwards, so
+    // a missing label fails *after* the PR exists.
+    if (process.env.FAKE_GH_STATE) fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(pr));
+    console.error('could not add label: label not found');
+    process.exit(1);
+  }
   if (labelIndex >= 0 && process.env.FAKE_GH_LABEL_FAIL === "1") { console.error("could not add label"); process.exit(1); }
   if (process.env.FAKE_GH_STATE) fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(pr));
   console.log(pr.url);
@@ -166,6 +173,24 @@ test("merge-queue refuses a PR whose head is not the verified worker", () =>
     await assert.rejects(c.mergeViaQueue("s1"), /does not match verified worker/);
     assert.equal((await calls(process.env.FAKE_GH_LOG)).filter((argv) => argv[1] === "merge").length, 0);
     assert.ok(proof.workerSha);
+  }));
+
+test("a PR created before its label failed is adopted instead of reported as failed", () =>
+  fixture(async ({ c, log, state }) => {
+    await c.verify("s1");
+    process.env.FAKE_GH_LABEL_FAIL_AFTER = "1";
+    try {
+      const result = await c.createPr("s1");
+      assert.equal(result.created, true);
+      assert.equal(result.pr.number, 7);
+      const creates = (await calls(log)).filter((argv) => argv[0] === "pr" && argv[1] === "create");
+      assert.equal(creates.length, 1, "no blind retry into 'already exists'");
+      const edits = (await calls(log)).filter((argv) => argv[0] === "pr" && argv[1] === "edit");
+      assert.ok(edits.length >= 1, "the label is applied to the adopted PR");
+      assert.ok(edits[0].includes("--add-label"));
+    } finally {
+      delete process.env.FAKE_GH_LABEL_FAIL_AFTER;
+    }
   }));
 
 test("a missing PR label is retried without the label", () =>

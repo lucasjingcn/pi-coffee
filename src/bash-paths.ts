@@ -467,7 +467,23 @@ const DISCARD_DEVICES = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/de
 const DISCARD_DEVICE_PREFIXES = ["/dev/fd/", "/proc/self/fd/"] as const;
 
 function isDiscardDevice(raw: string): boolean {
-  return DISCARD_DEVICES.has(raw) || DISCARD_DEVICE_PREFIXES.some((prefix) => raw.startsWith(prefix));
+  if (DISCARD_DEVICES.has(raw)) return true;
+  if (!DISCARD_DEVICE_PREFIXES.some((prefix) => raw.startsWith(prefix))) return false;
+  // The prefix alone is not proof: `/dev/fd/../../../etc/passwd` starts with a
+  // descriptor directory but the kernel resolves it to a real file. Collapse the
+  // path first and require the result to stay inside the descriptor directory.
+  const segments: string[] = [];
+  for (const segment of raw.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) return false;
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  const normalized = "/" + segments.join("/");
+  return DISCARD_DEVICE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
 
@@ -491,17 +507,26 @@ function parseWriteCommand(tokens: Token[], start: number, add: Adder): number {
   let i = start;
   let last: string | undefined;
   let sawTargetDirectory = false;
+  // The destination is only known at the end of the operand list, so every exit
+  // from the loop must still record it. Returning early without this call used
+  // to drop `cp a /etc/x` entirely whenever another command followed the
+  // separator (`cp a /etc/x && npm test`), skipping both the escape check and
+  // the write claim.
+  const finish = (): number => {
+    if (!sawTargetDirectory && last !== undefined) add(last);
+    return i - 1;
+  };
 
   for (; i < tokens.length; i++) {
     const token = tokens[i];
     if (token.kind === "io") continue;
     if (token.kind === "op") {
-      if (SEPARATORS.has(token.value)) return i - 1;
+      if (SEPARATORS.has(token.value)) return finish();
       if (REDIRECT_OPS.has(token.value)) {
         i = processRedirect(tokens, i, add);
         continue;
       }
-      return i - 1;
+      return finish();
     }
 
     const value = token.value;
@@ -523,8 +548,7 @@ function parseWriteCommand(tokens: Token[], start: number, add: Adder): number {
     last = value;
   }
 
-  if (!sawTargetDirectory && last !== undefined) add(last);
-  return i - 1;
+  return finish();
 }
 
 /** Consume `touch`/`mkdir`/`rmdir` operands: each literal operand is a target. */

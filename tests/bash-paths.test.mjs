@@ -89,3 +89,37 @@ test('literal copy/move/install targets are write targets', () => {
     assert.deepEqual(bashPaths(cmd).sort(), [...expected].sort(), cmd);
   }
 });
+
+const extraCases = [
+  {
+    title: 'a destination followed by a command separator is still a write target',
+    cmd: 'cp a.txt /tmp/outside.txt && npm test',
+    paths: ['/tmp/outside.txt'],
+  },
+  {
+    title: 'mv destination survives a semicolon',
+    cmd: 'mv /tmp/x ./y; ls',
+    paths: ['./y'],
+  },
+  {
+    title: 'rsync destination survives a pipe',
+    cmd: 'rsync -a ./src/ /tmp/d | cat',
+    paths: ['/tmp/d'],
+  },
+  {
+    title: 'descriptor escape with .. is a real path, not a discard device',
+    cmd: 'echo hi > /dev/fd/../../../etc/passwd',
+    paths: ['/dev/fd/../../../etc/passwd'],
+  },
+  {
+    title: 'a plain descriptor redirect stays a discard device',
+    cmd: 'echo hi > /dev/fd/2',
+    paths: [],
+  },
+];
+
+for (const { title, cmd, paths } of extraCases) {
+  test(title, () => {
+    assert.deepEqual(bashPaths(cmd), paths);
+  });
+}
