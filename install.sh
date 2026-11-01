@@ -10,12 +10,18 @@ cd "$DIR"
 # Updating a live coordinator would interrupt its workers. Leave it untouched.
 case "$(uname -s)" in
   Darwin)
-    if launchctl print "gui/$(id -u)/com.picoffee.daemon" 2>/dev/null | grep -q 'state = running'; then
+    # Under sudo the daemon belongs to SUDO_USER's GUI domain, not root's.
+    uid="$(id -u)"
+    if [ -n "${SUDO_USER:-}" ]; then uid="$(id -u "$SUDO_USER" 2>/dev/null || printf '%s' "$uid")"; fi
+    if launchctl print "gui/$uid/com.picoffee.daemon" 2>/dev/null | grep -q 'state = running'; then
       echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
       exit 1
     fi ;;
   Linux)
-    if systemctl --user is-active --quiet pi-coffee 2>/dev/null; then
+    # Check the system unit too: `systemctl --user` cannot reach the user bus
+    # under sudo, so the user-only check silently passed during a root upgrade.
+    if systemctl is-active --quiet pi-coffee 2>/dev/null \
+      || systemctl --user is-active --quiet pi-coffee 2>/dev/null; then
       echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
       exit 1
     fi ;;

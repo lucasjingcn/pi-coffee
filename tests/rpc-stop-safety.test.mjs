@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { PiRpcClient } from '../dist/rpc-client.js';
 
-async function fixture(body, run) {
+// The escaped-descendant check reads the process table with `ps`; environments
+// that deny it cannot exercise that path.
+const psUnavailable = spawnSync('ps',['-p',String(process.pid)],{stdio:'ignore'}).status !== 0;
+
+async function fixture(body, run, {stopThrows=false}={}) {
   const dir = await mkdtemp(join(tmpdir(), 'pi-stop-'));
   const bin = join(dir, 'fixture.js');
   await writeFile(bin, `const readline=require('node:readline');
@@ -15,7 +20,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 ${body}`);
   const client = new PiRpcClient({cwd:dir, piBin:bin});
   try { await client.start(3000); await run(client, dir); }
-  finally { await client.stop(); await rm(dir, {recursive:true,force:true}); }
+  finally { try { await client.stop(); } catch (error) { if (!stopThrows) throw error; } await rm(dir, {recursive:true,force:true}); }
 }
 
 test('stop waits for graceful exit, including concurrent calls', async () => {
@@ -38,6 +43,23 @@ process.on('SIGTERM',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1
     assert.equal(c.hasExited,true);
     assert.throws(()=>process.kill(tool,0),{code:'ESRCH'});
   });
+});
+
+test('shutdown stays unconfirmed when SIGKILL leaves detached tool descendants', {skip:process.platform==='win32' || psUnavailable}, async () => {
+  await fixture(`const {spawn}=require('node:child_process'); const fs=require('node:fs');
+const tool=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore',detached:true});
+fs.writeFileSync('tool.pid',String(tool.pid));
+process.on('SIGTERM',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1000);`, async (c,dir) => {
+    const tool=Number(await readFile(join(dir,'tool.pid'),'utf8'));
+    try {
+      await assert.rejects(c.stop(), /descendant process\(es\) alive; retain locks/);
+      // The rejection is the contract: shutdown is not reported confirmed. The
+      // root may still be settling, so only require that it is no longer running.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      try { process.kill(-tool,'SIGKILL'); } catch {}
+    }
+  }, {stopThrows:true});
 });
 
 test('terminal pipe error publishes exit only after safe shutdown', async () => {

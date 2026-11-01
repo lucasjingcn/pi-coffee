@@ -130,11 +130,18 @@ export class IntegrationGate {
       if (existsSync(resolve(candidate, await git(candidate, ["rev-parse", "--git-path", "MERGE_HEAD"])))) {
         await git(candidate, ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-m", "pi-coffee verification candidate"]);
       }
+      // The acceptance command must not change the tree it claims to validate. A
+      // clean `git status` is not proof: the command can commit its own mutation.
+      const sealedHead = await resolveRef(candidate, "HEAD");
       const result = await execute(candidate, meta.acceptance.command);
+      const candidateHeadAfter = await resolveRef(candidate, "HEAD");
+      const candidateTreeAfter = await git(candidate, ["rev-parse", "HEAD^{tree}"]);
+      const historyIntact = candidateHeadAfter === sealedHead && candidateTreeAfter === candidateTree;
       const hashes = await acceptanceHashes(candidate, meta.acceptance.files);
       const clean = await isWorktreeClean(candidate);
       const intact = JSON.stringify(hashes) === JSON.stringify(meta.acceptance.hashes ?? {});
       const failure = result.timedOut ? "acceptance command timed out" : result.code !== 0 ? "acceptance command failed"
+        : !historyIntact ? "acceptance command changed the candidate commit or tree"
         : !clean ? "acceptance command modified the candidate worktree" : !intact ? "acceptance files changed in candidate" : undefined;
       const passed = failure === undefined;
       if (workerSha !== await resolveRef(meta.worktree, "HEAD") || targetSha !== await assertTarget(meta.repo, branch)

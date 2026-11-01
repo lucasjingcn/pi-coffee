@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { PiEvent, PiSessionState, PiSessionStats, RpcResponse, UiRequest, UiResponse } from "./types.js";
+import { parseDescendantPids, parseSurvivingPids } from "./process-tree.js";
 
 export interface PiRpcClientOptions {
   cwd: string;
@@ -22,6 +23,45 @@ interface PendingCommand {
   command: string;
   resolve: (r: RpcResponse) => void;
   reject: (e: Error) => void;
+}
+
+/** Descendant PIDs of `rootPid` from the process table; null when it is unreadable. */
+function descendantPids(rootPid: number): Promise<number[] | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile("ps", ["-Ao", "pid=,ppid="], { timeout: 3000, windowsHide: true }, (err, stdout) => {
+        if (err) return resolve(null);
+        resolve(parseDescendantPids(stdout, rootPid));
+      });
+    } catch {
+      // A denied or missing `ps` throws synchronously; no claim is possible.
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Tracked PIDs that still run (zombies are already dead) within `waitMs`.
+ * Null means the process table could not be read, so no claim is possible.
+ */
+function survivingDescendants(tracked: number[], waitMs: number): Promise<number[] | null> {
+  const deadline = Date.now() + waitMs;
+  return new Promise((resolve) => {
+    const tick = (): void => {
+      try {
+        execFile("ps", ["-Ao", "pid=,stat="], { timeout: 3000, windowsHide: true }, (err, stdout) => {
+          if (err) return resolve(null);
+          const survivors = parseSurvivingPids(stdout, tracked);
+          if (survivors.length === 0) return resolve([]);
+          if (Date.now() >= deadline) return resolve(survivors);
+          setTimeout(tick, 50);
+        });
+      } catch {
+        resolve(null);
+      }
+    };
+    tick();
+  });
 }
 
 /**
@@ -269,11 +309,24 @@ export class PiRpcClient extends EventEmitter {
       return !alive() && (proc.exitCode !== null || proc.signalCode !== null);
     };
     try { proc.stdin.end(); } catch { /* termination below still applies */ }
+    let escalated = false;
+    let tracked: number[] | null = null;
     if (!await wait(1000)) {
+      // pi runs its own detached-tool cleanup on SIGTERM. If it has to be killed,
+      // the tools it put in their own process group survive the group kill, so
+      // record the descendants first and verify them afterwards.
+      tracked = await descendantPids(pid);
       signal("SIGTERM");
       if (!await wait(1000)) {
         signal("SIGKILL");
+        escalated = true;
         if (!await wait(3000)) throw new Error("pi rpc shutdown could not confirm worker and tool process exit; retain locks");
+      }
+    }
+    if (escalated && tracked !== null && tracked.length > 0) {
+      const survivors = await survivingDescendants(tracked, 1500);
+      if (survivors !== null && survivors.length > 0) {
+        throw new Error(`pi rpc shutdown confirmed the worker group but left ${survivors.length} descendant process(es) alive; retain locks`);
       }
     }
     this.shutdownConfirmed = true;

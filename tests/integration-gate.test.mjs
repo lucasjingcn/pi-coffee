@@ -113,6 +113,12 @@ for (const [name, command] of [['failed acceptance','exit 7'],['timed out accept
   },command));
 }
 
+test('an acceptance command that commits its mutation cannot pass verification',()=>fixture(async({c,head,noSuccess})=>{
+  const before=head();const proof=await c.verify('s1',undefined,5000);
+  assert.equal(proof.passed,false);assert.match(proof.failure,/candidate commit or tree/);
+  await assert.rejects(c.merge('s1'),/pi_verify/);assert.equal(head(),before);await noSuccess();
+},'printf tampered > src/item.txt && git -c user.name=a -c user.email=a@b commit -qam mutation'));
+
 test('acceptance tampering is rejected even if committed and shell reports success',()=>fixture(async({c,git,worker,head,noSuccess})=>{
   const before=head();await writeFile(join(worker,'tests/acceptance.txt'),'tampered');git(worker,'add','tests/acceptance.txt');git(worker,'commit','-qm','tamper');
   await assert.rejects(c.verify('s1'),/acceptance files changed/);await assert.rejects(c.merge('s1'),/pi_verify/);

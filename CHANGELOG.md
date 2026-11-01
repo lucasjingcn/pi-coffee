@@ -4,6 +4,46 @@ All notable changes to pi-coffee are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The Docker runtime image now installs `procps`: the worker-ownership probe uses
+  `ps`, so `pi_spawn`/`pi_resume` failed in the container (which only installed
+  bash, git and ripgrep). `npm run doctor` now checks for `ps` too.
+- Verification rejects an acceptance command that commits changes to the
+  candidate worktree. A clean `git status` used to hide the mutation, so the
+  recorded "passed" evidence described a different tree than the one merged.
+- Validation-change detection now covers `package.json`, lockfiles, `Makefile`,
+  Docker/Compose files and `.github/workflows`/`.github/actions`, so rewriting
+  the validation definition requires `pi_review` instead of silently expanding
+  what the acceptance command runs.
+- The 48h session-directory sweep no longer deletes the transcript of a stopped
+  but unfinished session that still has a worktree or a live worker branch; the
+  transcript is what `pi_resume` needs, and `reclaimStale` already owns the
+  beyond-recovery case.
+- Mutating `/internal/*` endpoints (`claim`, `release`, `send`, `board/post`,
+  `drain`, `shutdown`, …) require POST/PATCH; a GET used to execute side effects,
+  so any local page or process could stop the daemon.
+- `pi_message` no longer reports a message as delivered before the injection
+  attempt resolves.
+- Installing the Linux service restarts the unit after `enable --now`, and the
+  install guard checks the system unit as well as the user unit (the user check
+  silently passed under sudo). The macOS installer refuses to `bootout` a running
+  daemon unless `--force` is given.
+- Worker write locks are revalidated with the daemon on every `edit`/`write`/
+  `bash`, and `coord_release` clears overlapping cached paths, so an operator
+  `pi_release` or a parent-directory release can no longer leave an edit
+  unclaimed.
+- A shutdown that needed SIGKILL now verifies that no recorded descendant
+  process survived (for example pi's detached bash tools) and retains the locks
+  instead of reporting a confirmed stop when one did.
+- `inspect.mjs` applies the daemon's settings file, so it no longer inspects the
+  wrong data directory while claiming to match the daemon.
+- `npm test` now passes `--test-timeout` and `--test-force-exit`, and the two
+  worker-ownership tests skip when `ps` is unavailable instead of leaking a
+  detached fixture child and hanging the runner.
+
 ## [0.2.0] - 2026-10-31
 
 ### Added

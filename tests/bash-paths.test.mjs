@@ -49,6 +49,11 @@ const cases = [
     paths: [],
   },
   {
+    title: 'self-descriptor redirects are not write targets',
+    cmd: 'ls 2> /dev/stderr; echo hi > /dev/stdout; echo x > /dev/fd/2; echo y > /proc/self/fd/2; echo z > /dev/tty',
+    paths: [],
+  },
+  {
     title: 'quoted JS program is not scanned as shell',
     cmd: "node -e 'const task = () => new Promise(resolve => setTimeout(resolve, 5)); task();'",
     paths: [],

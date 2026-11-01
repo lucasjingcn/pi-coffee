@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/inspect.mjs", import.meta.url));
@@ -262,6 +262,25 @@ test("retired stopped sessions with a reclamation record are folded, not reporte
     const clean = runInspect(["--data-dir", dataDir]);
     assert.equal(clean.status, 0, "only-retired ledger reconciles");
     assert.match(clean.stdout, /findings: none/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inspect applies the settings file the daemon launchers use", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-inspect-env-"));
+  try {
+    await makeDataDir(root);
+    const fromEnvFile = join(root, "from-env-file");
+    await mkdir(fromEnvFile, { recursive: true });
+    const envFile = join(root, "env");
+    await writeFile(envFile, `PI_COFFEE_DATA_DIR=${fromEnvFile}\n`);
+
+    // No --data-dir and no PI_COFFEE_DATA_DIR in the process env: only the
+    // settings file can decide, exactly like scripts/start.mjs for the daemon.
+    const result = runInspect(["--json"], { PI_COFFEE_ENV_FILE: envFile });
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.summary.dataDir, resolve(fromEnvFile));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -22,9 +22,32 @@ const VALIDATION_FILE_NAMES = new Set(["conftest.py", "pytest.ini", "tox.ini"]);
 /** Lowercased substrings that mark a file name as validation code. */
 const VALIDATION_FILE_SUBSTRINGS = ["_test.", ".test.", ".spec."] as const;
 
+/**
+ * Build, dependency, container and CI definitions. Editing one changes how the
+ * acceptance command executes, so it needs review even when it is not a test
+ * file by name.
+ */
+const VALIDATION_CONFIG_NAMES = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  "makefile",
+  "gnumakefile",
+  "dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+]);
+
+/** Lowercased path prefixes that hold CI definitions. */
+const VALIDATION_CONFIG_PREFIXES = [".github/workflows/", ".github/actions/"] as const;
+
 function isValidationName(name: string): boolean {
   const lower = name.toLowerCase();
   if (VALIDATION_FILE_NAMES.has(lower)) return true;
+  if (VALIDATION_CONFIG_NAMES.has(lower)) return true;
   if (VALIDATION_FILE_PREFIXES.some((prefix) => lower.startsWith(prefix))) return true;
   return VALIDATION_FILE_SUBSTRINGS.some((part) => lower.includes(part));
 }
@@ -32,6 +55,8 @@ function isValidationName(name: string): boolean {
 /** A path is validation evidence if it is custom-declared or matches conventional test names. */
 function isValidationPath(path: string, customPaths: readonly string[]): boolean {
   if (customPaths.some((custom) => path === custom || path.startsWith(`${custom}/`))) return true;
+  const lowerPath = path.toLowerCase();
+  if (VALIDATION_CONFIG_PREFIXES.some((prefix) => lowerPath.startsWith(prefix))) return true;
   const segments = path.split("/");
   const name = segments.pop() ?? "";
   if (segments.some((segment) => VALIDATION_DIRECTORIES.has(segment.toLowerCase()))) return true;
