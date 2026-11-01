@@ -587,6 +587,12 @@ export function createDashboardHandler(
       return true;
     }
 
+    // HEAD is a health-probe-friendly alias for GET: same status/headers, no body.
+    if (req.method === "HEAD") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end();
+      return true;
+    }
     if (req.method !== "GET") {
       sendJson(res, 405, { error: "method not allowed" }, { allow: "GET" });
       return true;

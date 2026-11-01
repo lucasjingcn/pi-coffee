@@ -133,3 +133,23 @@ test('mutating internal endpoints reject GET so a local page cannot trigger side
   assert.equal(health.ok, true, 'daemon is still running');
   assert.equal(health.draining, false, 'a GET drain must not start draining');
 }));
+
+test('oversized bodies get 413 instead of a reset socket', {timeout: 20000}, async () => daemon(async base => {
+  const response = await fetch(base + '/mcp', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: Buffer.alloc(33 * 1024 * 1024, 97),
+  });
+  assert.equal(response.status, 413, 'the promised error must reach the client');
+  const body = await response.json();
+  assert.match(body.error.message, /exceeds 32 MiB/);
+  assert.equal((await fetch(base + '/internal/health')).status, 200, 'daemon stays alive');
+}));
+
+test('HEAD works for health probes on /metrics and /dashboard', {timeout: 10000}, async () => daemon(async base => {
+  for (const path of ['/metrics', '/dashboard']) {
+    const response = await fetch(base + path, {method: 'HEAD'});
+    assert.equal(response.status, 200, path);
+    assert.ok(response.headers.get('content-type'), `${path} keeps its content type`);
+    assert.equal(await response.text(), '', `${path} must not return a body`);
+  }
+}));

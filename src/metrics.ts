@@ -288,7 +288,7 @@ export async function buildMetricsSnapshot(
     maxSessions: gauge(coord.config.maxSessions),
     draining: draining === true,
     sessionsTotal,
-    spawnsTotal: counter(sessions.length),
+    spawnsTotal: counter(typeof coord.spawnsSinceStart === "function" ? coord.spawnsSinceStart() : sessions.length),
     verificationsTotal: counter(verificationsTotal),
     mergesTotal: counter(mergesTotal),
     costUsdTotal,

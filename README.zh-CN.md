@@ -532,8 +532,11 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_BASE_REF` | `HEAD` | 新 worktree 的基点。 |
 | `PI_COFFEE_AUTO_CLEAN` | `1` | 自动移除已完成 worker 的 worktree（保留分支）。 |
 | `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | 已完成且空闲的 worker 在被清理前保留多少分钟。 |
+| `PI_COFFEE_WORKTREE_FINAL_TTL_MIN` | `10080` | 未收尾/已放弃但已停止的会话，其干净 worktree 在最终回收前保留多少分钟。`0` 关闭；分支始终保留。 |
+| `PI_COFFEE_WORKER_WARN_MS` / `PI_COFFEE_WORKER_STALL_MS` / `PI_COFFEE_WORKER_IDLE_MS` | `60000` / `600000` / `1800000` | 看门狗阈值：无活动提醒、卡住、空闲。 |
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | 显式 `pi_stop` 的 `delete_branch` 默认值。`pi_gc` 不看这个。 |
 | `PI_COFFEE_WORKER_PLUGINS` | *(空)* | worker 可继承的全局插件白名单（逗号分隔 glob）：npm/git 包、外部扩展条目、MCP 服务器名。留空表示一律不继承；`*` 恢复全部继承。pi 自带的 `builtin:` 扩展始终保留。 |
+| `PI_COFFEE_EXTENSION` | 内置 `extensions/pi-coordinator.ts` | 加载到每个 worker 的协调扩展。 |
 | `PI_COFFEE_TOKEN` | *(空)* | `/mcp` 和 `/internal/*` 的可选共享密钥。 |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | daemon 状态：锁、信箱、黑板、会话元数据。 |
 | `PI_COFFEE_LOG_MAX_MB` | `5` | 下次启动时，超过该大小的 daemon 日志会被归档。`0` 关闭轮转。 |

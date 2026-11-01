@@ -70,7 +70,7 @@ test('container health authenticates at the configured port and fails unauthoriz
   assert.match(docker, /CMD node scripts\/container-health\.mjs/);
   // `ps` proves worker process ownership; the runtime image must ship it.
   assert.match(docker, /apt-get install -y --no-install-recommends [^\n]*procps/);
-  assert.match(compose, /127\.0\.0\.1:\$\{PI_COFFEE_PORT:-8787\}:\$\{PI_COFFEE_PORT:-8787\}/);
+  assert.match(compose, /127\.0\.0\.1:\$\{PI_COFFEE_HOST_PORT:-8787\}:8787/);
   assert.match(compose, /scripts\/container-health\.mjs/);
 }));
 

@@ -293,6 +293,8 @@ export class Coordinator {
   private pendingRecovery = new Set<string>();
   /** Drain mode: new spawns/resumes are rejected until it is cancelled. */
   private draining = false;
+  /** Successful worker creations since this daemon started (Prometheus counter). */
+  private spawnCount = 0;
   private drainStartedAt: number | undefined;
   private drainReason: string | undefined;
 
@@ -1399,6 +1401,7 @@ export class Coordinator {
       await this.flush();
       if (meta.status === "stopped") throw new Error(`session ${id} stopped during startup`);
       meta.status = "idle";
+      this.spawnCount += 1;
     } catch (e) {
       if (meta.status !== "stopped") {
         meta.status = "error";
@@ -1855,6 +1858,11 @@ export class Coordinator {
   /** Public: number of active workers (for the parallelism advisory). */
   activeWorkers(): number {
     return this.activeCount();
+  }
+
+  /** Public: successful spawns since this daemon started (Prometheus counter). */
+  spawnsSinceStart(): number {
+    return this.spawnCount;
   }
 
   /** Claim a concurrency slot synchronously; throws when the cap (including in-flight spawns) is hit. */
