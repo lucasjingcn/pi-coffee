@@ -24,6 +24,14 @@ export default function (pi: ExtensionAPI) {
   const token = process.env.PI_COORD_TOKEN || "";
 
   const held = new Set<string>();
+  /** Repo-relative lock keys: strip "./" and trailing separators like the daemon does. */
+  const lockPathKey = (path: string): string => path.replace(/^\.\//, "").replace(/\/+$/, "");
+  /** Daemon overlap semantics: equal, or one path is an ancestor of the other. */
+  const lockPathsOverlap = (a: string, b: string): boolean => {
+    const left = lockPathKey(a);
+    const right = lockPathKey(b);
+    return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+  };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let pollInFlight = false;
 
@@ -144,7 +152,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       const res = await call("/internal/claim", { sessionId, paths: params.paths, mode: params.mode ?? "rw" });
-      if (res.ok) for (const p of params.paths) held.add(p);
+      if (res.ok) for (const p of params.paths) held.add(lockPathKey(p));
       return ok(JSON.stringify(res));
     },
   });
@@ -156,8 +164,15 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({ paths: Type.Optional(Type.Array(Type.String())) }),
     async execute(_id, params) {
       const res = await call("/internal/release", { sessionId, paths: params.paths });
-      if (params.paths) for (const p of params.paths) held.delete(p);
-      else held.clear();
+      // The daemon releases every lock that overlaps a released path; mirror that
+      // here so a later edit cannot skip claiming because of a stale cache entry.
+      if (params.paths) {
+        for (const released of params.paths) {
+          for (const cached of [...held]) {
+            if (lockPathsOverlap(cached, released)) held.delete(cached);
+          }
+        }
+      } else held.clear();
       return ok(JSON.stringify(res));
     },
   });
@@ -228,15 +243,18 @@ export default function (pi: ExtensionAPI) {
   // Lock enforcement
   // -------------------------------------------------------------------------
 
-  /** Claim any not-yet-held paths, returning the conflicting holders on failure. */
+  /** Claim the paths with the daemon before every write. */
   async function ensureClaims(rels: string[]): Promise<{ blocked?: string }> {
-    const need = rels.filter((r) => !held.has(r));
-    if (need.length === 0) return {};
+    if (rels.length === 0) return {};
 
-    const res = await call("/internal/claim", { sessionId, paths: need, mode: "rw" });
+    // Always revalidate with the daemon instead of trusting the in-process cache:
+    // an operator `pi_release`, a release that overlapped this path, or a daemon
+    // restart can invalidate `held`, and a stale entry would let an edit write
+    // without holding the lock.
+    const res = await call("/internal/claim", { sessionId, paths: rels, mode: "rw" });
     if (typeof res?.ok !== "boolean") throw new Error("invalid file claim response");
     if (res.ok === true) {
-      for (const r of need) held.add(r);
+      for (const r of rels) held.add(lockPathKey(r));
       return {};
     }
 

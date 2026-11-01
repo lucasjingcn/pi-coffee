@@ -11,9 +11,10 @@ RUN npm run build
 # --- runtime stage ---
 FROM node:22-bookworm-slim AS runtime
 
-# pi needs bash and git; ripgrep backs its search tool.
+# pi needs bash and git; ripgrep backs its search tool. procps provides `ps`,
+# which the daemon uses to prove worker process ownership after a restart.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
+  && apt-get install -y --no-install-recommends bash ca-certificates git procps ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 # Bundle pi so users do not install it separately.

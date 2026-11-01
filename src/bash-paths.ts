@@ -456,11 +456,19 @@ function parseSed(tokens: Token[], start: number, add: Adder): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Device sinks that discard whatever is written to them. Redirecting into
- * `/dev/null` never creates or modifies a file, so it is not a write target
- * (and must not be treated as one, or `2>/dev/null` blocks ordinary reads).
+ * Device sinks that discard written bytes or refer back to the process's own
+ * file descriptors. Redirecting into them never creates or modifies a file, so
+ * they are not write targets (`2>/dev/null`, `2>/dev/stderr`, `>/dev/fd/2`
+ * must not be treated as escaping writes).
  */
-const DISCARD_DEVICES = new Set(["/dev/null"]);
+const DISCARD_DEVICES = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"]);
+
+/** Per-process descriptor directories: every target under them is a self-reference. */
+const DISCARD_DEVICE_PREFIXES = ["/dev/fd/", "/proc/self/fd/"] as const;
+
+function isDiscardDevice(raw: string): boolean {
+  return DISCARD_DEVICES.has(raw) || DISCARD_DEVICE_PREFIXES.some((prefix) => raw.startsWith(prefix));
+}
 
 /**
  * Extract repo paths a bash command is expected to write. Only literal targets
@@ -473,7 +481,7 @@ export function bashPaths(cmd: string): string[] {
   const add: Adder = (raw) => {
     if (!raw) return;
     if (raw === "-" || raw.startsWith("-") || raw.startsWith("&")) return;
-    if (DISCARD_DEVICES.has(raw)) return;
+    if (isDiscardDevice(raw)) return;
     if (/[$`*?{}[\]~]/.test(raw)) return; // dynamic / glob / expansion
     out.add(raw);
   };

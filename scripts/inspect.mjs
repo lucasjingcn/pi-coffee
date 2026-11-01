@@ -29,13 +29,20 @@
  * mutation. Directory sizes are a best-effort recursive sum; symlinks are not
  * followed.
  *
- * dataDir resolution matches the daemon (src/config.ts): --data-dir flag, then
- * the PI_COFFEE_DATA_DIR environment variable, then ~/.pi-coffee. The worktree
+ * dataDir resolution matches the daemon launchers: --data-dir flag, then the
+ * settings file named by PI_COFFEE_ENV_FILE (default ~/.pi-coffee/env, applied
+ * before the process environment like scripts/start.mjs), then the
+ * PI_COFFEE_DATA_DIR environment variable, then ~/.pi-coffee. The worktree
  * root follows PI_COFFEE_WORKSPACE_ROOT, then <dataDir>/worktrees.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+
+// Apply the same settings file the daemon launchers use; without this, a daemon
+// started from a generated env file was inspected against the wrong dataDir.
+loadEnvFile(envFilePath(), { override: true });
 
 /** Mirrors SESSION_DIR_TTL_MS in src/manager.ts (48 hours). */
 const SESSION_DIR_TTL_MS = 48 * 60 * 60 * 1000;

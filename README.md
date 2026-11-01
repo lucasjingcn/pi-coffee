@@ -371,8 +371,9 @@ repositories retain their own rules.
    `PI_COFFEE_ALLOW_PUSH=1`; the merge-queue path does not write an integration record, so a later
    verification of the merged commit is still required before a success outcome.
 
-Candidate review: declare hard requirements in `spec.requirements: [{id,text}]` and project-specific
-validation definitions in `spec.validation_paths` (for example `package.json` or CI scripts).
+Candidate review: declare hard requirements in `spec.requirements: [{id,text}]`. Built-in validation
+detection covers conventional test paths, `package.json`, lockfiles, `Makefile`, Docker/Compose files,
+and `.github/workflows` or `.github/actions`; list anything else in `spec.validation_paths`.
 After `pi_verify`, if requirements were declared or `existingValidationChanges` is nonempty, call
 `pi_review` with its exact `id` as `verification_id`, one `{id,met:true,evidence}` per requirement,
 and one `{path,approved:true,reason}` in `test_changes` per modified existing validation file.
@@ -591,7 +592,8 @@ sweeper only remove:
 
 - the **worktree** of a finished worker after `PI_COFFEE_WORKTREE_TTL_MIN`, or of a clean unfinished
   worker after `PI_COFFEE_WORKTREE_FINAL_TTL_MIN` (default 7 days); dirty trees are kept;
-- the **transcript** (`PI_COFFEE_DATA_DIR/sessions/<id>`) of a stopped *and* finished session;
+- the **transcript** (`PI_COFFEE_DATA_DIR/sessions/<id>`) of a stopped *and* finished session, or of an
+  unfinished session whose work is beyond recovery (48h retention lapsed, worktree and worker branch gone);
 - **branches** only when asked for: `pi_stop` with `delete_branch` (or `PI_COFFEE_DELETE_BRANCHES=1`),
   and `pi_gc` for tips it proves merged into the target.
 

@@ -58,12 +58,26 @@ if [ "$1" = "-u" ]; then
 fi
 exit 1
 `);
-  for (const name of ["systemctl", "launchctl", "sleep"]) {
-    write(name, `#!/bin/sh
-printf '%s %s\\n' "${name}" "$*" >> "$FAKE_CMD_LOG"
+  write("sleep", `#!/bin/sh
+printf '%s %s\\n' "sleep" "$*" >> "$FAKE_CMD_LOG"
 exit 0
 `);
-  }
+  // FAKE_SYSTEMCTL_ACTIVE=1 makes `is-active` succeed, like a running service.
+  write("systemctl", `#!/bin/sh
+printf '%s %s\\n' "systemctl" "$*" >> "$FAKE_CMD_LOG"
+if [ "\${FAKE_SYSTEMCTL_ACTIVE:-0}" = "1" ]; then
+  case "$*" in *is-active*) exit 0 ;; esac
+fi
+exit 0
+`);
+  // FAKE_LAUNCHCTL_RUNNING=1 makes `print` report a live LaunchAgent.
+  write("launchctl", `#!/bin/sh
+printf '%s %s\\n' "launchctl" "$*" >> "$FAKE_CMD_LOG"
+if [ "$1" = "print" ] && [ "\${FAKE_LAUNCHCTL_RUNNING:-0}" = "1" ]; then
+  printf '%s\\n' "state = running"
+fi
+exit 0
+`);
   write("node", `#!/bin/sh
 exit 0
 `);
@@ -335,6 +349,7 @@ test("systemd unit preserves special paths without specifier substitution", (t) 
   const commands = readFileSync(logPath, "utf8");
   assert.match(commands, /^systemctl --user daemon-reload$/m);
   assert.match(commands, /^systemctl --user enable --now pi-coffee$/m);
+  assert.match(commands, /^systemctl --user restart pi-coffee$/m, "an upgrade must restart the active unit");
   assert.doesNotMatch(commands, /^systemctl (daemon-reload|enable)/m);
 
   // Existing default: without PI_COFFEE_ENV_FILE no Environment line is added.
@@ -342,6 +357,29 @@ test("systemd unit preserves special paths without specifier substitution", (t) 
   const defaultUnit = readFileSync(unitPath, "utf8");
   assert.ok(!defaultUnit.includes("PI_COFFEE_ENV_FILE"), "env file must be omitted when unset");
   assert.doesNotMatch(defaultUnit, /(?<!%)%(?!%)/);
+});
+
+test("install-daemon.sh refuses to interrupt a running daemon unless forced", (t) => {
+  const root = scratchRoot("launchd-guard");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const home = join(root, "home");
+  const binDir = join(project, "fake-bin");
+  const logPath = join(root, "commands.log");
+  seedTree(project, ["deploy/macos/install-daemon.sh"]);
+  writeFakeCommands(binDir);
+  const env = { ...buildEnv({ home, binDir, logPath, envFile: "" }), FAKE_LAUNCHCTL_RUNNING: "1" };
+  const script = join(project, "deploy/macos/install-daemon.sh");
+
+  const guard = spawnSync(bash, [script], { cwd: project, env, encoding: "utf8" });
+  assert.notEqual(guard.status, 0, "a running daemon must block the installer");
+  assert.match(guard.stderr, /daemon is running/);
+  assert.doesNotMatch(readFileSync(logPath, "utf8"), /^launchctl bootout/m, "no bootout while blocked");
+
+  // --force is the documented escape hatch for an operator who means it.
+  const forced = spawnSync(bash, [script, "--force"], { cwd: project, env, encoding: "utf8" });
+  assert.equal(forced.status, 0, `forced install failed\nstdout:\n${forced.stdout}\nstderr:\n${forced.stderr}`);
+  assert.match(readFileSync(logPath, "utf8"), /^launchctl bootout/m);
 });
 
 test("launchd plist is valid XML and decodes to the original special paths", (t) => {

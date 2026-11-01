@@ -141,6 +141,29 @@ test("recognizes conventional validation file names case-insensitively", async (
   });
 });
 
+test("build, dependency, container and CI definitions are validation changes", async () => {
+  await fixture(async ({ dir, write, commit }) => {
+    const matched = [
+      "package.json",
+      "package-lock.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      "Makefile",
+      "Dockerfile",
+      "docker-compose.yml",
+      ".github/workflows/ci.yml",
+      ".github/actions/setup/action.yml",
+    ];
+    const ignored = ["src/app.ts", "docs/guide.md", ".github/ISSUE_TEMPLATE/bug.md"];
+    for (const path of [...matched, ...ignored]) await write(path, "base\n");
+    const base = commit("base");
+    for (const path of [...matched, ...ignored]) await write(path, "base\nchanged\n");
+    const worker = commit("worker");
+
+    assert.deepEqual(await existingValidationChanges(dir, base, worker), [...matched].sort());
+  });
+});
+
 test("custom validation paths match exactly and as ancestors after normalization", async () => {
   await fixture(async ({ dir, write, commit }) => {
     const paths = [

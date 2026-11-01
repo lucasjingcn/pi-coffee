@@ -514,11 +514,14 @@ export class Coordinator {
   /**
    * Delete transcript directories of stopped sessions past the retention TTL.
    *
-   * Eligibility requires the session to be stopped: active and not-yet-stopped
-   * workers are never touched. The reference time is the later of the recorded
-   * last activity and the directory mtime, so a worker that just stopped after a
-   * long run is not mistaken for an abandoned one. Directories with no state
-   * entry are left alone: nothing here knows whether they are still wanted.
+   * Eligibility requires the session to be stopped and beyond recovery
+   * (`dead()`): its worktree is gone and either it already has an outcome or its
+   * worker branch is gone. A stopped-but-unfinished session with a live branch or
+   * an existing worktree is never reclaimed here, because its transcript is what
+   * `pi_resume` still needs. The reference time is the later of the recorded last
+   * activity and the directory mtime, so a worker that just stopped after a long
+   * run is not mistaken for an abandoned one. Directories with no state entry are
+   * left alone: nothing here knows whether they are still wanted.
    */
   private async sweepSessionDirs(now = Date.now()): Promise<number> {
     const sessionsRoot = join(this.config.dataDir, "sessions");
@@ -542,6 +545,7 @@ export class Coordinator {
         continue;
       }
       if (now - Math.max(meta.lastActivity ?? 0, mtimeMs) <= SESSION_DIR_TTL_MS) continue;
+      if (!(await this.dead(meta))) continue;
       try {
         await rm(dir, { recursive: true, force: true });
       } catch {

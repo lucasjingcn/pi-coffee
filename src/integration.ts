@@ -199,6 +199,7 @@ export class IntegrationGate {
       if (existsSync(resolve(candidate, await git(candidate, ["rev-parse", "--git-path", "MERGE_HEAD"])))) {
         await git(candidate, ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-m", "pi-coffee verification candidate"]);
       }
+      const sealedHead = await resolveRef(candidate, "HEAD");
       const verificationStartedAt = Date.now();
       const configuredBudget = this.options.verifyTimeoutMs ?? 900_000;
       const verifyBudgetMs = budgetMs !== undefined ? Math.min(configuredBudget, Math.max(1, budgetMs)) : configuredBudget;
@@ -216,6 +217,9 @@ export class IntegrationGate {
         runs.push({ id: validator.id, required: validator.required, command: validator.command,
           ...runResult, passed: !runResult.timedOut && runResult.code === 0 });
       }
+      const candidateHeadAfter = await resolveRef(candidate, "HEAD");
+      const candidateTreeAfter = await git(candidate, ["rev-parse", "HEAD^{tree}"]);
+      const historyIntact = candidateHeadAfter === sealedHead && candidateTreeAfter === candidateTree;
       const acceptanceFiles = meta.acceptance?.files ?? [];
       const hashes = await acceptanceHashes(candidate, acceptanceFiles);
       const clean = await isCandidateClean(candidate, validators);
@@ -226,6 +230,7 @@ export class IntegrationGate {
         ? (legacySingle
             ? `acceptance command ${requiredFailure.timedOut ? "timed out" : "failed"}`
             : `validator ${requiredFailure.id} ${requiredFailure.timedOut ? "timed out" : "failed"}`)
+        : !historyIntact ? (legacySingle ? "acceptance command changed the candidate commit or tree" : "verification changed the candidate commit or tree")
         : !clean ? (legacySingle ? "acceptance command modified the candidate worktree" : "verification modified the candidate worktree")
         : !intact ? "acceptance files changed in candidate" : undefined;
       const passed = failure === undefined;
