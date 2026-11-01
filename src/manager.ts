@@ -23,7 +23,7 @@ import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
 import { AuditLog } from "./audit.js";
 import { applySecretPolicy } from "./secrets.js";
 import { evidenceDir, listEvidenceBundles, pruneEvidence, readEvidenceManifest, verifyEvidenceBundle } from "./evidence.js";
-import { DockerSandbox } from "./sandbox.js";
+import { DockerSandbox, WORKER_EXTENSION, WORKER_SESSION_DIR, buildWorkerDockerPrefix } from "./sandbox.js";
 import {
   commitAll,
   createWorktree,
@@ -1475,6 +1475,18 @@ export class Coordinator {
 
     const workerToken = randomBytes(32).toString("base64url");
     const workerAgentDir = join(this.config.dataDir, "sessions", id, "agent");
+    const sessionDirHost = join(this.config.dataDir, "sessions", id);
+    const sandboxPrefix = this.sandbox ? buildWorkerDockerPrefix({
+      sessionId: id,
+      worktree: wt.dir,
+      sessionDir: sessionDirHost,
+      extensionPath: this.config.extensionPath,
+      image: this.config.sandboxImage,
+      network: this.config.sandboxNetwork,
+      envAllow: this.config.sandboxEnvAllow,
+      port: this.config.port,
+      dockerBin: this.config.dockerBin,
+    }) : undefined;
     const client = new PiRpcClient({
       cwd: wt.dir,
       piBin: this.config.piBin,
@@ -1482,11 +1494,14 @@ export class Coordinator {
       model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
       name,
-      sessionDir: join(this.config.dataDir, "sessions", id),
-      extensionPath: this.config.extensionPath,
+      sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDirHost,
+      extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
+      ...(sandboxPrefix ? { spawnPrefix: sandboxPrefix } : {}),
       env: {
-        PI_CODING_AGENT_DIR: workerAgentDir,
-        PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
+        PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : workerAgentDir,
+        PI_COORD_URL: this.sandbox
+          ? `http://host.docker.internal:${this.config.port}`
+          : `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
         PI_COORD_TOKEN: workerToken,
       },
@@ -1523,8 +1538,10 @@ export class Coordinator {
         meta.error = String(e);
       }
       // A failed startup must not leak the child process or any reservations.
-      try { await client.stop(); }
-      catch { this.publishHandoff(rt, "shutdown_failed", false); throw new Error("worker startup failed and shutdown is unconfirmed; locks retained"); }
+      try {
+        await client.stop();
+        if (this.sandbox) await this.sandbox.removeWorker(id);
+      } catch { this.publishHandoff(rt, "shutdown_failed", false); throw new Error("worker startup failed and shutdown is unconfirmed; locks retained"); }
       meta.shutdownUnconfirmed = false;
       this.workerTokens.delete(workerToken);
       this.releaseRuntimeReservations(rt);
@@ -1694,6 +1711,20 @@ export class Coordinator {
     meta.provider = provider;
     meta.model = model;
     meta.thinking = thinking;
+    // A crash may have left the previous container behind: clear it before the
+    // deterministic --name can be reused. Missing containers are ignored.
+    if (this.sandbox) await this.sandbox.removeWorker(id);
+    const resumeSandboxPrefix = this.sandbox ? buildWorkerDockerPrefix({
+      sessionId: id,
+      worktree: meta.worktree,
+      sessionDir,
+      extensionPath: this.config.extensionPath,
+      image: this.config.sandboxImage,
+      network: this.config.sandboxNetwork,
+      envAllow: this.config.sandboxEnvAllow,
+      port: this.config.port,
+      dockerBin: this.config.dockerBin,
+    }) : undefined;
     const client = new PiRpcClient({
       cwd: meta.worktree,
       piBin: this.config.piBin,
@@ -1701,12 +1732,15 @@ export class Coordinator {
       model,
       thinking,
       name: meta.name,
-      sessionDir,
-      resumeSession: transcript,
-      extensionPath: this.config.extensionPath,
+      sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDir,
+      resumeSession: this.sandbox ? `${WORKER_SESSION_DIR}/${transcript.split("/").pop()}` : transcript,
+      extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
+      ...(resumeSandboxPrefix ? { spawnPrefix: resumeSandboxPrefix } : {}),
       env: {
-        PI_CODING_AGENT_DIR: join(sessionDir, "agent"),
-        PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
+        PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : join(sessionDir, "agent"),
+        PI_COORD_URL: this.sandbox
+          ? `http://host.docker.internal:${this.config.port}`
+          : `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
         PI_COORD_TOKEN: workerToken,
       },
@@ -1739,8 +1773,10 @@ export class Coordinator {
         meta.status = "error";
         meta.error = String(e);
       }
-      try { await client.stop(); }
-      catch {
+      try {
+        await client.stop();
+        if (this.sandbox) await this.sandbox.removeWorker(id);
+      } catch {
         this.publishHandoff(rt, "shutdown_failed", false);
         this.archive(meta);
         throw new Error("worker resume failed and shutdown is unconfirmed; locks retained");
@@ -2381,6 +2417,7 @@ export class Coordinator {
       if (meta.shutdownUnconfirmed) {
         if (!meta.workerProcess) throw new Error("orphan worker lacks process ownership proof; locks retained");
         await stopOwnedWorker(meta.workerProcess);
+        if (this.sandbox) await this.sandbox.removeWorker(id);
         meta.shutdownUnconfirmed = false;
         this.locks.releaseAll(id, meta.lockRepoIdentity);
         for (const lock of meta.heldLocks ?? []) this.locks.release(lock.sessionId, [lock.path], lock.repo);
@@ -2402,6 +2439,7 @@ export class Coordinator {
     rt.meta.pendingQuestions = [];
     const stopping = Promise.resolve().then(async () => {
       await rt.client.stop();
+      if (this.sandbox) await this.sandbox.removeWorker(id);
       rt.meta.shutdownUnconfirmed = false;
       for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
       rt.meta.status = "stopped";

@@ -544,12 +544,16 @@ default is used, while worker sessions always use their own repository.
 The locks are coordination protection, not a security sandbox. They cover recognizable literal
 targets; dynamic scripts, variables, command substitution and globs are not fully contained.
 
-Verification commands can run in a Docker sandbox instead of the host (`PI_COFFEE_SANDBOX=docker`,
-`PI_COFFEE_SANDBOX_IMAGE`): each run gets a fresh container that mounts only the candidate at
-`/workspace`, receives only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW`, and is removed after the
-run or a timeout. A docker request fails closed when the daemon or image is unavailable — there is no
-host fallback. This isolates commands, not the daemon or its credentials: the model provider key still
-lives in the host process, and `--network none` means the sandboxed command has no provider access.
+Verification commands and workers can run in a Docker sandbox instead of the host
+(`PI_COFFEE_SANDBOX=docker`, `PI_COFFEE_SANDBOX_IMAGE`): each verification run gets a fresh container
+that mounts only the candidate at `/workspace`; each worker gets a deterministic `pi-coffee-worker-<id>`
+container that mounts its worktree at `/workspace`, its session directory at `/session` and the
+coordinator extension read-only. Only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW` (plus the
+`PI_COORD_*` handshake) are forwarded; the worker reaches the daemon through
+`host.docker.internal`. Containers are removed on stop, failed startup and restart recovery; a docker
+request fails closed when the daemon or image is unavailable — there is no host fallback. This isolates
+commands and worker processes, not the daemon: give the sandbox its own provider credential (or
+snapshot) and remember that `--network none` means no provider access.
 
 Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.

@@ -477,10 +477,13 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 摘要和范围检查能阻止错误成果集成，但不能撤销任意脚本的写入。不可信 worker 需要独立设计的 OS/容器
 隔离、凭据限制和只读验收挂载；本版本不提供该强隔离。
 
-验证命令可以改为在 Docker 沙箱里运行（`PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`）：
-每次运行起一个只挂载候选目录到 `/workspace` 的临时容器，只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW` 列出的
-环境变量，超时或结束后删除容器。docker 或镜像不可用时直接失败，不会回退到宿主执行。它隔离的是
-命令，不是 daemon 及其凭据：模型 key 仍在宿主进程里，`--network none` 时沙箱内命令无法访问 provider。
+验证命令和 worker 都可以改为在 Docker 沙箱里运行（`PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`）：
+验证命令每次起一个只挂载候选目录到 `/workspace` 的临时容器；worker 则使用确定性的
+`pi-coffee-worker-<id>` 容器，挂载 worktree 到 `/workspace`、会话目录到 `/session`，并以只读方式挂载
+协调扩展。只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW`（外加 `PI_COORD_*` 握手变量）里的环境变量，worker 通过
+`host.docker.internal` 访问 daemon。停止、启动失败和重启恢复都会删除容器；docker 或镜像不可用时直接
+失败，不会回退到宿主执行。它隔离的是命令和 worker 进程，不是 daemon：请给沙箱准备独立的 provider
+凭据（或快照），并注意 `--network none` 时没有 provider 访问。
 
 ## 清理已完成的工作
 

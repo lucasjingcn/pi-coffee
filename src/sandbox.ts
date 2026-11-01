@@ -142,4 +142,62 @@ export class DockerSandbox {
     }
     return result;
   }
+
+  /** Remove the per-worker container (idempotent; missing containers are ignored). */
+  async removeWorker(sessionId: string): Promise<void> {
+    const name = workerContainerName(sessionId);
+    await this.runner(`${shellQuote(this.config.dockerBin)} rm -f ${shellQuote(name)}`, process.cwd(), 15_000)
+      .catch(() => undefined);
+  }
+}
+
+
+export const WORKER_WORKSPACE = "/workspace";
+export const WORKER_SESSION_DIR = "/session";
+export const WORKER_EXTENSION = "/opt/pi-coffee-extension.ts";
+
+/** Deterministic container name for one worker session. */
+export function workerContainerName(sessionId: string): string {
+  const safe = sessionId.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 40) || "session";
+  return `pi-coffee-worker-${safe}`;
+}
+
+export interface WorkerContainerOptions {
+  sessionId: string;
+  worktree: string;
+  sessionDir: string;
+  extensionPath: string;
+  image: string;
+  network: "bridge" | "none";
+  envAllow: string[];
+  port: number;
+  dockerBin: string;
+}
+
+/**
+ * Prefix that runs the pi CLI inside a per-worker container:
+ * worktree -> /workspace, session dir -> /session, worker extension mounted read-only.
+ * Only PI_COORD_* values and allowlisted host names are forwarded; `-e NAME` reads
+ * the value from the docker CLI environment, so secrets never appear in argv.
+ */
+export function buildWorkerDockerPrefix(opts: WorkerContainerOptions): { bin: string; args: string[] } {
+  return {
+    bin: opts.dockerBin,
+    args: [
+      "run", "--rm", "-i", "--name", workerContainerName(opts.sessionId),
+      "--network", opts.network,
+      "--add-host", "host.docker.internal:host-gateway",
+      "-v", `${resolve(opts.worktree)}:${WORKER_WORKSPACE}`,
+      "-w", WORKER_WORKSPACE,
+      "-v", `${resolve(opts.sessionDir)}:${WORKER_SESSION_DIR}`,
+      "-v", `${resolve(opts.extensionPath)}:${WORKER_EXTENSION}:ro`,
+      "-e", "PI_CODING_AGENT_DIR=/session/agent",
+      "-e", `PI_COORD_URL=http://host.docker.internal:${opts.port}`,
+      "-e", `PI_COORD_SESSION_ID=${opts.sessionId}`,
+      "-e", "PI_COORD_TOKEN",
+      ...opts.envAllow.flatMap((key) => ["-e", key]),
+      opts.image,
+      "pi",
+    ],
+  };
 }

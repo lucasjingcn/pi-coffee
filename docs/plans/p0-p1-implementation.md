@@ -114,10 +114,14 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(sandbox): run verification commands in docker`.
 
 ### M8 — Sandbox phase B (worker process) · M–L
-- `PiRpcClient` spawn factory + `worker-process.ts` container identity/stop/recovery; env allowlist;
-  agent dir + worktree mounts; `--network` modes; stale container cleanup; crash-recovery handoff.
-- Acceptance: `node --test tests/sandbox-worker.test.mjs` (fake docker passthrough drives a fake pi
-  inside the "container"), recovery test; one optional live docker run documented as manual evidence.
+- `PiRpcClient.spawnPrefix` lets the daemon prepend a container command; `buildWorkerDockerPrefix`
+  maps worktree -> `/workspace`, session dir -> `/session`, extension -> read-only mount, forwards
+  `PI_COORD_*` (token by env name, never argv) and allowlisted host env names; `PI_COORD_URL` points at
+  `host.docker.internal`.
+- Manager uses container paths for `--session-dir`/`--extension`/`--session`, clears stale containers
+  before resume, and removes the worker container on stop, failed startup and archived recovery.
+- Acceptance: `node --test tests/sandbox-worker.test.mjs` (prefix shape, spawn wiring, failed-start
+  cleanup, stop cleanup); full suite. A live docker worker run is manual evidence, not CI.
 - Commit: `feat(sandbox): run workers in per-session docker containers`.
 
 ### M9 — Runner abstraction + fake ACP agent · M–L
@@ -288,3 +292,5 @@ Run each item against the final branch. Record evidence (command + output) in th
   tests; full suite 401/401 twice.
 - **M7 complete** — 2026-11-01: Docker sandbox phase A for verification commands (probe, mounts, env
   allowlist, timeout cleanup, fail-closed policy, evidence record); 5 new tests; full suite 406/406.
+- **M8 complete** — 2026-11-01: worker containers (spawn prefix, container paths, token-by-env-name,
+  stale-container cleanup, stop/startup-failure/recovery removal); 4 new tests; full suite 410/410.
