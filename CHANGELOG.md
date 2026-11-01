@@ -6,6 +6,8 @@ All notable changes to pi-coffee are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Added
 
 - P0/P1 design and implementation plans under `docs/plans/` (durable evidence bundles, validator
