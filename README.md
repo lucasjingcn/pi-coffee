@@ -285,6 +285,16 @@ url = "http://daemon-host:8787/mcp"
 PI_COFFEE_TOKEN = "your-secret"
 ```
 
+### Worker runners
+
+Workers run the pinned pi CLI by default. Set `PI_COFFEE_RUNNER=acp` (or `spec.runner` on one
+spawn) to drive any ACP agent over stdio instead; `PI_COFFEE_ACP_COMMAND` (or `spec.runner.command`)
+is the agent argv. ACP v1 has no model-selection or transcript-replay contract, so `pi_send` model
+overrides are refused and ACP sessions cannot be resumed (spawn a new one); permissions surface as
+normal `pi_answer` questions, and raw frames are kept in `sessions/<id>/acp.jsonl` for `pi_tail`.
+ACP runners are host-only: the docker sandbox rejects them rather than wrapping an agent it cannot
+verify.
+
 ## Docker
 
 The included `Dockerfile` bundles Node, git, and pi, so the only host requirement is Docker.
@@ -648,6 +658,8 @@ Everything is configured through environment variables.
 | `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access. |
 | `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(empty)* | Comma-separated host env names forwarded into containers (nothing else is passed). |
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
+| `PI_COFFEE_RUNNER` | `pi` | Default worker runner: `pi` (pinned CLI) or `acp` (Agent Client Protocol). |
+| `PI_COFFEE_ACP_COMMAND` | *(empty)* | ACP agent argv (JSON array or whitespace-separated); required when `PI_COFFEE_RUNNER=acp`. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through

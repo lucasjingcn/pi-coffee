@@ -245,6 +245,14 @@ url = "http://daemon-host:8787/mcp"
 PI_COFFEE_TOKEN = "your-secret"
 ```
 
+### Worker runner
+
+worker 默认跑固定版本的 pi CLI。设置 `PI_COFFEE_RUNNER=acp`（或单次 spawn 的 `spec.runner`）可以用
+ACP 协议驱动任意 agent；`PI_COFFEE_ACP_COMMAND`（或 `spec.runner.command`）是 agent 的 argv。ACP v1
+没有模型选择/会话回放契约，因此 `pi_send` 的 model 覆盖会被拒绝、ACP 会话不能 resume（只能重新 spawn）；
+权限请求会作为普通 `pi_answer` 问题抛出，原始帧保存在 `sessions/<id>/acp.jsonl` 供 `pi_tail` 查看。
+ACP runner 只支持宿主运行：docker 沙箱会直接拒绝，而不是包一层无法验证的 agent。
+
 ## Docker
 
 仓库里的 `Dockerfile` 已经把 Node、git 和 pi 都打进去了，宿主机只需要有 Docker。
@@ -560,6 +568,8 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | 容器网络模式；`none` 关闭 provider 访问。 |
 | `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(空)* | 逗号分隔的宿主环境变量名，只把这些传进容器。 |
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI 路径（测试里用 fake binary）。 |
+| `PI_COFFEE_RUNNER` | `pi` | 默认 worker runner：`pi`（固定 CLI）或 `acp`（Agent Client Protocol）。 |
+| `PI_COFFEE_ACP_COMMAND` | *(空)* | ACP agent argv（JSON 数组或空格分隔）；`PI_COFFEE_RUNNER=acp` 时必填。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。

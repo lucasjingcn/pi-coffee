@@ -76,6 +76,15 @@ export type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design
 export const WORKSTREAM_PURPOSES = ["implementation", "review", "investigation"] as const;
 export type WorkstreamPurpose = typeof WORKSTREAM_PURPOSES[number];
 
+/** Runner selection for a worker: the pinned pi CLI or an ACP agent. */
+export interface WorkerRunnerSpec {
+  kind: "pi" | "acp";
+  /** ACP agent command (argv). Defaults to PI_COFFEE_ACP_COMMAND. */
+  command?: string[];
+  /** Extra non-secret environment for the runner. */
+  env?: Record<string, string>;
+}
+
 /** One command in the verification chain, run sequentially in the merged candidate. */
 export interface ValidatorSpec {
   /** Unique, stable id: lower-case letters/digits, `_` or `-`, max 64. Used for evidence folders. */
@@ -116,4 +125,6 @@ export interface DelegationSpec {
   validators?: ValidatorSpec[];
   /** Requested execution backend. The daemon config must allow it or the spawn is refused. */
   isolation?: "worktree" | "docker";
+  /** Worker runner; defaults to the daemon runner (pi). */
+  runner?: WorkerRunnerSpec;
 }

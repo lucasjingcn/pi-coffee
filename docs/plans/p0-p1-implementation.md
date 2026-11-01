@@ -124,11 +124,16 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
   cleanup, stop cleanup); full suite. A live docker worker run is manual evidence, not CI.
 - Commit: `feat(sandbox): run workers in per-session docker containers`.
 
-### M9 — Runner abstraction + fake ACP agent · M–L
-- `src/runner.ts` interface; `PiRpcClient` adapted behind it; `src/runner-acp.ts` ACP v1 client;
-  `spec.runner` / `PI_COFFEE_RUNNER` / `PI_COFFEE_ACP_COMMAND`; transcript capture.
-- `tests/fake-acp-agent.mjs` + `tests/runner-acp.test.mjs`: spawn → prompt → updates → stop.
-- Acceptance: `node --test tests/runner-acp.test.mjs`; pi path behavior unchanged.
+### M9 — Runner abstraction + ACP agent · M–L
+- `src/runner.ts` defines `WorkerTransport`; `PiRpcClient` satisfies it structurally and
+  `src/runner-acp.ts` implements ACP v1 over stdio JSON-RPC: initialize, session/new, session/prompt,
+  session/update mapping (message/thought deltas, tool calls), permission requests -> `ui_request`,
+  cancel/stop, transcript at `sessions/<id>/acp.jsonl`.
+- Config `PI_COFFEE_RUNNER` / `PI_COFFEE_ACP_COMMAND`; `spec.runner` per spawn; validation rejects
+  empty commands and secret env values. ACP sessions refuse resume and model overrides; the docker
+  sandbox rejects ACP rather than wrapping an unverifiable agent.
+- Acceptance: `node --test tests/runner-acp.test.mjs` (roundtrip, transcript, resume refusal,
+  sandbox refusal, config validation); full suite.
 - Commit: `feat(runner): pluggable runners with ACP support`.
 
 ### M10 — PR creation and merge-queue mode · M
@@ -294,3 +299,5 @@ Run each item against the final branch. Record evidence (command + output) in th
   allowlist, timeout cleanup, fail-closed policy, evidence record); 5 new tests; full suite 406/406.
 - **M8 complete** — 2026-11-01: worker containers (spawn prefix, container paths, token-by-env-name,
   stale-container cleanup, stop/startup-failure/recovery removal); 4 new tests; full suite 410/410.
+- **M9 complete** — 2026-11-01: pluggable runner interface + ACP v1 client (stdio JSON-RPC, events,
+  permissions, transcript), spec/config selection, explicit non-goals; 4 new tests; full suite 414/414.

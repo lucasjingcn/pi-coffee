@@ -14,7 +14,7 @@ export interface CandidateReview extends CandidateReviewInput {
 }
 
 /** Validate direct callers as well as MCP input and restored state. No semantic approval is inferred. */
-export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | "validation_paths" | "validators" | "isolation">): void {
+export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | "validation_paths" | "validators" | "isolation" | "runner">): void {
   if (spec?.requirements !== undefined) {
     if (!Array.isArray(spec.requirements)) throw new Error("requirements must be an array");
     const ids = new Set<string>();
@@ -35,6 +35,25 @@ export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | 
   validateValidators(spec?.validators);
   if (spec?.isolation !== undefined && spec.isolation !== "worktree" && spec.isolation !== "docker") {
     throw new Error('spec.isolation must be "worktree" or "docker"');
+  }
+  if (spec?.runner !== undefined) {
+    const runner = spec.runner;
+    if (!runner || typeof runner !== "object") throw new Error("spec.runner must be an object");
+    if (runner.kind !== "pi" && runner.kind !== "acp") throw new Error('spec.runner.kind must be "pi" or "acp"');
+    if (runner.command !== undefined) {
+      if (!Array.isArray(runner.command) || runner.command.length === 0 || runner.command.length > 32
+        || runner.command.some((part) => typeof part !== "string" || !part)) {
+        throw new Error("spec.runner.command must be a non-empty string array (max 32)");
+      }
+    }
+    if (runner.env !== undefined) {
+      if (!runner.env || typeof runner.env !== "object" || Array.isArray(runner.env)) throw new Error("spec.runner.env must be an object");
+      for (const [key, value] of Object.entries(runner.env as Record<string, unknown>)) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`spec.runner.env: invalid name ${key}`);
+        if (typeof value !== "string" || value.length > 4096) throw new Error(`spec.runner.env: value for ${key} must be a string up to 4096 characters`);
+        if (containsSecret(value)) throw new Error(`spec.runner.env: value for ${key} looks like a secret; use the daemon environment instead`);
+      }
+    }
   }
 }
 

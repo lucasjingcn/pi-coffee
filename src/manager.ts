@@ -24,6 +24,8 @@ import { AuditLog } from "./audit.js";
 import { applySecretPolicy } from "./secrets.js";
 import { evidenceDir, listEvidenceBundles, pruneEvidence, readEvidenceManifest, verifyEvidenceBundle } from "./evidence.js";
 import { DockerSandbox, WORKER_EXTENSION, WORKER_SESSION_DIR, buildWorkerDockerPrefix } from "./sandbox.js";
+import { AcpClient } from "./runner-acp.js";
+import type { WorkerTransport } from "./runner.js";
 import {
   commitAll,
   createWorktree,
@@ -158,6 +160,10 @@ export interface SessionMeta {
   candidateReview?: CandidateReview;
   /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
+  /** Effective execution backend recorded at spawn (docker when the daemon sandbox is on). */
+  sandbox?: { kind: "worktree" | "docker"; image?: string; imageDigest?: string; network?: "bridge" | "none" };
+  /** Effective worker runner recorded at spawn. */
+  runner?: { kind: "pi" | "acp"; command?: string[] };
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
   orchestratorChars?: number;
   /** Set once the worker-side coordinator extension checked in. */
@@ -181,7 +187,7 @@ interface Runtime {
   providerFailed?: boolean;
   stopping?: Promise<void>;
   meta: SessionMeta;
-  client: PiRpcClient;
+  client: WorkerTransport;
   lastNotifiedQuestionIds: Set<string>;
   /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
   acceptanceReserved?: boolean;
@@ -1342,6 +1348,14 @@ export class Coordinator {
     if (requestedIsolation === "worktree" && this.config.sandbox === "docker") {
       throw new Error("daemon policy requires the docker sandbox; spec.isolation=worktree is not allowed");
     }
+    const runnerKind = opts.spec?.runner?.kind ?? this.config.runner;
+    const acpCommand = opts.spec?.runner?.command ?? this.config.acpCommand;
+    if (runnerKind === "acp" && this.sandbox) {
+      throw new Error("ACP workers are not supported with the docker sandbox; run the ACP command on the host or disable the sandbox");
+    }
+    if (runnerKind === "acp" && acpCommand.length === 0) {
+      throw new Error("ACP runner selected but no command is configured (spec.runner.command or PI_COFFEE_ACP_COMMAND)");
+    }
     if (this.sandbox) {
       const probe = await this.sandbox.probe();
       if (!probe.ok) throw new Error(`sandbox requested but docker is unavailable: ${probe.error ?? "unknown error"}`);
@@ -1376,6 +1390,8 @@ export class Coordinator {
 
   private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
     validateReviewSpec(opts.spec);
+    const runnerKind = opts.spec?.runner?.kind ?? this.config.runner;
+    const acpCommand = opts.spec?.runner?.command ?? this.config.acpCommand;
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_COFFEE_DEFAULT_REPO for the daemon");
@@ -1464,6 +1480,7 @@ export class Coordinator {
       } : undefined,
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
       ...(this.sandbox ? { sandbox: this.sandbox.record() } : {}),
+      runner: { kind: runnerKind, ...(runnerKind === "acp" ? { command: acpCommand } : {}) },
       provider: opts.provider ?? this.config.provider,
       model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
@@ -1487,25 +1504,33 @@ export class Coordinator {
       port: this.config.port,
       dockerBin: this.config.dockerBin,
     }) : undefined;
-    const client = new PiRpcClient({
-      cwd: wt.dir,
-      piBin: this.config.piBin,
-      provider: opts.provider ?? this.config.provider,
-      model: opts.model ?? this.config.model,
-      thinking: opts.thinking ?? this.config.thinking,
-      name,
-      sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDirHost,
-      extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
-      ...(sandboxPrefix ? { spawnPrefix: sandboxPrefix } : {}),
-      env: {
-        PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : workerAgentDir,
-        PI_COORD_URL: this.sandbox
-          ? `http://host.docker.internal:${this.config.port}`
-          : `http://${this.config.host}:${this.config.port}`,
-        PI_COORD_SESSION_ID: id,
-        PI_COORD_TOKEN: workerToken,
-      },
-    });
+    const client: WorkerTransport = runnerKind === "acp"
+      ? new AcpClient({
+          command: acpCommand,
+          cwd: wt.dir,
+          transcriptPath: join(sessionDirHost, "acp.jsonl"),
+          env: opts.spec?.runner?.env,
+          name,
+        })
+      : new PiRpcClient({
+          cwd: wt.dir,
+          piBin: this.config.piBin,
+          provider: opts.provider ?? this.config.provider,
+          model: opts.model ?? this.config.model,
+          thinking: opts.thinking ?? this.config.thinking,
+          name,
+          sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDirHost,
+          extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
+          ...(sandboxPrefix ? { spawnPrefix: sandboxPrefix } : {}),
+          env: {
+            PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : workerAgentDir,
+            PI_COORD_URL: this.sandbox
+              ? `http://host.docker.internal:${this.config.port}`
+              : `http://${this.config.host}:${this.config.port}`,
+            PI_COORD_SESSION_ID: id,
+            PI_COORD_TOKEN: workerToken,
+          },
+        });
 
     const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
     // Persist before the first prompt; never return a live worker whose control credential was lost.
@@ -1601,6 +1626,10 @@ export class Coordinator {
    */
   async resume(id: string, opts: ResumeOptions = {}): Promise<SessionMeta> {
     this.assertNotDraining("resume");
+    const resumeEntry = this.runtimes.get(id)?.meta ?? this.history.find((entry) => entry.id === id);
+    if (resumeEntry?.runner?.kind === "acp") {
+      throw new Error("ACP worker sessions cannot be resumed; spawn a new session");
+    }
     const running = this.runtimes.get(id);
     if (running && running.meta.status !== "stopped") {
       throw new Error(`session ${id} is ${running.meta.status}; stop it before resuming`);

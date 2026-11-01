@@ -65,6 +65,10 @@ export interface Config {
   sandboxEnvAllow: string[];
   /** Docker CLI path (fake binary in tests). */
   dockerBin: string;
+  /** Default worker runner: the pinned pi CLI or an ACP agent. */
+  runner: "pi" | "acp";
+  /** ACP agent argv used when runner=acp (or when a spec selects ACP without a command). */
+  acpCommand: string[];
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -198,6 +202,41 @@ function resolveSandboxNetwork(overrides: Partial<Config>): "bridge" | "none" {
   const raw = env("PI_COFFEE_SANDBOX_NETWORK") ?? "bridge";
   if (raw !== "bridge" && raw !== "none") invalid("sandboxNetwork", "PI_COFFEE_SANDBOX_NETWORK", 'expected "bridge" or "none"');
   return override ?? raw;
+}
+
+/** Worker runner: pi or acp. */
+function resolveRunner(overrides: Partial<Config>): "pi" | "acp" {
+  const override = overrides.runner;
+  if (override !== undefined && override !== "pi" && override !== "acp") {
+    invalid("runner", "PI_COFFEE_RUNNER", 'expected "pi" or "acp"');
+  }
+  const raw = env("PI_COFFEE_RUNNER") ?? "pi";
+  if (raw !== "pi" && raw !== "acp") invalid("runner", "PI_COFFEE_RUNNER", 'expected "pi" or "acp"');
+  return override ?? raw;
+}
+
+/** ACP argv: JSON array (`["cmd","arg"]`) or whitespace-separated words. */
+function resolveAcpCommand(overrides: Partial<Config>): string[] {
+  const override = overrides.acpCommand;
+  if (override !== undefined) {
+    if (!Array.isArray(override) || override.some((part) => typeof part !== "string" || !part)) {
+      invalid("acpCommand", "PI_COFFEE_ACP_COMMAND", "expected a non-empty string array");
+    }
+    return [...override];
+  }
+  const raw = env("PI_COFFEE_ACP_COMMAND");
+  if (raw === undefined) return [];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!Array.isArray(parsed) || parsed.some((part) => typeof part !== "string" || !part)) throw new Error("invalid");
+      return parsed;
+    } catch {
+      invalid("acpCommand", "PI_COFFEE_ACP_COMMAND", "expected a JSON string array or whitespace-separated words");
+    }
+  }
+  return trimmed.split(/\s+/).filter(Boolean);
 }
 
 /** Comma-separated env-name allowlist (empty by default: forward nothing). */
@@ -350,6 +389,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     sandboxNetwork: resolveSandboxNetwork(overrides),
     sandboxEnvAllow: resolveEnvAllow(overrides),
     dockerBin: overrides.dockerBin ?? env("PI_COFFEE_DOCKER_BIN") ?? "docker",
+    runner: resolveRunner(overrides),
+    acpCommand: resolveAcpCommand(overrides),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),
@@ -358,6 +399,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");
   if (base.sandbox === "docker" && base.sandboxImage.trim() === "") {
     invalid("sandboxImage", "PI_COFFEE_SANDBOX_IMAGE", "is required when PI_COFFEE_SANDBOX=docker");
+  }
+  if (base.runner === "acp" && base.acpCommand.length === 0) {
+    invalid("acpCommand", "PI_COFFEE_ACP_COMMAND", "is required when PI_COFFEE_RUNNER=acp");
   }
   // Apply caller overrides last; undefined means "keep the default".
   const defined = Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined));

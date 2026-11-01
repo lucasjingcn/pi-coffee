@@ -208,6 +208,11 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
               .describe("Coordinator-authored hard requirements with unique IDs; each needs met=true and evidence in pi_review before merge."),
             validation_paths: z.array(z.string()).optional()
               .describe("Additional worktree-relative validation files/directories; edits to existing definitions need per-file pi_review approval."),
+            runner: z.object({
+              kind: z.enum(["pi", "acp"]),
+              command: z.array(z.string().min(1)).min(1).max(32).optional().describe("ACP agent argv; defaults to PI_COFFEE_ACP_COMMAND"),
+              env: z.record(z.string(), z.string()).optional().describe("Non-secret environment for the runner"),
+            }).optional().describe("Worker runner; defaults to PI_COFFEE_RUNNER (pi)"),
             validators: z.array(z.object({
               id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).describe("Unique id; also the evidence folder name"),
               command: z.string().min(1).max(8192),

@@ -236,6 +236,14 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       fail(file, `${at}.handoff is invalid`);
   }
 
+  if (entry.runner !== undefined) {
+    const runner = entry.runner;
+    if (!isRecord(runner) || (runner.kind !== "pi" && runner.kind !== "acp")
+      || (runner.command !== undefined && (!Array.isArray(runner.command)
+        || !runner.command.every((part) => typeof part === "string" && part !== "")))) {
+      fail(file, `${at}.runner is invalid`);
+    }
+  }
   if (entry.sandbox !== undefined) {
     const sandbox = entry.sandbox;
     if (!isRecord(sandbox) || (sandbox.kind !== "worktree" && sandbox.kind !== "docker")

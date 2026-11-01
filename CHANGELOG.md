@@ -30,6 +30,10 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Pluggable worker runners: `PI_COFFEE_RUNNER=acp` / `spec.runner` drives an ACP v1 agent over stdio
+  with the same lifecycle surface as pi (prompt, events, permissions, stop), a raw
+  `sessions/<id>/acp.jsonl` transcript, and explicit non-goals (no model overrides, no resume, no
+  docker sandbox).
 - Docker sandbox phase B: workers run inside a deterministic `pi-coffee-worker-<id>` container that
   mounts only the worktree (`/workspace`), session directory (`/session`) and the worker extension
   (read-only); `PI_COORD_*` handshake values and allowlisted env names are forwarded, and containers
