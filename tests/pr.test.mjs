@@ -122,14 +122,18 @@ test("merge-queue mode queues the PR after evidence checks", () =>
     assert.equal(queued.queued, true);
     const merge = (await calls(log)).find((argv) => argv[0] === "pr" && argv[1] === "merge");
     assert.deepEqual(merge.slice(0, 5), ["pr", "merge", "7", "--squash", "--auto"]);
+    // Merge-queue mode must not pretend the work is integrated locally.
+    assert.equal(c.snapshot("s1").integration, undefined);
   }));
 
 test("PR operations are refused without PI_COFFEE_ALLOW_PUSH", () =>
-  fixture(async ({ c, log }) => {
+  fixture(async ({ c, log, bare }) => {
     await c.verify("s1");
     await assert.rejects(c.createPr("s1"), /PI_COFFEE_ALLOW_PUSH=0/);
     await assert.rejects(c.mergeViaQueue("s1"), /PI_COFFEE_ALLOW_PUSH=0/);
     assert.deepEqual((await calls(log)).filter((argv) => argv[0] === "pr"), []);
+    const branches = execFileSync("git", ["-C", bare, "branch", "--list", "pi/test"], { encoding: "utf8" }).trim();
+    assert.equal(branches, "");
   }, { allowPush: false }));
 
 test("gh failures surface without recording a PR", () =>

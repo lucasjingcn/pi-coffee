@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   EVIDENCE_SCHEMA_VERSION,
+  collectArtifacts,
   evidenceDir,
   evidenceRoot,
   listEvidenceBundles,
@@ -235,3 +236,17 @@ test("daemon verification writes evidence and links it from the record", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("symlinked artifacts are skipped instead of copied outside the candidate", () =>
+  dataDirFixture(async (dir) => {
+    const candidate = join(dir, "candidate");
+    await mkdir(candidate, { recursive: true });
+    const outside = join(dir, "outside-secret.txt");
+    await writeFile(outside, "do not copy me");
+    await symlink(outside, join(candidate, "leak.txt"));
+    const files = await collectArtifacts(candidate, "v1", ["**/*"], {
+      maxFiles: 50, maxFileBytes: 1024 * 1024, maxTotalBytes: 4 * 1024 * 1024,
+    });
+    assert.deepEqual(files, []);
+  }));

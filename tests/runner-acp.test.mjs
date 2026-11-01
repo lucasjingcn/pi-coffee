@@ -136,3 +136,83 @@ test("runner configuration and spec validation fail closed", () => {
     runner: { kind: "acp", command: ["agent"], env: { API_KEY: "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2" } },
   }), /looks like a secret/);
 });
+
+
+const FAKE_ACP_PERMISSION = `#!/usr/bin/env node
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+const sessionId = "acp-permission";
+function send(frame) { process.stdout.write(JSON.stringify(frame) + "\\n"); }
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId } });
+  if (frame.method === "session/prompt") {
+    rl.pendingPrompt = frame.id;
+    send({ jsonrpc: "2.0", id: 900, method: "session/request_permission", params: { options: [{ optionId: "allow_once" }] } });
+    return;
+  }
+  if (frame.id === 900) {
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "permission-ok" } } } });
+    send({ jsonrpc: "2.0", id: rl.pendingPrompt, result: { stopReason: "end_turn" } });
+    return;
+  }
+  if (frame.method === "session/cancel") return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+  if (frame.id !== undefined) return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+});
+`;
+
+const FAKE_ACP_MALFORMED = `#!/usr/bin/env node
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(frame) { process.stdout.write(JSON.stringify(frame) + "\\n"); }
+rl.on("line", (line) => {
+  let frame; try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") {
+    process.stdout.write("this is not json\\n");
+    return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  }
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "malformed" } });
+  if (frame.method === "session/prompt") return send({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn" } });
+  if (frame.method === "session/cancel") return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+});
+`;
+
+test("ACP permission requests map to ui_request and resume on answer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-acp-perm-"));
+  const script = join(root, "fake-perm");
+  await writeFile(script, FAKE_ACP_PERMISSION);
+  await chmod(script, 0o755);
+  const client = new AcpClient({ command: [process.execPath, script], cwd: root, transcriptPath: join(root, "perm.jsonl") });
+  try {
+    await client.start();
+    const pending = client.prompt("needs permission");
+    const request = await new Promise((resolve) => client.once("ui_request", resolve));
+    assert.equal(request.method, "confirm");
+    client.respondUi({ type: "extension_ui_response", id: request.id, confirmed: true });
+    const result = await pending;
+    assert.equal(result.success, true);
+    const transcript = await readFile(join(root, "perm.jsonl"), "utf8");
+    assert.match(transcript, /session\/request_permission/);
+  } finally {
+    await client.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ACP ignores malformed frames instead of failing the handshake", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-acp-malformed-"));
+  const script = join(root, "fake-malformed");
+  await writeFile(script, FAKE_ACP_MALFORMED);
+  await chmod(script, 0o755);
+  const client = new AcpClient({ command: [process.execPath, script], cwd: root, transcriptPath: join(root, "malformed.jsonl") });
+  try {
+    await client.start();
+    const result = await client.prompt("hello");
+    assert.equal(result.success, true);
+  } finally {
+    await client.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});

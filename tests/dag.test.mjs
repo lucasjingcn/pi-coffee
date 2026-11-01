@@ -82,6 +82,8 @@ test("unintegrated, failed and unknown dependencies fail closed", () =>
       /unknown dependency: nope/,
     );
     assert.equal(c.list().length, 0);
+    const branches = execFileSync("git", ["-C", repo, "branch", "--list", "pi/*"], { encoding: "utf8" }).trim();
+    assert.equal(branches, "");
   }));
 
 test("a recorded dependency cycle rejects any further blocked spawn", () =>

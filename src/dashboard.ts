@@ -565,6 +565,16 @@ async function readActionBody(req: IncomingMessage): Promise<Record<string, unkn
   }
 }
 
+function auditDashboardDenial(coord: Coordinator, url: URL, reason: string): void {
+  const id = pathSegments(url.pathname)?.[3] ?? "";
+  try {
+    const audit = (coord as unknown as { audit?: { append?: (...args: any[]) => Promise<unknown> } }).audit;
+    void audit?.append?.("dashboard", "dashboard_denied", id, { reason, path: url.pathname }).catch(() => undefined);
+  } catch {
+    /* denial audit is diagnostic; never turn it into an action */
+  }
+}
+
 async function handleAction(coord: Coordinator, req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const segments = pathSegments(url.pathname);
   if (!segments || segments.length !== 5 || segments[0] !== "api" || segments[1] !== "actions" || segments[2] !== "sessions") {
@@ -574,23 +584,32 @@ async function handleAction(coord: Coordinator, req: IncomingMessage, res: Serve
   const action = segments[4] as string;
   if (!DASHBOARD_ACTIONS.has(action)) return sendJson(res, 404, { error: "not found", path: url.pathname });
   if (req.headers[ACTION_HEADER] !== "1") {
+    auditDashboardDenial(coord, url, "missing action header");
     return sendJson(res, 403, { error: "missing x-pi-coffee-action header" });
   }
   const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
   if (!contentType.startsWith("application/json")) {
+    auditDashboardDenial(coord, url, "invalid content type");
     return sendJson(res, 415, { error: "content-type must be application/json" });
   }
   const origin = req.headers.origin;
   if (origin) {
     let host: string | undefined;
     try { host = new URL(String(origin)).host; } catch { host = undefined; }
-    if (!host || host !== req.headers.host) return sendJson(res, 403, { error: "cross-origin action rejected" });
+    if (!host || host !== req.headers.host) {
+      auditDashboardDenial(coord, url, "cross-origin");
+      return sendJson(res, 403, { error: "cross-origin action rejected" });
+    }
   }
   if (action !== "send" && String(req.headers[CONFIRM_HEADER] ?? "") !== id) {
+    auditDashboardDenial(coord, url, "missing confirmation");
     return sendJson(res, 400, { error: "confirmation required: set x-pi-coffee-confirm to the session id" });
   }
   const body = await readActionBody(req);
-  if (body === undefined) return sendJson(res, 400, { error: "invalid or oversized JSON body" });
+  if (body === undefined) {
+    auditDashboardDenial(coord, url, "invalid body");
+    return sendJson(res, 400, { error: "invalid or oversized JSON body" });
+  }
   try {
     if (action === "send") {
       const message = typeof body.message === "string" ? body.message.trim() : "";
@@ -712,10 +731,12 @@ export function createDashboardHandler(
 
     if (deps.actions && req.method === "POST" && path.startsWith("/dashboard/api/actions/")) {
       if (!token) {
+        auditDashboardDenial(coord, url, "no token configured");
         sendJson(res, 403, { error: "dashboard actions require PI_COFFEE_TOKEN" });
         return true;
       }
       if (!authorized(req, token)) {
+        auditDashboardDenial(coord, url, "unauthorized");
         sendJson(res, 401, { error: "unauthorized" });
         return true;
       }

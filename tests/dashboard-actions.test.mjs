@@ -7,6 +7,7 @@ function fakeCoord() {
   const calls = [];
   return {
     calls,
+    audit: { append: async (...args) => { calls.push(["audit", ...args]); } },
     list: () => [],
     setOutcome: async (...args) => { calls.push(["finish", ...args]); },
     send: async (...args) => { calls.push(["send", ...args]); },
@@ -63,8 +64,9 @@ test("actions require both a configured token and a presented token", async () =
   });
 });
 
-test("actions enforce header, content-type, origin and confirmation guards", () =>
-  withServer({ coord: fakeCoord(), token: TOKEN, actions: true }, async (base) => {
+test("actions enforce header, content-type, origin and confirmation guards", () => {
+  const coord = fakeCoord();
+  return withServer({ coord, token: TOKEN, actions: true }, async (base) => {
     const missingHeader = await fetch(`${base}/dashboard/api/actions/sessions/s1/merge`, {
       method: "POST", headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: "{}",
     });
@@ -84,7 +86,10 @@ test("actions enforce header, content-type, origin and confirmation guards", () 
       method: "POST", headers: actionHeaders(TOKEN), body: "{}",
     });
     assert.equal(noConfirm.status, 400);
-  }));
+    const denials = coord.calls.filter((call) => call[0] === "audit" && call[2] === "dashboard_denied");
+    assert.ok(denials.length >= 4, "every rejected action must be audited");
+  });
+});
 
 test("valid actions call the coordinator with explicit arguments", async () => {
   const coord = fakeCoord();
@@ -142,4 +147,10 @@ test("the HTML only advertises actions when they are enabled", async () => {
     assert.match(body, /read-only/);
     assert.doesNotMatch(body, /x-pi-coffee-action/);
   });
+});
+
+
+test("enabling dashboard actions without a token is a startup error", async () => {
+  const { loadConfig } = await import("../dist/config.js");
+  assert.throws(() => loadConfig({ dashboardActions: true }), /PI_COFFEE_DASHBOARD_ACTIONS/);
 });

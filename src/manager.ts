@@ -1621,8 +1621,15 @@ export class Coordinator {
       try { await this.send(id, first, "prompt"); }
       catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
     }
-    await this.auditStrict("orchestrator", "spawn", meta.id, { repo: meta.repo, branch: meta.branch,
-      provider: meta.provider, model: meta.model, purpose: meta.spec?.purpose });
+    try {
+      await this.auditStrict("orchestrator", "spawn", meta.id, { repo: meta.repo, branch: meta.branch,
+        provider: meta.provider, model: meta.model, purpose: meta.spec?.purpose });
+    } catch (error) {
+      // Never hand back a failed spawn while its worker is still running: stop it
+      // first so a broken audit sink cannot orphan a live session.
+      await this.failWorker(rt, "provider_error");
+      throw error;
+    }
     return meta;
   }
 
