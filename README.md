@@ -741,6 +741,19 @@ docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker
 ```
 
+### Release
+
+Cutting a release is one reviewed commit plus a tag push; the tag build publishes it.
+
+1. Bump `version` in `package.json` and add the matching entry to `CHANGELOG.md` in the same reviewed
+   commit.
+2. Run `npm run release -- --check` to confirm the version maps to `v<version>`, then `npm run release`.
+   It refuses a dirty working tree or an existing tag, runs `npm run verify`, and creates the annotated
+   tag. It never pushes, publishes, or changes the version.
+3. `git push origin v<version>` triggers `.github/workflows/release.yml`, which runs the full verify
+   suite, attaches the `npm pack` tarball to a GitHub release with generated notes, and pushes the
+   container image as `ghcr.io/lucasjingcn/pi-coffee:v<version>` and `:latest`.
+
 ## Upgrade and uninstall
 
 Drain first so running workers are not dropped, then stop the daemon with the command in

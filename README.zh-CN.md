@@ -638,6 +638,17 @@ docker-compose.yml 面向用户的 compose 文件
 .env.example       Docker 用的 provider 密钥 / model 模板
 ```
 
+### 发布
+
+发版就是一次受审阅的提交加一次 tag 推送；tag 构建负责发布产物。
+
+1. 在同一笔受审阅的提交里改 `package.json` 的 `version`，并在 `CHANGELOG.md` 写对应条目。
+2. 先 `npm run release -- --check` 确认版本映射到 `v<version>`，再 `npm run release`：它会拒绝脏工作区
+   和已存在的 tag，跑 `npm run verify`，然后创建 annotated tag；它不推送、不发布、也不改版本号。
+3. `git push origin v<version>` 触发 `.github/workflows/release.yml`：跑完整 verify，把 `npm pack`
+   的 tarball 作为附件发布到 GitHub release（自动生成 notes），并推送容器镜像
+   `ghcr.io/lucasjingcn/pi-coffee:v<version>` 和 `:latest`。
+
 ## 升级与卸载
 
 先 drain，避免正在跑的 worker 被直接丢掉；然后按[部署](#部署)里的命令停止后台 daemon，更新代码并
