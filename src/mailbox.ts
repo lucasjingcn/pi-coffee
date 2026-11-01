@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export type MessageKind = "note" | "question" | "answer" | "broadcast";
 
@@ -9,6 +9,8 @@ export interface MailMessage {
   kind: MessageKind;
   text: string;
   ts: number;
+  /** Canonical payload hash written at post time; absent on entries persisted by older daemons. */
+  sha256?: string;
   /**
    * Legacy/global read flag. For direct messages it records that the recipient
    * acknowledged the message. For broadcasts it is set by legacy no-session acks
@@ -19,6 +21,13 @@ export interface MailMessage {
   readBy?: string[];
 }
 
+/** Canonical hash for a mailbox message: stable across persistence and read-back. */
+export function mailboxSha256(message: Pick<MailMessage, "from" | "to" | "kind" | "text" | "ts">): string {
+  return createHash("sha256")
+    .update(JSON.stringify([message.from, message.to, message.kind, message.text, message.ts]))
+    .digest("hex");
+}
+
 /** How many messages we keep before trimming the oldest ones. */
 const MAX_MESSAGES = 5000;
 const TRIM_TO = 3000;
@@ -27,7 +36,8 @@ export class Mailbox {
   private messages: MailMessage[] = [];
 
   post(from: string, to: string, text: string, kind: MessageKind = "note"): MailMessage {
-    const message: MailMessage = { id: randomUUID(), from, to, kind, text, ts: Date.now(), read: false };
+    const ts = Date.now();
+    const message: MailMessage = { id: randomUUID(), from, to, kind, text, ts, sha256: mailboxSha256({ from, to, kind, text, ts }), read: false };
     this.messages.push(message);
     if (this.messages.length > MAX_MESSAGES) this.messages = this.messages.slice(-TRIM_TO);
     return message;
@@ -106,6 +116,15 @@ export interface BoardEntry {
   value: string;
   from: string;
   ts: number;
+  /** Canonical payload hash written at post time; absent on entries persisted by older daemons. */
+  sha256?: string;
+}
+
+/** Canonical hash for a board entry: stable across persistence and read-back. */
+export function boardSha256(entry: Pick<BoardEntry, "board" | "key" | "value" | "from" | "ts">): string {
+  return createHash("sha256")
+    .update(JSON.stringify([entry.board, entry.key, entry.value, entry.from, entry.ts]))
+    .digest("hex");
 }
 
 /** Append-only shared blackboard: latest-write-wins per (board, key). */
@@ -113,7 +132,8 @@ export class Board {
   private entries: BoardEntry[] = [];
 
   post(board: string, key: string, value: string, from: string): BoardEntry {
-    const entry: BoardEntry = { board, key, value, from, ts: Date.now() };
+    const ts = Date.now();
+    const entry: BoardEntry = { board, key, value, from, ts, sha256: boardSha256({ board, key, value, from, ts }) };
     this.entries.push(entry);
     if (this.entries.length > MAX_MESSAGES) this.entries = this.entries.slice(-TRIM_TO);
     return entry;

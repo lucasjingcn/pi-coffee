@@ -443,8 +443,8 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_exec` | 在 worker worktree 用非登录 shell 运行诊断命令；不会产生合并验收证据。 |
 | `pi_answer` | 回答 worker 的待处理问题，用 `confirmed`、`value` 或 `cancelled`。 |
 | `pi_claim` / `pi_release` / `pi_locks` | 手动声明、释放路径，或查看当前都有哪些声明。 |
-| `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。 |
-| `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。 |
+| `pi_message` / `pi_inbox` | 给 worker 发持久化消息（可选择注入到对话里），以及读取消息。每次发送都会从持久化状态回读并返回 `sha256` / `readBack` 回执，回读不一致直接报错而不是假装投递成功。 |
+| `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。写入同样返回持久化回读回执（`sha256` / `readBack`）。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
 | `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录、控制密钥以及 provider/model/thinking 全部保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、证据已被回收、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |

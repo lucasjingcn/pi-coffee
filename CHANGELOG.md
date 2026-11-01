@@ -16,6 +16,9 @@ All notable changes to pi-coffee are recorded here. The format follows
   `reject`) covering mailbox text, board values, outcome notes, and evidence logs.
 - Hash-chained audit log for coordinator actions (`PI_COFFEE_AUDIT_MAX_MB`, default 32) with best-effort
   appends for delivery/cleanup paths and fail-closed appends for authority gates.
+- Read-back receipts for coordination writes: mailbox messages and board entries persist a canonical
+  `sha256`, and `pi_message` / the internal send endpoint / `pi_board_post` verify it against durable
+  state before reporting `readBack: true`. A missing or mismatched entry fails the call.
 
 ### Security
 

@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, createReadStream, readdirSync, statSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
-import { Board, Mailbox, type MessageKind } from "./mailbox.js";
+import { Board, Mailbox, boardSha256, mailboxSha256, type BoardEntry, type MailMessage, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode, type Lock } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
 import { captureWorkerProcess, stopOwnedWorker, type WorkerProcessIdentity } from "./worker-process.js";
@@ -2433,11 +2433,12 @@ export class Coordinator {
   // Mailbox and board
   // -------------------------------------------------------------------------
 
-  postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): { id: string; delivered: boolean } {
+  postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): { id: string; delivered: boolean; sha256?: string } {
     const safeText = this.scrubSecrets(text, "mailbox text");
     const message = this.mailbox.post(from, to, safeText, kind);
     this.scheduleSave();
-    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "mailbox", `${from}->${to}`, { kind, chars: safeText.length });
+    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "mailbox", `${from}->${to}`,
+      { kind, chars: safeText.length, sha256: message.sha256 });
 
     let delivered = false;
     if (deliver) {
@@ -2460,7 +2461,55 @@ export class Coordinator {
         delivered = true;
       }
     }
-    return { id: message.id, delivered };
+    return { id: message.id, delivered, ...(message.sha256 ? { sha256: message.sha256 } : {}) };
+  }
+
+  /** Read persisted state for receipt verification. */
+  private async readPersistedState(): Promise<{ mailbox?: MailMessage[]; board?: BoardEntry[] }> {
+    const file = join(this.config.dataDir, "state.json");
+    return JSON.parse(await readFile(file, "utf8")) as { mailbox?: MailMessage[]; board?: BoardEntry[] };
+  }
+
+  /**
+   * Read a mailbox message back from durable state and compare its canonical hash.
+   * A missing or mismatched entry means the write is not durably recorded; the
+   * caller (pi_message / internal send) treats that as a failed coordination write.
+   */
+  async messageReceipt(messageId: string): Promise<{ id: string; sha256: string; readBack: true }> {
+    await this.flush();
+    let entry = (await this.readPersistedState()).mailbox?.find((message) => message.id === messageId);
+    if (!entry) {
+      // A concurrent older save can land after ours; one retry closes that window.
+      await this.flush();
+      entry = (await this.readPersistedState()).mailbox?.find((message) => message.id === messageId);
+    }
+    if (!entry) throw new Error("coordination write was not read back: message missing from persisted state");
+    const sha256 = mailboxSha256(entry);
+    if (entry.sha256 !== undefined && entry.sha256 !== sha256) {
+      throw new Error("coordination write was not read back: persisted message hash mismatch");
+    }
+    return { id: messageId, sha256, readBack: true };
+  }
+
+  /**
+   * Read the newest board entry for (board, key) back from durable state and compare
+   * its canonical hash. Used by the pi_board_post tool as delivery evidence.
+   */
+  async boardReceipt(board: string, key: string): Promise<{ sha256: string; readBack: true }> {
+    await this.flush();
+    let entries = (await this.readPersistedState()).board ?? [];
+    let entry = [...entries].reverse().find((candidate) => candidate.board === board && candidate.key === key);
+    if (!entry) {
+      await this.flush();
+      entries = (await this.readPersistedState()).board ?? [];
+      entry = [...entries].reverse().find((candidate) => candidate.board === board && candidate.key === key);
+    }
+    if (!entry) throw new Error("coordination write was not read back: board entry missing from persisted state");
+    const sha256 = boardSha256(entry);
+    if (entry.sha256 !== undefined && entry.sha256 !== sha256) {
+      throw new Error("coordination write was not read back: persisted board entry hash mismatch");
+    }
+    return { sha256, readBack: true };
   }
 
   inbox(sessionId: string, unreadOnly = false) {

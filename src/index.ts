@@ -273,7 +273,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
           if (to === "*") throw new Error("worker broadcast is unavailable across session scopes");
           coord.assertSameScope(workerSid, to);
         }
-        return sendJson(res, 200, coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
+        const result = coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true);
+        const receipt = await coord.messageReceipt(result.id);
+        return sendJson(res, 200, { ...result, sha256: receipt.sha256, readBack: receipt.readBack });
       }
 
       case "/internal/board/get": {
@@ -293,7 +295,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         }
         const entry = coord.boardPost(workerSid ? coord.scopedBoardName(workerSid, board) : board,
           key, String(value), workerSid ?? from ?? "unknown");
-        return sendJson(res, 200, workerSid ? { ...entry, board } : entry);
+        const receipt = await coord.boardReceipt(entry.board, entry.key);
+        return sendJson(res, 200, { ...(workerSid ? { ...entry, board } : entry), sha256: entry.sha256, readBack: receipt.readBack });
       }
 
       default:

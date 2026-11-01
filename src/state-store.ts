@@ -106,7 +106,7 @@ function optionalArray<T>(
 function validateMailboxEntry(entry: unknown, index: number, file: string): MailMessage {
   const at = `mailbox[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
-  const { id, from, to, kind, text, ts, read, readBy } = entry;
+  const { id, from, to, kind, text, ts, read, readBy, sha256 } = entry;
 
   if (typeof id !== "string") fail(file, `${at}.id must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
@@ -126,6 +126,12 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
     normalizedReadBy = [...readBy];
   }
 
+  let normalizedSha256: string | undefined;
+  if (sha256 !== undefined) {
+    if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) fail(file, `${at}.sha256 must be a 64-character lowercase hex string`);
+    normalizedSha256 = sha256;
+  }
+
   return {
     id,
     from,
@@ -133,6 +139,7 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
     kind: kind as MessageKind,
     text,
     ts,
+    ...(normalizedSha256 !== undefined ? { sha256: normalizedSha256 } : {}),
     read,
     ...(normalizedReadBy !== undefined ? { readBy: normalizedReadBy } : {}),
   };
@@ -141,15 +148,20 @@ function validateMailboxEntry(entry: unknown, index: number, file: string): Mail
 function validateBoardEntry(entry: unknown, index: number, file: string): BoardEntry {
   const at = `board[${index}]`;
   if (!isRecord(entry)) fail(file, `${at} must be an object`);
-  const { board, key, value, from, ts } = entry;
+  const { board, key, value, from, ts, sha256 } = entry;
 
   if (typeof board !== "string") fail(file, `${at}.board must be a string`);
   if (typeof key !== "string") fail(file, `${at}.key must be a string`);
   if (typeof value !== "string") fail(file, `${at}.value must be a string`);
   if (typeof from !== "string") fail(file, `${at}.from must be a string`);
   if (typeof ts !== "number" || !Number.isFinite(ts)) fail(file, `${at}.ts must be a finite number`);
+  let normalizedSha256: string | undefined;
+  if (sha256 !== undefined) {
+    if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) fail(file, `${at}.sha256 must be a 64-character lowercase hex string`);
+    normalizedSha256 = sha256;
+  }
 
-  return { board, key, value, from, ts };
+  return { board, key, value, from, ts, ...(normalizedSha256 !== undefined ? { sha256: normalizedSha256 } : {}) };
 }
 
 function validateHistoryEntry(entry: unknown, index: number, file: string): SessionMeta {

@@ -855,7 +855,8 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       if (session_id === "*") coord.assertControlsForAll(control_keys);
       else coord.assertControl(session_id, control_key);
       const res = coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
-      return json(res);
+      const receipt = await coord.messageReceipt(res.id);
+      return json({ ...res, sha256: receipt.sha256, readBack: receipt.readBack });
     },
   );
 
@@ -880,7 +881,8 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       if (!scope_key) coord.assertControlsForAll(control_keys);
       const target = scope_key ? `${createHash("sha256").update(scope_key).digest("hex")}:${board}` : board;
       const entry = coord.boardPost(target, key, value, from ?? "codex");
-      return json(scope_key ? { ...entry, board } : entry);
+      const receipt = await coord.boardReceipt(entry.board, entry.key);
+      return json({ ...(scope_key ? { ...entry, board } : entry), sha256: entry.sha256, readBack: receipt.readBack });
     },
   );
 

@@ -52,11 +52,14 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Acceptance: `node --test tests/secrets.test.mjs tests/audit.test.mjs`; full `npm test` green.
 - Commit: `feat(security): secret filter and hash-chained audit log`.
 
-### M3 — Mailbox/board receipts + `pi_send` delivery evidence · S–M
-- Canonical payload hashing, read-back after write, `sha256` on messages/board entries, atomic temp
-  + rename in the state store.
-- `pi_send` returns `{delivered, sha256, readBack}`; `coord_send` path covered.
-- Acceptance: `node --test tests/receipts.test.mjs`; race/failed-write tests.
+### M3 — Mailbox/board receipts + delivery evidence · S–M
+- Canonical payload hashing (`mailboxSha256` / `boardSha256`), `sha256` persisted on messages and
+  board entries (optional field: legacy entries keep loading), read-back through a flush + re-read of
+  `state.json` with one retry for a racing older save. State writes were already atomic (temp + rename).
+- `pi_message` and `/internal/send` return `{delivered, sha256, readBack}`; `pi_board_post` and
+  `/internal/board/post` return `{sha256, readBack}`. A missing/tampered entry throws
+  `coordination write was not read back` instead of reporting delivery.
+- Acceptance: `node --test tests/receipts.test.mjs` (unit + MCP + legacy + tamper cases); full suite.
 - Commit: `feat(coordination): read-back receipts for mailbox and board`.
 
 ### M4 — Evidence bundle core · M–L
@@ -253,3 +256,6 @@ Run each item against the final branch. Record evidence (command + output) in th
 - **M2 complete** — 2026-11-01: `src/secrets.ts` (7 pattern classes, reject/redact policy),
   `src/audit.ts` (hash chain, rotation, head sidecar, tamper/truncate detection, drain/close),
   coordinator hooks, config keys, README config rows, 15 new offline tests; full suite 374/374.
+- **M3 complete** — 2026-11-01: canonical `sha256` on mailbox/board entries, read-back receipts in
+  `pi_message` / `pi_board_post` / internal endpoints, legacy entries still verify, tamper and missing
+  entries fail closed; 7 new tests; full suite 381/381.
