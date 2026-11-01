@@ -67,6 +67,9 @@ async function fixture(fn) {
     dataDir: join(root, "data"),
     workspaceRoot: join(root, "workers"),
     defaultRepo: repo,
+    // Container workers reach the daemon through the host gateway, so Linux
+    // refuses a loopback-only listener; bind a reachable interface.
+    host: "0.0.0.0",
     autoClean: false,
     sandbox: "docker",
     sandboxImage: "fake:test",
@@ -201,6 +204,7 @@ test("spec.isolation cannot bypass the configured sandbox policy", async () => {
 
     const dockerConfig = loadConfig({
       dataDir: join(root, "data2"), workspaceRoot: join(root, "workers2"), defaultRepo: repo,
+      host: "0.0.0.0",
       autoClean: false, sandbox: "docker", sandboxImage: "fake:test", dockerBin: join(root, "fake-docker"),
     });
     await writeFile(join(root, "fake-docker"), "#!/bin/sh\nexit 1\n");

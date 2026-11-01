@@ -80,19 +80,24 @@ test('container health authenticates at the configured port and fails unauthoriz
 
 test('doctor uses daemon env precedence and background checks require persisted credentials', async () => fixture(async (dir) => {
   const file = join(dir, 'env');
+  // A private HOME keeps a real ~/.pi/agent/auth.json from supplying credentials:
+  // the machine running this test must not be able to make the check pass.
+  const home = join(dir, 'home');
   writeEnvFile({PI_COFFEE_PROVIDER: 'deepseek', PI_COFFEE_DATA_DIR: join(dir, 'data'), DEEPSEEK_API_KEY: 'fixture-key'}, file);
-  const env = {...cleanEnv(), PI_COFFEE_ENV_FILE: file, PI_COFFEE_PROVIDER: 'openai', OPENAI_API_KEY: 'fixture-only-shell-key'};
-  const result = await run('scripts/doctor.mjs', env, ['--background']);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_COFFEE_ENV_FILE: file, PI_COFFEE_PROVIDER: 'openai', OPENAI_API_KEY: 'fixture-only-shell-key'};
   // An exported value wins over the settings file, exactly like scripts/start.mjs:
   // otherwise the doctor reports on a provider the daemon is not running with.
+  // This is the interactive form (`npm run doctor`), where a transient shell key
+  // is a legitimate credential; persistence is what --background demands.
+  const result = await run('scripts/doctor.mjs', env);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /ok\s+credentials for openai/);
   assert.doesNotMatch(result.stdout, /credentials for deepseek/);
   assert.doesNotMatch(result.stdout + result.stderr, /fixture-key|fixture-only-shell-key/);
   writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-no-auth-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
-  // A private HOME ensures no real pi auth.json is inspected or supplies credentials.
   // The exported provider still wins, and its key exists only in the shell, so the
   // background check must fail: nothing persisted would let a service start.
-  const background = await run('scripts/doctor.mjs', {...env, HOME: dir, USERPROFILE: dir, PI_AUDIT_NO_AUTH_PROVIDER_API_KEY: 'shell-only'}, ['--background']);
+  const background = await run('scripts/doctor.mjs', {...env, PI_AUDIT_NO_AUTH_PROVIDER_API_KEY: 'shell-only'}, ['--background']);
   assert.match(background.stdout, /FAIL\s+credentials for openai/);
   assert.equal(background.code, 1);
 }));

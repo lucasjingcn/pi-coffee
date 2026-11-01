@@ -318,13 +318,15 @@ export class PiRpcClient extends EventEmitter {
       } while (Date.now() < deadline);
       return !alive() && (proc.exitCode !== null || proc.signalCode !== null);
     };
-    try { proc.stdin.end(); } catch { /* termination below still applies */ }
     // pi tears its detached tools down only in its SIGTERM/SIGHUP handlers; the
     // stdin-EOF shutdown path returns before them, so a fast exit here still
-    // leaves bash tools in their own process groups. Sample the tree while the
-    // worker can still have children, then verify survivors on every path — not
-    // only after a SIGKILL.
+    // leaves bash tools in their own process groups. Sample the tree *before*
+    // closing stdin: once pi exits, its children are reparented and no longer
+    // appear under this pid, so a later sample silently reads "no descendants"
+    // and confirms the stop while a detached tool is still writing. Then verify
+    // survivors on every path — not only after a SIGKILL.
     const tracked = await descendantPids(pid);
+    try { proc.stdin.end(); } catch { /* termination below still applies */ }
     if (!await wait(1000)) {
       // pi runs its own detached-tool cleanup on SIGTERM.
       signal("SIGTERM");

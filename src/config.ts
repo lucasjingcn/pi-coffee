@@ -142,6 +142,28 @@ function invalid(field: string, key: string, detail: string): never {
   throw new Error(`Invalid configuration for ${field} [${key}]: ${detail}`);
 }
 
+/**
+ * Why a docker worker container could not reach this daemon, or undefined.
+ *
+ * A container reaches the daemon through `host.docker.internal`, which Docker
+ * maps to the host-gateway bridge address on Linux; a loopback-only listener is
+ * unreachable from there, so the spawn would report success and the worker could
+ * not authorize a single write. Docker Desktop on macOS proxies loopback into
+ * the container, so the rule is Linux-only. Exported for a platform-independent
+ * test: `process.platform` cannot be varied for the real loadConfig path.
+ */
+export function sandboxCoordHostProblem(input: {
+  platform: NodeJS.Platform;
+  sandbox: string;
+  coordHost: string;
+  host: string;
+}): string | undefined {
+  if (input.sandbox !== "docker" || input.platform !== "linux") return undefined;
+  if (input.coordHost !== "host.docker.internal" || !isLoopbackHost(input.host)) return undefined;
+  return `the daemon listens on ${input.host}, which a container cannot reach through host-gateway; `
+    + "set PI_COFFEE_HOST to a reachable interface (with PI_COFFEE_TOKEN) or point this at a coord address the containers can reach";
+}
+
 interface NumberRules {
   integer: boolean;
   min: number;
@@ -477,14 +499,15 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
         "worker containers need the daemon for write authorization; keep the bridge network");
     }
     // Docker's host-gateway is the bridge address, while the default listener is
-    // loopback-only. On Linux that combination cannot connect (Docker Desktop on
-    // macOS proxies loopback into the container), so refuse it up front instead
-    // of spawning workers that can never write.
-    if (process.platform === "linux" && base.sandboxCoordHost === "host.docker.internal" && isLoopbackHost(base.host)) {
-      invalid("sandboxCoordHost", "PI_COFFEE_SANDBOX_COORD_HOST",
-        `the daemon listens on ${base.host}, which a container cannot reach through host-gateway; `
-        + "set PI_COFFEE_HOST to a reachable interface (with PI_COFFEE_TOKEN) or point this at a coord address the containers can reach");
-    }
+    // loopback-only. On Linux that combination cannot connect, so refuse it up
+    // front instead of spawning workers that can never write.
+    const coordProblem = sandboxCoordHostProblem({
+      platform: process.platform,
+      sandbox: base.sandbox,
+      coordHost: base.sandboxCoordHost,
+      host: base.host,
+    });
+    if (coordProblem) invalid("sandboxCoordHost", "PI_COFFEE_SANDBOX_COORD_HOST", coordProblem);
   }
   if (base.dashboardActions && !base.token) {
     invalid("dashboardActions", "PI_COFFEE_DASHBOARD_ACTIONS", "requires PI_COFFEE_TOKEN to be set");

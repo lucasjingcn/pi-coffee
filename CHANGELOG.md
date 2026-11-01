@@ -17,6 +17,15 @@ All notable changes to pi-coffee are recorded here. The format follows
 
 ### Fixed
 
+- The suite is green on Linux and macOS CI again. Three environment-dependent
+  failures: docker-worker fixtures bound a loopback listener that the Linux
+  coord-host guard correctly refuses (they now bind a reachable interface, and the
+  guard itself is exercised through an exported platform-parameterised predicate);
+  the doctor credential test only passed on a machine with a real
+  `~/.pi/agent/auth.json` (it now runs with a private HOME and checks the
+  interactive/background distinction directly); and `pi`'s descendant tree was
+  sampled *after* closing stdin, so a fast graceful exit could confirm the stop
+  with a detached tool still running — it is sampled before EOF now.
 - Sandbox containers now mount the git metadata their checkout points at. A linked
   worktree keeps `.git` as a file naming `<repo>/.git/worktrees/<name>`, so a
   container that mounted only the candidate made every git-dependent acceptance

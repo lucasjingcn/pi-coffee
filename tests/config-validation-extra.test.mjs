@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { loadConfig } from "../dist/config.js";
+import { loadConfig, sandboxCoordHostProblem } from "../dist/config.js";
 
 test("parallelWarnThreshold validates env and overrides, override wins over invalid env", () => {
   const key = "PI_COFFEE_PARALLEL_WARN";
@@ -85,8 +85,34 @@ test("worker sandbox refuses a network that cannot reach the daemon", () => {
     () => loadConfig({ sandbox: "docker", sandboxImage: "img:1", sandboxNetwork: "none" }),
     /sandboxNetwork|PI_COFFEE_SANDBOX_NETWORK/,
   );
-  const ok = loadConfig({ sandbox: "docker", sandboxImage: "img:1", sandboxNetwork: "bridge" });
+  // On Linux a container reaches the daemon through the host-gateway bridge
+  // address, so a loopback-only listener is refused; the fixture therefore binds
+  // a reachable interface, which is what a Linux docker deployment needs.
+  const ok = loadConfig({ sandbox: "docker", sandboxImage: "img:1", sandboxNetwork: "bridge", host: "0.0.0.0" });
   assert.equal(ok.sandboxNetwork, "bridge");
+});
+
+test("a loopback listener is refused for docker workers only on Linux", () => {
+  // `process.platform` cannot be varied, so the rule is exercised through the
+  // exported predicate that loadConfig applies.
+  const loopback = { sandbox: "docker", coordHost: "host.docker.internal", host: "127.0.0.1" };
+  assert.match(sandboxCoordHostProblem({ platform: "linux", ...loopback }) ?? "", /cannot reach through host-gateway/);
+  assert.equal(sandboxCoordHostProblem({ platform: "darwin", ...loopback }), undefined, "Docker Desktop proxies loopback");
+  assert.equal(
+    sandboxCoordHostProblem({ platform: "linux", ...loopback, coordHost: "172.17.0.1" }),
+    undefined,
+    "an explicit reachable coord host is fine",
+  );
+  assert.equal(
+    sandboxCoordHostProblem({ platform: "linux", ...loopback, host: "0.0.0.0" }),
+    undefined,
+    "a reachable listener is fine",
+  );
+  assert.equal(
+    sandboxCoordHostProblem({ platform: "linux", ...loopback, sandbox: "worktree" }),
+    undefined,
+    "host execution does not cross the container boundary",
+  );
 });
 
 test("the verification temp root is configurable and must be absolute", () => {

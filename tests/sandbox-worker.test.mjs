@@ -81,6 +81,9 @@ async function fixture(fn) {
   git(repo, "commit", "-qm", "base");
   const config = loadConfig({
     dataDir: join(root, "data"), workspaceRoot: join(root, "workers"), defaultRepo: repo,
+    // A container reaches the daemon through the host-gateway bridge address, so a
+    // loopback-only listener is refused on Linux; bind a reachable interface here.
+    host: "0.0.0.0",
     autoClean: false, sandbox: "docker", sandboxImage: "agent:latest", dockerBin,
   });
   const c = new Coordinator(config);

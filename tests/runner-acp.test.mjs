@@ -108,6 +108,8 @@ test("ACP cannot run inside the docker sandbox", async () => {
     execFileSync("git", ["-C", repo, "commit", "-qm", "init"]);
     const config = loadConfig({
       dataDir: join(root, "data"), workspaceRoot: join(root, "workers"), defaultRepo: repo, autoClean: false,
+      // Container workers need a listener a bridge container can reach (Linux).
+      host: "0.0.0.0",
       sandbox: "docker", sandboxImage: "fake:test", dockerBin: join(root, "missing-docker"),
     });
     const c = new Coordinator(config);
