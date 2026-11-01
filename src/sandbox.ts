@@ -119,13 +119,19 @@ export class DockerSandbox {
     const name = `pi-coffee-verify-${randomBytes(6).toString("hex")}`;
     const envArgs: string[] = [];
     const seen = new Set<string>();
-    const forward = (key: string, value: string | undefined) => {
-      if (!value || seen.has(key)) return;
+    // Allowlisted host names are forwarded by reference (`-e NAME`) so their
+    // values never appear in the docker argv. Validator-provided extras are
+    // inline because they exist only in the gate, not in the daemon env.
+    for (const key of this.config.envAllow) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      envArgs.push("-e", key);
+    }
+    for (const [key, value] of Object.entries(extraEnv ?? {})) {
+      if (seen.has(key)) continue;
       seen.add(key);
       envArgs.push("-e", `${key}=${value}`);
-    };
-    for (const key of this.config.envAllow) forward(key, process.env[key]);
-    for (const [key, value] of Object.entries(extraEnv ?? {})) forward(key, value);
+    }
     const argv = [
       shellQuote(this.config.dockerBin), "run", "--rm", "--name", shellQuote(name),
       "--network", shellQuote(this.config.network),

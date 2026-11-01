@@ -15,6 +15,7 @@ function fakeCoord() {
     stop: async (...args) => { calls.push(["stop", ...args]); },
     diff: async () => "",
     tail: async () => ({ entries: [], leafId: null }),
+    snapshot: () => ({ instructionsSent: 0 }),
   };
 }
 
@@ -153,4 +154,18 @@ test("the HTML only advertises actions when they are enabled", async () => {
 test("enabling dashboard actions without a token is a startup error", async () => {
   const { loadConfig } = await import("../dist/config.js");
   assert.throws(() => loadConfig({ dashboardActions: true }), /PI_COFFEE_DASHBOARD_ACTIONS/);
+});
+
+
+test("dashboard send respects the two-strikes gate", async () => {
+  const coord = fakeCoord();
+  coord.snapshot = () => ({ instructionsSent: 2 });
+  await withServer({ coord, token: TOKEN, actions: true }, async (base) => {
+    const response = await fetch(`${base}/dashboard/api/actions/sessions/s1/send`, {
+      method: "POST", headers: actionHeaders(TOKEN), body: JSON.stringify({ message: "one more fix" }),
+    });
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), /two-strikes gate/);
+  });
+  assert.deepEqual(coord.calls.filter((call) => call[0] === "send"), []);
 });

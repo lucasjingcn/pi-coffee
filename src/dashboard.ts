@@ -546,15 +546,17 @@ const MAX_ACTION_BODY = 64 * 1024;
 async function readActionBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
   const chunks: Buffer[] = [];
   let size = 0;
+  let tooLarge = false;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
     if (size > MAX_ACTION_BODY) {
-      req.destroy();
-      return undefined;
+      tooLarge = true;
+      continue; // drain the remainder so a proper 400 can still be written
     }
     chunks.push(buffer);
   }
+  if (tooLarge) return undefined;
   if (size === 0) return {};
   try {
     const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -614,6 +616,10 @@ async function handleAction(coord: Coordinator, req: IncomingMessage, res: Serve
     if (action === "send") {
       const message = typeof body.message === "string" ? body.message.trim() : "";
       if (!message) return sendJson(res, 400, { error: "message is required" });
+      const meta = coord.snapshot(id);
+      if ((meta.instructionsSent ?? 0) >= 2) {
+        return sendJson(res, 400, { error: "two-strikes gate: this session already has its initial task and one correction; take the work over instead" });
+      }
       await coord.send(id, message, "prompt");
     } else if (action === "finish") {
       const note = typeof body.note === "string" ? body.note : undefined;

@@ -277,7 +277,9 @@ export async function writeEvidenceBundle(dataDir: string, input: EvidenceBundle
       candidateTree: input.candidateTree,
       baseRef: input.baseRef,
       command: input.command,
-      validators: input.validators,
+      // Manifest carries metadata only: raw stdout/stderr live in capped, redacted
+      // log files; keeping them here would leak redacted secrets and bypass caps.
+      validators: input.validators?.map(({ stdout: _stdout, stderr: _stderr, ...rest }) => rest),
       passed: input.passed,
       ...(input.failure !== undefined ? { failure: input.failure } : {}),
       ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),

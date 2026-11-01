@@ -190,7 +190,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       case "/internal/capabilities":
         return sendJson(res, 200, capabilitiesPayload({
           workerStartupPolicy: WORKER_STARTUP_POLICY,
-          internalEndpoints: Object.keys(internalSchemas),
+          internalEndpoints: [...new Set([...Object.keys(internalSchemas), "/internal/health", "/internal/shutdown", "/internal/capabilities"])],
         }));
 
       case "/internal/hello": {

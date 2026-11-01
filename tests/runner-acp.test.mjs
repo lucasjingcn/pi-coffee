@@ -150,11 +150,12 @@ rl.on("line", (line) => {
   if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId } });
   if (frame.method === "session/prompt") {
     rl.pendingPrompt = frame.id;
-    send({ jsonrpc: "2.0", id: 900, method: "session/request_permission", params: { options: [{ optionId: "allow_once" }] } });
+    send({ jsonrpc: "2.0", id: 900, method: "session/request_permission", params: { options: [{ optionId: "allow_once" }, { optionId: "deny_once" }] } });
     return;
   }
   if (frame.id === 900) {
-    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "permission-ok" } } } });
+    const choice = frame.result?.outcome?.optionId ?? "none";
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "selected:" + choice } } } });
     send({ jsonrpc: "2.0", id: rl.pendingPrompt, result: { stopReason: "end_turn" } });
     return;
   }
@@ -211,6 +212,28 @@ test("ACP ignores malformed frames instead of failing the handshake", async () =
     await client.start();
     const result = await client.prompt("hello");
     assert.equal(result.success, true);
+  } finally {
+    await client.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("ACP deny answers select a reject option instead of the first allow option", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-acp-deny-"));
+  const script = join(root, "fake-perm");
+  await writeFile(script, FAKE_ACP_PERMISSION);
+  await chmod(script, 0o755);
+  const transcriptPath = join(root, "deny.jsonl");
+  const client = new AcpClient({ command: [process.execPath, script], cwd: root, transcriptPath });
+  try {
+    await client.start();
+    const pending = client.prompt("needs permission");
+    const request = await new Promise((resolve) => client.once("ui_request", resolve));
+    client.respondUi({ type: "extension_ui_response", id: request.id, confirmed: false });
+    await pending;
+    const transcript = await readFile(transcriptPath, "utf8");
+    assert.match(transcript, /"optionId":"deny_once"/);
   } finally {
     await client.stop();
     await rm(root, { recursive: true, force: true });
