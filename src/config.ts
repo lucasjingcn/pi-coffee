@@ -365,7 +365,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   const here = dirname(fileURLToPath(import.meta.url));
 
   const base: Config = {
-    host: env("PI_COFFEE_HOST") ?? "127.0.0.1",
+    // The docker coord-host rule validates this value, and overrides are applied
+    // only after validation: honour `overrides.host` here so a caller (tests, the
+    // daemon's own config builder) validates the listener it actually asked for.
+    host: overrides.host ?? env("PI_COFFEE_HOST") ?? "127.0.0.1",
     port: resolveNumber(overrides, "port", "PI_COFFEE_PORT", 8787, {
       integer: true,
       min: 1,
