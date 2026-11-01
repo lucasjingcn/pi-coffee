@@ -68,6 +68,8 @@ test('container health authenticates at the configured port and fails unauthoriz
   const compose = await readFile('docker-compose.yml', 'utf8');
   assert.match(docker, /COPY scripts\/container-health\.mjs/);
   assert.match(docker, /CMD node scripts\/container-health\.mjs/);
+  // `ps` proves worker process ownership; the runtime image must ship it.
+  assert.match(docker, /apt-get install -y --no-install-recommends [^\n]*procps/);
   assert.match(compose, /127\.0\.0\.1:\$\{PI_COFFEE_PORT:-8787\}:\$\{PI_COFFEE_PORT:-8787\}/);
   assert.match(compose, /scripts\/container-health\.mjs/);
 }));

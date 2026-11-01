@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {captureWorkerProcess,stopOwnedWorker} from '../dist/worker-process.js';
-const posix={skip:process.platform==='win32'};
+// Ownership probes shell out to `ps`. Environments that deny or lack it cannot
+// exercise these paths, and a throw used to leak the detached fixture child and
+// hang the whole test file (node:test has no timeout for that). Skip instead.
+const psUnavailable = spawnSync('ps',['-p',String(process.pid)],{stdio:'ignore'}).status !== 0;
+const posix = process.platform === 'win32'
+  ? {skip:'POSIX process groups only'}
+  : psUnavailable ? {skip:'ps is required for worker ownership probes'} : {};
 async function child(code='setInterval(()=>{},1000)') {
   const p=spawn(process.execPath,['-e',code],{detached:true,stdio:['ignore','pipe','ignore']});
   await new Promise((resolve,reject)=>{p.once('spawn',resolve);p.once('error',reject);});
@@ -32,9 +38,11 @@ test('wrong start fingerprint refuses to signal live root',posix,async()=>{
 });
 test('already absent owned group needs no signal',posix,async()=>{
   const p=await child();
-  const identity=await captureWorkerProcess(p.pid);
-  await cleanup(p);
-  await stopOwnedWorker(identity);
+  try {
+    const identity=await captureWorkerProcess(p.pid);
+    await cleanup(p);
+    await stopOwnedWorker(identity);
+  } finally {await cleanup(p);}
 });
 test('root absent but descendants still alive refuses automatic recovery',posix,async()=>{
   const p=await child(`const {spawn}=require('node:child_process');

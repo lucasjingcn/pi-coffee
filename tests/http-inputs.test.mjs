@@ -115,3 +115,21 @@ test('board GET respects the worker extension key query', {timeout: 10000}, asyn
   const body = await (await fetch(base + '/internal/board/get?board=audit&key=wanted')).json();
   assert.deepEqual(body.entries.map(e => e.key), ['wanted']);
 }));
+
+test('mutating internal endpoints reject GET so a local page cannot trigger side effects', {timeout: 10000}, async () => daemon(async base => {
+  // Drain status is a read and stays available over GET.
+  const status = await fetch(base + '/internal/drain');
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).draining, false);
+  const mutating = ['/internal/hello', '/internal/claim', '/internal/authorize-write', '/internal/release',
+    '/internal/read', '/internal/send', '/internal/board/post', '/internal/drain?action=start',
+    '/internal/drain?action=cancel', '/internal/shutdown'];
+  for (const path of mutating) {
+    const response = await fetch(base + path);
+    assert.equal(response.status, 405, `GET ${path} must be rejected`);
+    assert.match(response.headers.get('allow') ?? '', /POST/);
+  }
+  const health = await (await fetch(base + '/internal/health')).json();
+  assert.equal(health.ok, true, 'daemon is still running');
+  assert.equal(health.draining, false, 'a GET drain must not start draining');
+}));

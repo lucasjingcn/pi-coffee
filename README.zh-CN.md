@@ -307,8 +307,9 @@ docker compose down -v                                # 停止并清掉 daemon �
    传入 `pi_verify` 返回的 `id` 作为 `verification_id`。`requirements` 对每项填写 `{id,met:true,evidence}`，
    `test_changes` 对每个既有验证文件填写 `{path,approved:true,reason}`。漏项、重复、未知项、负面结论或
    空证据都不通过。统筹方必须实际审查原始测试与完整 diff；结构完整并不自动证明语义正确。
-   常规测试目录、test/spec 文件及常见测试框架配置自动识别；项目其他验证定义用 `spec.validation_paths`
-   指定（例如 `package.json`、CI 脚本）。旧测试纯追加也需确认，纯新增文件不触发此项门禁。
+   常规测试目录、test/spec 文件及常见测试框架配置自动识别；`package.json`、锁文件、`Makefile`、
+   Docker/Compose 文件以及 `.github/workflows`、`.github/actions` 默认也算验证定义；其余用
+   `spec.validation_paths` 指定。旧测试纯追加也需确认，纯新增文件不触发此项门禁。
 6. `pi_merge` 要求当前候选的有效通过证据与必要的审查记录。提交变化、验收文件篡改、超范围改动、脏目标工作树、失败
    或超时都阻止集成；候选变化后重新验收。daemon 重启不会恢复历史合并许可。
 7. 用 `pi_finish` 关闭工作流，查看 `pi_report` / `pi_metrics`。成功结局须有通过的验收；代码改动还须
@@ -483,7 +484,8 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 
 - **worktree**：已完成的工作流超过 `PI_COFFEE_WORKTREE_TTL_MIN`，或未收尾但干净的工作流超过
   `PI_COFFEE_WORKTREE_FINAL_TTL_MIN`（默认 7 天）；脏树一律保留；
-- **转录**（`PI_COFFEE_DATA_DIR/sessions/<id>`）：仅限已停止**且**已收尾的会话；
+- **转录**（`PI_COFFEE_DATA_DIR/sessions/<id>`）：已停止**且**已收尾的会话，或工作已无法挽救的未收尾会话
+  （48h 保留期已过，且 worktree 与 worker 分支都已不在）；
 - **分支**：只在被明确要求时删 —— `pi_stop` 带 `delete_branch`（或 `PI_COFFEE_DELETE_BRANCHES=1`），
   以及 `pi_gc` 对已证明合并进目标的尖端。
 

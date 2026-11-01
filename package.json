@@ -25,7 +25,7 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "inspect": "node scripts/inspect.mjs",
-    "test": "npm run build && node --test --test-concurrency=4 tests/*.test.mjs",
+    "test": "npm run build && node --test --test-concurrency=4 --test-timeout=120000 --test-force-exit tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
     "verify": "node scripts/ensure-deps.mjs && npm run typecheck && npm run typecheck:extensions && npm test && node scripts/sync-playbook.mjs --check",

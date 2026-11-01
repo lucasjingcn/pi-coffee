@@ -68,6 +68,9 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now "$UNIT_NAME"
+  # `enable --now` starts an inactive unit but leaves an active one running the
+  # old build. Restart so an upgrade actually loads the rebuilt dist.
+  systemctl restart "$UNIT_NAME"
   echo "installed system service: $UNIT"
   echo "  endpoint: check PI_COFFEE_PORT in the setup file (default http://127.0.0.1:8787/mcp)"
   echo "  status:   systemctl status $UNIT_NAME"
@@ -94,6 +97,9 @@ WantedBy=default.target
 EOF
   systemctl --user daemon-reload
   systemctl --user enable --now "$UNIT_NAME"
+  # `enable --now` starts an inactive unit but leaves an active one running the
+  # old build. Restart so an upgrade actually loads the rebuilt dist.
+  systemctl --user restart "$UNIT_NAME"
   echo "installed user service: $UNIT"
   echo "  endpoint: check PI_COFFEE_PORT in the setup file (default http://127.0.0.1:8787/mcp)"
   echo "  start on boot (run once): loginctl enable-linger $USER"

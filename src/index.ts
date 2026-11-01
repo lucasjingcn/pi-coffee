@@ -147,6 +147,19 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
     return sendJson(res, 401, { error: "unauthorized" });
   }
 
+  // Mutating endpoints may only be reached with POST/PATCH. The switch below has
+  // no method branch, so a GET used to execute side effects (including
+  // /internal/shutdown), which any local process or page could trigger.
+  // Exception: the drain `status` action is a read, and operators poll it with GET.
+  const readOnlyDrain = url.pathname === "/internal/drain"
+    && (url.searchParams.get("action") ?? "status") === "status";
+  const methodAllowed = req.method === "POST" || req.method === "PATCH" || readOnlyDrain;
+  if (mutating.has(url.pathname) && !methodAllowed) {
+    res.writeHead(405, { "content-type": "application/json", allow: readOnlyDrain ? "GET, POST" : "POST" });
+    res.end(JSON.stringify({ error: "method not allowed", allow: readOnlyDrain ? "GET, POST" : "POST" }));
+    return;
+  }
+
   let body: any = {};
   try {
     if (req.method === "POST" || req.method === "PATCH") {

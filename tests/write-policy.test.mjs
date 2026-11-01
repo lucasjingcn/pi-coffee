@@ -41,6 +41,8 @@ test('write policy fails closed on outages and malformed replies, recovers and r
       mode='invalid-claim';assert.equal((await run('write',{path:'file.txt'})).block,true);
       mode='conflict';assert.match((await run('write',{path:'conflicted.txt'})).reason,/other/);
       mode='ok';assert.equal(await run('write',{path:'file.txt'}),undefined);
+      const claimsBefore=claims;assert.equal(await run('write',{path:'file.txt'}),undefined);
+      assert.equal(claims,claimsBefore+1,'every write revalidates its claim with the daemon');
       const oldClaims=claims;mode='refused';assert.equal((await run('write',{path:'file.txt'})).block,true);
       assert.equal(claims,oldClaims,'cached claims still require live write permission');
       assert.equal(await run('read',{path:'file.txt'}),undefined,'reads stay available during outage');
@@ -51,6 +53,8 @@ test('write policy fails closed on outages and malformed replies, recovers and r
       assert.equal((await run('bash',{command:'printf wrong > ../outside/file.txt'})).block,true);
       assert.equal(await run('bash',{command:'ls .. 2>/dev/null | head -5'}),undefined,'null device redirects stay allowed');
       assert.equal(await run('bash',{command:'grep -r x . >/dev/null 2>&1'}),undefined,'silencing output stays allowed');
+      assert.equal(await run('bash',{command:'ls .. 2>/dev/stderr | head -5'}),undefined,'stderr redirects stay allowed');
+      assert.equal(await run('bash',{command:'echo ok >/dev/stdout; echo e >/dev/fd/2'}),undefined,'fd self-references stay allowed');
       assert.ok(permissions>0);console.log('WRITE POLICY OK');
     }finally{await rm(root,{recursive:true,force:true});}
   `;

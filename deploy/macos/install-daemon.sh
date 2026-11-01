@@ -19,6 +19,15 @@ if [ ! -f "$PROJECT_DIR/dist/index.js" ]; then
   exit 1
 fi
 
+# bootout sends SIGTERM, and the daemon stops its workers on SIGTERM. Refuse to
+# interrupt a live coordinator unless the operator explicitly forces it.
+if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state = running'; then
+  if [ "${1:-}" != "--force" ]; then
+    echo "error: pi-coffee daemon is running. Stop it after workers finish, or rerun with --force." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$LA_DIR" "$LOG_DIR"
 chmod +x "$PROJECT_DIR/run.sh" 2>/dev/null || true
 

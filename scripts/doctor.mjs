@@ -51,6 +51,19 @@ if (process.platform === "win32") {
   check("Git Bash", Boolean(bashBin), bashBin ?? "not found", "install Git for Windows with Git Bash");
 }
 
+// --- process ownership probe ---
+// The daemon proves worker process ownership with `ps` (group id + start time).
+// Minimal images such as node:22-bookworm-slim do not ship it.
+if (process.platform !== "win32") {
+  const psProbe = run("ps", ["-p", String(process.pid), "-o", "lstart=", "-o", "pgid="]);
+  check(
+    "ps (worker ownership probe)",
+    Boolean(psProbe),
+    psProbe ? "available" : "not found",
+    "install procps (Debian/Ubuntu) or make ps available on PATH",
+  );
+}
+
 // --- pi ---
 const piBin = resolvePiBin();
 const piVer = piBin ? piVersion(piBin) : undefined;

@@ -85,8 +85,8 @@ test("TTL sweep removes only session dirs whose session is stopped and older tha
   });
 });
 
-test("the periodic sweep applies the TTL end to end and autoClean=false disables it", async () => {
-  await fixture(async (c, config, root) => {
+test("the periodic sweep keeps a transcript while the session can still be resumed", async () => {
+  const repoFixture = async (run) => fixture(async (c, config, root) => {
     const repo = join(root, "repo");
     await mkdir(repo);
     const git = (...args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
@@ -96,14 +96,29 @@ test("the periodic sweep applies the TTL end to end and autoClean=false disables
     await writeFile(join(repo, "base.txt"), "base\n");
     git("add", "-A");
     git("commit", "-qm", "init");
-    // The live branch keeps the session out of reclaimStale; only the TTL may remove it.
-    git("branch", "pi/keep-alive");
+    await run({ c, config, repo, git });
+  });
 
-    const id = "expired-stopped";
+  // A live branch means the work can still be checked out: the transcript is what
+  // pi_resume needs, so the TTL must not delete it (README: never reclaimed).
+  await repoFixture(async ({ c, config, repo, git }) => {
+    git("branch", "pi/keep-alive");
+    const id = "expired-but-resumable";
     await makeSessionDir(config, id, OLD);
     c.history.push({ ...schemaMeta(id, Date.now() - 49 * HOUR), repo, branch: "pi/keep-alive" });
 
-    await c["sweep"]();
+    assert.equal(await c["sweepSessionDirs"](), 0);
+    assert.equal(existsSync(join(config.dataDir, "sessions", id)), true);
+    assert.equal((await readEvents(config.dataDir)).some((event) => event.event === "reclaim" && event.id === id), false);
+  });
+
+  // Beyond recovery (worktree gone, no outcome, branch gone) the TTL still applies.
+  await repoFixture(async ({ c, config, repo }) => {
+    const id = "expired-beyond-recovery";
+    await makeSessionDir(config, id, OLD);
+    c.history.push({ ...schemaMeta(id, Date.now() - 49 * HOUR), repo, branch: "pi/gone" });
+
+    assert.equal(await c["sweepSessionDirs"](), 1);
     assert.equal(existsSync(join(config.dataDir, "sessions", id)), false);
     const reclaim = (await readEvents(config.dataDir)).find((event) => event.event === "reclaim" && event.id === id);
     assert.ok(reclaim);
