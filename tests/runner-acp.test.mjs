@@ -239,3 +239,137 @@ test("ACP deny answers select a reject option instead of the first allow option"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const FAKE_ACP_SERIAL = `#!/usr/bin/env node
+const readline = require("node:readline");
+const fs = require("node:fs");
+const rl = readline.createInterface({ input: process.stdin });
+const sessionId = "acp-session-1";
+const journal = process.argv[2];
+let active = 0;
+function log(entry) { fs.appendFileSync(journal, JSON.stringify(entry) + "\\n"); }
+function send(frame) { process.stdout.write(JSON.stringify(frame) + "\\n"); }
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId } });
+  if (frame.method === "session/prompt") {
+    const text = (frame.params?.prompt ?? []).map((part) => part.text ?? "").join("");
+    active += 1;
+    log({ event: "start", text, active });
+    const delay = /slow/.test(text) ? 400 : 60;
+    const id = frame.id;
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "echo:" + text } } } });
+      active -= 1;
+      log({ event: "end", text, active });
+      send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+    }, delay);
+    return;
+  }
+  if (frame.method === "session/cancel") return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+  if (frame.id !== undefined) return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+});
+`;
+
+async function waitFor(check, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (check()) return;
+    if (Date.now() > deadline) throw new Error("condition not reached before timeout");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+async function readJournal(path) {
+  return (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test("ACP queues a second instruction instead of racing the running turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-acp-serial-"));
+  const script = join(root, "fake-serial");
+  const journal = join(root, "journal.jsonl");
+  await writeFile(script, FAKE_ACP_SERIAL);
+  await chmod(script, 0o755);
+  const client = new AcpClient({ command: [process.execPath, script, journal], cwd: root, transcriptPath: join(root, "serial.jsonl") });
+  const events = [];
+  client.on("event", (event) => events.push(event.type));
+  try {
+    await client.start();
+    const first = client.prompt("slow turn");
+    assert.equal(client.isStreaming, true);
+    const second = await client.prompt("fast turn");
+    assert.equal(second.success, true);
+    assert.equal(second.data.queued, true, "a busy ACP worker acks a queued instruction");
+    // The queued turn is pending work: the worker must not look settled until it ran.
+    assert.equal(client.isStreaming, true);
+    assert.equal((await client.getState()).isStreaming, true);
+    await first;
+    assert.equal(client.isStreaming, true, "the queued turn is still outstanding");
+    await waitFor(() => !client.isStreaming);
+    assert.equal(client.isStreaming, false);
+    assert.deepEqual(events.filter((type) => type !== "message_update"),
+      ["agent_start", "message_end", "message_end", "agent_settled"]);
+    assert.deepEqual(await readJournal(journal), [
+      { event: "start", text: "slow turn", active: 1 },
+      { event: "end", text: "slow turn", active: 0 },
+      { event: "start", text: "fast turn", active: 1 },
+      { event: "end", text: "fast turn", active: 0 },
+    ]);
+  } finally {
+    await client.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a queued ACP instruction keeps verification, commit and settle gated", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-acp-queue-gate-"));
+  const repo = join(root, "repo");
+  const fake = join(root, "fake-serial");
+  const journal = join(root, "journal.jsonl");
+  await writeFile(fake, FAKE_ACP_SERIAL);
+  await chmod(fake, 0o755);
+  const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  await mkdir(join(repo, "src"), { recursive: true });
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "config", "user.name", "test");
+  git(repo, "config", "user.email", "test@example.com");
+  await writeFile(join(repo, "src/item.txt"), "base");
+  git(repo, "add", "src");
+  git(repo, "commit", "-qm", "base");
+  const config = loadConfig({
+    dataDir: join(root, "data"), workspaceRoot: join(root, "workers"), defaultRepo: repo, autoClean: false,
+  });
+  const c = new Coordinator(config);
+  await c.init();
+  try {
+    const worker = await c.spawn({
+      repo,
+      spec: { goal: "acp queue gate", scope: ["src/item.txt"], runner: { kind: "acp", command: [process.execPath, fake, journal] } },
+    });
+    const rt = c.get(worker.id);
+    const running = c.send(worker.id, "slow turn");
+    assert.equal(rt.client.isStreaming, true);
+    await c.send(worker.id, "fast turn");
+    // The queued instruction has not run yet, so nothing may report the worker settled.
+    assert.equal(rt.client.isStreaming, true);
+    assert.equal(rt.meta.status, "working");
+    const waited = await c.wait([worker.id], "settled", 200);
+    assert.equal(waited.timedOut, true, "pi_wait must not report a worker settled with a queued turn");
+    await assert.rejects(c.verify(worker.id), /settle the worker/i);
+    await assert.rejects(c.commit(worker.id, "queued"), /settle the worker before committing/);
+    await running;
+    await waitFor(() => rt.meta.status === "idle");
+    assert.equal(rt.client.isStreaming, false);
+    assert.equal(rt.meta.lastText, "echo:fast turn");
+    // The spawn itself is one turn (the task spec); the two assertions below are the queued pair.
+    assert.deepEqual((await readJournal(journal)).map((row) => `${row.event}:${row.text}`)
+      .filter((row) => row.endsWith("slow turn") || row.endsWith("fast turn")),
+    ["start:slow turn", "end:slow turn", "start:fast turn", "end:fast turn"]);
+  } finally {
+    await c.stopAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});

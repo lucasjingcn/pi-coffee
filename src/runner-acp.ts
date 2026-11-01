@@ -47,7 +47,18 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
   private pending = new Map<number, PendingRequest>();
   private serverRequests = new Map<number, { optionIds: string[] }>();
   private sessionId?: string;
-  private streaming = false;
+  /**
+   * Instructions accepted but not finished: the turn currently on the wire plus
+   * every turn queued behind it. ACP v1 answers one `session/prompt` per turn, so
+   * `isStreaming` must stay true while anything is still queued — `pi_wait`,
+   * `pi_verify`, `pi_commit` and `pi_finish` gate on it, and an early
+   * `agent_settled` would let verification and integration run while the agent is
+   * still writing the worktree.
+   */
+  private outstanding = 0;
+  /** Serializes turns: a `session/prompt` is only written after the previous one answered. */
+  private chain: Promise<void> = Promise.resolve();
+  private stopped = false;
   private exited = false;
   private stderr = "";
   private lastText = "";
@@ -58,7 +69,7 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
   }
 
   get isStreaming(): boolean {
-    return this.streaming;
+    return this.outstanding > 0;
   }
 
   get hasExited(): boolean {
@@ -75,6 +86,8 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
 
   async start(timeoutMs = 30_000): Promise<void> {
     if (this.proc) throw new Error("ACP client already started");
+    this.stopped = false;
+    this.exited = false;
     if (!this.opts.command.length) throw new Error("ACP runner command is empty");
     await mkdir(dirname(this.opts.transcriptPath), { recursive: true, mode: 0o700 });
     const [bin, ...args] = this.opts.command;
@@ -104,42 +117,32 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
     this.sessionId = session.sessionId;
   }
 
-  async prompt(message: string): Promise<RpcResponse> {
-    if (!this.proc || !this.sessionId) throw new Error("ACP client is not started");
-    this.lastText = "";
-    this.streaming = true;
-    this.emit("event", { type: "agent_start" });
-    try {
-      const result = await this.request("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: [{ type: "text", text: message }],
-      }, PROMPT_TIMEOUT_MS);
-      this.emit("event", {
-        type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: this.lastText }] },
-      });
-      return { type: "response", command: "prompt", success: true, data: result };
-    } catch (error) {
-      this.emit("event", { type: "message_end", message: { role: "assistant", content: [], stopReason: "error" } });
-      throw error;
-    } finally {
-      this.streaming = false;
-      this.emit("event", { type: "agent_settled" });
+  async prompt(message: string, streamingBehavior?: "steer" | "followUp"): Promise<RpcResponse> {
+    this.assertLive();
+    if (streamingBehavior || this.outstanding > 0) {
+      // ACP v1 has no steering channel, so a second instruction becomes the next
+      // turn instead of racing the running one. Ack it so the orchestrator's MCP
+      // call does not block for the rest of somebody else's turn; a failure in
+      // that queued turn still surfaces as `message_end` with `stopReason: "error"`
+      // and, through it, as a provider failure.
+      void this.acceptTurn(message).catch(() => undefined);
+      return { type: "response", command: "prompt", success: true, data: { queued: true } };
     }
+    return this.acceptTurn(message);
   }
 
   steer(message: string): Promise<RpcResponse> {
-    // ACP v1 has no steering channel; a follow-up prompt is the closest contract.
-    return this.prompt(message);
+    // ACP v1 has no steering channel; the instruction is delivered as the next turn.
+    return this.prompt(message, "steer");
   }
 
   followUp(message: string): Promise<RpcResponse> {
-    return this.prompt(message);
+    return this.prompt(message, "followUp");
   }
 
   async getState(): Promise<PiSessionState> {
     return {
-      isStreaming: this.streaming,
+      isStreaming: this.outstanding > 0,
       sessionId: this.sessionId ?? "unknown",
       sessionName: this.opts.name,
     };
@@ -154,7 +157,8 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
   }
 
   async refreshStreaming(): Promise<void> {
-    // Streaming is tracked locally; there is no remote state to reconcile.
+    // Streaming is tracked locally and there is no remote state to reconcile, so
+    // `isStreaming` is authoritative only because it counts queued turns too.
   }
 
   async setModel(): Promise<RpcResponse> {
@@ -192,6 +196,8 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
   }
 
   async stop(): Promise<void> {
+    // Refuse queued turns from here on: they belong to a worker that is going away.
+    this.stopped = true;
     if (!this.proc) {
       this.exited = true;
       return;
@@ -211,6 +217,51 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
       proc.once("exit", () => { clearTimeout(timer); resolve(); });
     });
     this.exited = true;
+  }
+
+  private assertLive(): void {
+    if (this.stopped) throw new Error("ACP client is stopped");
+    if (this.exited) throw new Error("ACP client has exited");
+    if (!this.proc || !this.sessionId) throw new Error("ACP client is not started");
+  }
+
+  /**
+   * Accept one instruction. Turns run one at a time: each is chained onto the
+   * previous one, so the agent never receives a second `session/prompt` while it
+   * is still answering the first. `agent_start`/`agent_settled` fire on the edges
+   * of the whole accepted backlog, not per turn, because a queued instruction is
+   * pending work the daemon must not report as settled.
+   */
+  private acceptTurn(message: string): Promise<RpcResponse> {
+    this.outstanding += 1;
+    if (this.outstanding === 1) this.emit("event", { type: "agent_start" });
+    const turn = this.chain.then(() => this.runTurn(message), () => this.runTurn(message));
+    this.chain = turn.then(() => undefined, () => undefined);
+    return turn.finally(() => {
+      this.outstanding -= 1;
+      if (this.outstanding === 0) this.emit("event", { type: "agent_settled" });
+    });
+  }
+
+  private async runTurn(message: string): Promise<RpcResponse> {
+    // A stop, crash or exit between accepting and running an instruction must not
+    // dispatch it: the daemon has already been told the worker is going away.
+    this.assertLive();
+    this.lastText = "";
+    try {
+      const result = await this.request("session/prompt", {
+        sessionId: this.sessionId,
+        prompt: [{ type: "text", text: message }],
+      }, PROMPT_TIMEOUT_MS);
+      this.emit("event", {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: this.lastText }] },
+      });
+      return { type: "response", command: "prompt", success: true, data: result };
+    } catch (error) {
+      this.emit("event", { type: "message_end", message: { role: "assistant", content: [], stopReason: "error" } });
+      throw error;
+    }
   }
 
   private request(method: string, params: unknown, timeoutMs: number): Promise<any> {
