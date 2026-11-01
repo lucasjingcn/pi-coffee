@@ -621,6 +621,8 @@ Everything is configured through environment variables.
 | `PI_COFFEE_LOG_KEEP` | `1` | Rotated archives kept per log (`daemon.err.log.1`, `.2`, ...). |
 | `PI_COFFEE_LOG_FORMAT` | `text` | `json` emits one JSON object per stderr line; secrets are redacted. |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | Auto-resume sessions that were active when the daemon crashed. `0` leaves them stopped for an explicit `pi_resume`. |
+| `PI_COFFEE_SECRET_POLICY` | `reject` | How coordination surfaces handle detected secrets: `reject` fails the write, `redact` replaces the span with a marker. |
+| `PI_COFFEE_AUDIT_MAX_MB` | `32` | Rotate the hash-chained audit log once the active file reaches this size (MiB). |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through
@@ -740,6 +742,15 @@ Dockerfile         image with Node, git, and pi bundled
 docker-compose.yml host-facing compose file
 .env.example       provider key / model template for Docker
 ```
+
+### Roadmap and plans
+
+The P0/P1 hardening line — durable evidence bundles, validator chains, sandboxed workers, receipted
+coordination with a hash-chained audit log, pluggable runners with ACP support, PR and merge-queue
+integration, dashboard actions, dependency-aware spawns, and MCP surface hardening — is designed in
+[docs/plans/p0-p1-development.md](docs/plans/p0-p1-development.md) and sequenced in
+[docs/plans/p0-p1-implementation.md](docs/plans/p0-p1-implementation.md). Every item is opt-in; the
+default daemon behavior stays unchanged.
 
 ### Release
 

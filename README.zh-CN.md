@@ -538,6 +538,8 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_LOG_KEEP` | `1` | 每个日志保留的归档份数（`daemon.err.log.1`、`.2`……）。 |
 | `PI_COFFEE_LOG_FORMAT` | `text` | 设为 `json` 时每条 stderr 日志是一行 JSON；敏感值会脱敏。 |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | daemon 崩溃后自动恢复崩溃时仍活跃的会话；`0` 表示留给人手动 `pi_resume`。 |
+| `PI_COFFEE_SECRET_POLICY` | `reject` | 协调面遇到疑似密钥时的策略：`reject` 拒绝写入，`redact` 用标记替换。 |
+| `PI_COFFEE_AUDIT_MAX_MB` | `32` | 审计日志（哈希链）单个文件达到该大小（MiB）后轮转。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。
@@ -637,6 +639,14 @@ Dockerfile         内置 Node、git、pi 的镜像
 docker-compose.yml 面向用户的 compose 文件
 .env.example       Docker 用的 provider 密钥 / model 模板
 ```
+
+### 路线图与计划
+
+P0/P1 加固线（可归档的证据包、验证器链、沙箱 worker、带回执与哈希链审计日志的协调、可插拔
+runner 与 ACP 支持、PR 与 merge-queue 集成、dashboard 写操作、依赖感知的 spawn、MCP 表面加固）
+的设计见 [docs/plans/p0-p1-development.md](docs/plans/p0-p1-development.md)，实施顺序见
+[docs/plans/p0-p1-implementation.md](docs/plans/p0-p1-implementation.md)。所有条目都是可选项，
+默认 daemon 行为保持不变。
 
 ### 发布
 

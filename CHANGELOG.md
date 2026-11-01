@@ -4,6 +4,24 @@ All notable changes to pi-coffee are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- P0/P1 design and implementation plans under `docs/plans/` (durable evidence bundles, validator
+  chains, sandboxed workers, receipted coordination with a hash-chained audit log, pluggable runners
+  with ACP support, PR and merge-queue integration, dashboard actions, dependency-aware spawns, and
+  MCP surface hardening).
+- Secret detection on coordination surfaces (`PI_COFFEE_SECRET_POLICY=reject|redact`, default
+  `reject`) covering mailbox text, board values, outcome notes, and evidence logs.
+- Hash-chained audit log for coordinator actions (`PI_COFFEE_AUDIT_MAX_MB`, default 32) with best-effort
+  appends for delivery/cleanup paths and fail-closed appends for authority gates.
+
+### Security
+
+- Secret-like values in mailbox messages, board entries, and outcome notes are rejected (or redacted)
+  before they are persisted.
+
 ## [0.2.0] - 2026-10-31
 
 ### Added

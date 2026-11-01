@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SecretPolicy } from "./secrets.js";
 
 export interface Config {
   /** HTTP bind host (loopback only by default). */
@@ -38,6 +39,10 @@ export interface Config {
   worktreeTtlMin: number;
   /** Final retention (minutes) before a clean worktree of an unfinished/abandoned session is removed (branch kept). 0 disables; default 7 days. */
   worktreeFinalTtlMin: number;
+  /** How coordination surfaces handle detected secrets: reject the write or redact it. */
+  secretPolicy: SecretPolicy;
+  /** Rotate the hash-chained audit log once the active file reaches this size (MiB). */
+  auditMaxMb: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -95,7 +100,7 @@ function validateNumber(field: string, key: string, value: number, rules: Number
  */
 function resolveNumber(
   overrides: Partial<Config>,
-  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs",
+  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs" | "auditMaxMb",
   key: string,
   fallback: number,
   rules: NumberRules,
@@ -132,6 +137,23 @@ function resolveBoolean(
   if (raw === "0") return false;
   if (raw === "1") return true;
   invalid(field, key, "expected 0 or 1");
+}
+
+/** Secret policy accepts only `reject` or `redact`; overrides must use the same values. */
+function resolveSecretPolicy(overrides: Partial<Config>): SecretPolicy {
+  const override = overrides.secretPolicy;
+  if (override !== undefined) {
+    if (override !== "reject" && override !== "redact") {
+      invalid("secretPolicy", "PI_COFFEE_SECRET_POLICY", 'expected "reject" or "redact"');
+    }
+    return override;
+  }
+  const raw = env("PI_COFFEE_SECRET_POLICY");
+  if (raw === undefined) return "reject";
+  if (raw !== "reject" && raw !== "redact") {
+    invalid("secretPolicy", "PI_COFFEE_SECRET_POLICY", 'expected "reject" or "redact"');
+  }
+  return raw;
 }
 
 /** Plugin allowlist env var: comma-separated globs; `*` allows everything. */
@@ -218,6 +240,13 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
     workerIdleMs: resolveNumber(overrides, "workerIdleMs", "PI_COFFEE_WORKER_IDLE_MS", 1_800_000,
       { integer: true, min: 1, max: 2_147_483_647, description: "a positive timer-safe integer" }),
+    secretPolicy: resolveSecretPolicy(overrides),
+    auditMaxMb: resolveNumber(overrides, "auditMaxMb", "PI_COFFEE_AUDIT_MAX_MB", 32, {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      description: "a positive integer number of MiB",
+    }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),

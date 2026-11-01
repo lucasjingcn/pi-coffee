@@ -20,6 +20,8 @@ import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js"
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
 import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
+import { AuditLog } from "./audit.js";
+import { applySecretPolicy } from "./secrets.js";
 import {
   commitAll,
   createWorktree,
@@ -257,6 +259,8 @@ interface RecoveryCheck {
 
 export class Coordinator {
   readonly config: Config;
+  /** Append-only, hash-chained record of coordinator actions. */
+  readonly audit: AuditLog;
 
   private runtimes = new Map<string, Runtime>();
   private locks = new LockManager();
@@ -300,6 +304,27 @@ export class Coordinator {
     this.config = config;
     this.vault = new ControlVault(config.dataDir);
     this.store = new StateStore(join(config.dataDir, "state.json"));
+    this.audit = new AuditLog({ dir: join(config.dataDir, "audit"), maxBytes: config.auditMaxMb * 1024 * 1024 });
+  }
+
+  /**
+   * Audit a guarded action. The append is part of the action: when the log cannot
+   * be written the action fails instead of proceeding unrecorded.
+   */
+  private async auditStrict(actor: string, action: string, target: string, detail?: Record<string, unknown>): Promise<void> {
+    await this.audit.append(actor, action, target, detail);
+  }
+
+  /** Cleanup/operator actions stay available even when audit persistence fails. */
+  private auditBestEffort(actor: string, action: string, target: string, detail?: Record<string, unknown>): void {
+    void this.audit.append(actor, action, target, detail).catch((error) => {
+      logLine("pi-coffee", "audit append failed", action, error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  /** Enforce the configured secret policy on a durable coordination value. */
+  private scrubSecrets(text: string, context: string): string {
+    return applySecretPolicy(text, this.config.secretPolicy, context).text;
   }
 
   async init(): Promise<void> {
@@ -796,7 +821,7 @@ export class Coordinator {
     this.notifyWaiters();
     this.scheduleSave();
 
-    return {
+    const summary = {
       worktrees_cleaned: cleaned,
       branches_deleted: branches.deleted.length,
       branches_retained: branches.retained,
@@ -808,6 +833,10 @@ export class Coordinator {
       history_compacted: reclaimed.compacted,
       remaining_live: this.runtimes.size,
     };
+    this.auditBestEffort("orchestrator", "gc", sessionIds?.join(",") ?? "*", {
+      worktrees_cleaned: cleaned, sessions_evicted: evicted,
+    });
+    return summary;
   }
 
   private async gcBranches(selected?: Set<string>): Promise<{
@@ -1014,6 +1043,9 @@ export class Coordinator {
       // Explicit shutdown/persistence requests must surface the failure, not swallow it.
       this.reportSaveError("save", error);
       throw error;
+    } finally {
+      // Await best-effort audit appends so shutdown/cleanup does not race them.
+      await this.audit.drain();
     }
   }
 
@@ -1439,6 +1471,8 @@ export class Coordinator {
       try { await this.send(id, first, "prompt"); }
       catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
     }
+    await this.auditStrict("orchestrator", "spawn", meta.id, { repo: meta.repo, branch: meta.branch,
+      provider: meta.provider, model: meta.model, purpose: meta.spec?.purpose });
     return meta;
   }
 
@@ -1489,7 +1523,9 @@ export class Coordinator {
       this.assertRepoAvailable(repoIdentity);
       this.dispatchingRepos.set(repoIdentity, (this.dispatchingRepos.get(repoIdentity) ?? 0) + 1);
       dispatchIdentity = repoIdentity;
-      return await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
+      const resumed = await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
+      await this.auditStrict("orchestrator", "resume", resumed.id, { provider: resumed.provider, model: resumed.model });
+      return resumed;
     } finally {
       if (dispatchIdentity) {
         const remaining = (this.dispatchingRepos.get(dispatchIdentity) ?? 0) - 1;
@@ -2004,6 +2040,9 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
     this.assertUnfinished(rt);
+    // Delivery stays synchronous up to the RPC await: the audit entry is queued
+    // before dispatch without adding a hop to the instruction path.
+    this.auditBestEffort("orchestrator", "send", id, { mode, chars: message.length });
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
     rt.meta.candidateReview = undefined;
@@ -2103,7 +2142,9 @@ export class Coordinator {
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
-      return commitAll(rt.meta.worktree, message);
+      const sha = await commitAll(rt.meta.worktree, message);
+      await this.auditStrict("orchestrator", "commit", id, { sha });
+      return sha;
     });
   }
 
@@ -2120,6 +2161,8 @@ export class Coordinator {
       const record = { ...structuredClone(input), verificationId, reviewedAt: Date.now() };
       rt.meta.candidateReview = record;
       this.scheduleSave();
+      await this.auditStrict("orchestrator", "review", id, { verificationId,
+        requirements: input.requirements.length, testChanges: input.test_changes.length });
       return structuredClone(record);
     });
   }
@@ -2158,6 +2201,8 @@ export class Coordinator {
         (cwd, command) => runCommand(command, cwd, timeoutMs));
       rt.meta.verification = proof;
       this.scheduleSave();
+      await this.auditStrict("orchestrator", "verify", id, { verificationId: proof.id, passed: proof.passed,
+        targetBranch: proof.targetBranch });
       return proof;
     });
   }
@@ -2178,6 +2223,8 @@ export class Coordinator {
           mergedSha, candidateTree: tree, integratedAt: Date.now() };
         this.scheduleSave();
       }
+      if (result.ok) await this.auditStrict("orchestrator", "merge", id, { target,
+        mergedSha: rt.meta.integration?.mergedSha, candidateTree: proof.candidateTree });
       return { ...result, branch: rt.meta.branch };
     });
   }
@@ -2226,6 +2273,7 @@ export class Coordinator {
     }
     rt.client.respondUi(payload);
     rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + (payload.value?.length ?? 0);
+    await this.auditStrict("orchestrator", "answer", sessionId, { requestId, method: request.method });
     this.notifyWaiters();
   }
 
@@ -2245,6 +2293,7 @@ export class Coordinator {
           safeToTakeOver: true, locksReleased: true, action: "take_over" };
         this.scheduleSave();
         this.notifyWaiters();
+        this.auditBestEffort("orchestrator", "stop", id, { reason: "archived recovery" });
       }
       return;
     }
@@ -2285,6 +2334,8 @@ export class Coordinator {
       throw error;
     }
     finally { rt.stopping = undefined; }
+    this.auditBestEffort("orchestrator", "stop", id, { removeWorktree: opts.removeWorktree ?? false,
+      deleteBranch: opts.deleteBranch ?? false });
   }
 
   async stopAll(): Promise<void> {
@@ -2300,6 +2351,7 @@ export class Coordinator {
       try { await this.stop(id); } catch { shutdownFailed = true; }
     }
     await this.flush();
+    await this.audit.close();
     if (shutdownFailed) throw new Error("worker shutdown unconfirmed; persisted reservations retained");
   }
 
@@ -2382,8 +2434,10 @@ export class Coordinator {
   // -------------------------------------------------------------------------
 
   postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): { id: string; delivered: boolean } {
-    const message = this.mailbox.post(from, to, text, kind);
+    const safeText = this.scrubSecrets(text, "mailbox text");
+    const message = this.mailbox.post(from, to, safeText, kind);
     this.scheduleSave();
+    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "mailbox", `${from}->${to}`, { kind, chars: safeText.length });
 
     let delivered = false;
     if (deliver) {
@@ -2395,8 +2449,8 @@ export class Coordinator {
         // explicitly addressed messages, including when old callers still broadcast.
         if (to === "*" && rt.meta.controlKeyHash) continue;
 
-        const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
-        if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
+        const body = `[coordinator] message from ${from} (${kind}):\n${safeText}\n\n(Reply with coord_send / coord_board_post if needed.)`;
+        if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + safeText.length;
 
         // Deliver immediately, then ack only on success so a failed injection is
         // retried by polling instead of being silently dropped.
@@ -2420,8 +2474,10 @@ export class Coordinator {
   }
 
   boardPost(board: string, key: string, value: string, from: string) {
-    const entry = this.board.post(board, key, value, from);
+    const safeValue = this.scrubSecrets(value, "board value");
+    const entry = this.board.post(board, key, safeValue, from);
     this.scheduleSave();
+    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "board", `${board}/${key}`, { chars: safeValue.length });
     return entry;
   }
 
@@ -2437,6 +2493,7 @@ export class Coordinator {
     if (outcome === "taken_over" && !note?.trim()) {
       throw new Error("taken_over requires a nonempty note explaining the takeover reason");
     }
+    if (note !== undefined) note = this.scrubSecrets(note, "outcome note");
     const rt = this.runtimes.get(id);
     if (!rt) {
       const historic = this.history.find((entry) => entry.id === id);
@@ -2449,6 +2506,7 @@ export class Coordinator {
       historic.outcome = outcome;
       if (note !== undefined) historic.outcomeNote = note;
       await this.emitFinishEvent(historic, outcome);
+      await this.auditStrict("orchestrator", "finish", id, { outcome });
       this.scheduleSave();
       this.notifyWaiters();
       return;
@@ -2488,6 +2546,7 @@ export class Coordinator {
       this.notifyWaiters();
     });
     await this.emitFinishEvent(rt.meta, outcome);
+    await this.auditStrict("orchestrator", "finish", id, { outcome });
     if (rt.meta.status === "stopped") {
       this.archive(rt.meta);
       this.scheduleSave();
