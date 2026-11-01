@@ -174,16 +174,22 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
   recorded cycle, verification-only success); full suite.
 - Commit: `feat(spawn): dependency gate for blocked_by`.
 ### M13 — MCP surface hardening + docs · S–M
-- `/internal/capabilities`; deterministic tool order test; complete annotations; docs note
-  `docs/plans/mcp-2026-07-28.md`; README/zh updates for every new tool/config; docs-consistency test.
-- Acceptance: `node --test tests/capabilities.test.mjs tests/docs-consistency.test.mjs`.
+- `src/version.ts` (single source, package.json checked by test); `MCP_TOOL_ORDER` with a build-time
+  assertion that registration order matches; complete tool annotations (read-only/destructive/
+  idempotent/open-world) on every tool; `src/capabilities.ts` + `/internal/capabilities` exposing
+  version, feature list, tool order and internal endpoints.
+- `docs/plans/mcp-2026-07-28.md`: current SDK support, why no handshake is invented, and the concrete
+  upgrade path (SDK bump → transport swap → protocol-contract test).
+- `tests/capabilities.test.mjs` + `tests/docs-consistency.test.mjs`: payload shape, tool order,
+  annotations, README tool rows (both languages), package/version and config-name coverage.
+- Acceptance: `node --test tests/capabilities.test.mjs tests/docs-consistency.test.mjs`; full suite.
 - Commit: `feat(mcp): capability endpoint and hardened tool surface`.
 
 ### M14 — Release prep · S
-- `package.json` 0.3.0; CHANGELOG 0.3.0 section (Added/Changed/Security/Verification); README
-  "Dashboard, metrics and upgrades" + "Cleaning up finished work" + "Configuration" refresh;
-  `docs/integrations/dsh.md` touch-up if tool list changed.
-- Acceptance: `npm run verify` + `node scripts/smoke.mjs`.
+- `package.json`/`package-lock.json` 0.3.0; CHANGELOG `[0.3.0] - 2026-11-01` section carrying the
+  P0/P1 entries; README/zh config + tool tables refreshed, roadmap status linked; MCP server/ACP
+  clientInfo read the shared version constant.
+- Acceptance: `npm run verify` (includes offline smoke) + full suite; version/docs consistency tests.
 - Commit: `chore(release): 0.3.0`.
 
 ### M15 — Pre-merge bug hunt and merge · M
@@ -323,3 +329,8 @@ Run each item against the final branch. Record evidence (command + output) in th
 - **M12 complete** — 2026-11-01: `pi_spawn blocked_by` dependency gate (unknown/cycle/deps_failed
   rejection, provenance in meta/list); deferred auto-start documented out of scope; 4 new tests;
   full suite 428/428.
+- **M13 complete** — 2026-11-01: version constant, deterministic MCP tool order + complete tool
+  annotations, `/internal/capabilities`, MCP 2026-07-28 upgrade doc, docs-consistency tests; 5 new
+  tests; full suite 433/433.
+- **M14 complete** — 2026-11-01: 0.3.0 version bump, CHANGELOG release section, README/zh refresh;
+  verify green.

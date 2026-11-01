@@ -489,6 +489,7 @@ same `x-pi-coord-token` / `Authorization: Bearer` credential as `/mcp`.
 - `GET /dashboard` — a small read-only console: sessions, status, cost, turns, model, and per-session
   diff/tail. It has no spawn, stop, merge, or message actions.
 - `GET /metrics` — Prometheus text exposition (`pi_coffee_*`): uptime, active/max workers, drain state,
+- `GET /internal/capabilities` - daemon version, feature list, MCP tool order and internal endpoints (used by operators and the worker extension).
   session counts by status, spawn/verify/merge totals, and worker-reported USD cost when complete.
   Unknown cost is omitted rather than reported as zero.
 
@@ -533,6 +534,7 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_board_post` / `pi_board_read` | Pass `scope_key` to use the board shared by one chat's workers, with a `latest=true` view per key. An unscoped global post requires all protected worker keys. Posts return the same persisted-hash read-back receipt. |
 | `pi_stop` | Stop an unfinished worker early, optionally removing its worktree and branch. |
 | `pi_resume` | Restart a stopped, unfinished worker on its own transcript instead of re-dispatching: keeps its worktree, branch, spec, acceptance record, control key and its provider/model/thinking level, and clears the verification/review evidence of the interrupted run. Refuses sessions that already have an outcome, whose evidence was reclaimed, have an unconfirmed shutdown, or have lost their transcript, worker agent directory, worktree or control credential. Pass `prompt` only for an explicit nudge; the contract is already in the transcript. |
+| `pi_recover_control` | Recover a lost worker control/scope key with the scope key; keys are never echoed back. |
 | `pi_finish` | Record `success_first`, `success_second`, `taken_over`, or `abandoned` and stop the worker. Implementation success and takeover require passing code acceptance and integration when code changed. Read-only review/investigation success requires a delivered worker report, unchanged clean worktree, and orchestrator acceptance note. Archived unfinished sessions can only be marked `abandoned`. |
 | `pi_report` | Concise outcome counts grouped by purpose, per-task notes, cost coverage, and `inconsistent_outcomes` for recorded success lacking current proof. Pass your `session_ids` to avoid mixing chats; omit them only for a global audit. Use `detail=full` for the complete report. Rates are workstream outcomes, not implementation contribution. |
 | `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also reclaims what a session beyond recovery still holds (`transcripts_reclaimed`, `credentials_reclaimed`, `history_compacted`). |
@@ -657,6 +659,7 @@ Everything is configured through environment variables.
 | `PI_COFFEE_LOG_FORMAT` | `text` | `json` emits one JSON object per stderr line; secrets are redacted. |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | Auto-resume sessions that were active when the daemon crashed. `0` leaves them stopped for an explicit `pi_resume`. |
 | `PI_COFFEE_SECRET_POLICY` | `reject` | How coordination surfaces handle detected secrets: `reject` fails the write, `redact` replaces the span with a marker. |
+| `PI_COFFEE_EXTENSION` | `extensions/pi-coordinator.ts` | Path to the worker-side coordinator extension. |
 | `PI_COFFEE_AUDIT_MAX_MB` | `32` | Rotate the hash-chained audit log once the active file reaches this size (MiB). |
 | `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | Days a verification evidence bundle is retained (`0` disables TTL cleanup). |
 | `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | Newest evidence bundles kept per session regardless of TTL. |

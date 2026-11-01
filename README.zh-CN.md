@@ -462,6 +462,7 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_board_post` / `pi_board_read` | 往共享黑板写、从共享黑板读，`latest=true` 可以只看每个 key 的最新一条。写入同样返回持久化回读回执（`sha256` / `readBack`）。 |
 | `pi_stop` | 停止 worker，可选择一并移除 worktree 和分支。 |
 | `pi_resume` | 让已停止、未收尾的 worker 接着自己原有的转录继续跑，而不是重派：worktree、分支、spec、验收记录、控制密钥以及 provider/model/thinking 全部保留，上一轮中断留下的 verify/review 证据会被清掉。已有 outcome、证据已被回收、关闭未确认，或转录、worker agent 目录、worktree、控制凭据缺失时会拒绝。`prompt` 只用于额外推一把，契约本身已在转录里。 |
+| `pi_recover_control` | 用 scope key 恢复丢失的 worker control/scope key；key 本身不会回显。 |
 | `pi_finish` | 记录 `success_first`、`success_second`、`taken_over` 或 `abandoned`；接管须在 `note` 填写非空原因；成功与接管须有当前通过证据，代码改动还须已集成。 |
 | `pi_report` | 按任务用途分组的结局数量、逐任务接管原因，以及包含所有用途的总体百分比；不能当代码贡献比例。 |
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对工作已无法挽救的会话还会回收其转录目录、控制凭据、裁掉 history 里的大块证据（`transcripts_reclaimed`、`credentials_reclaimed`、`history_compacted`）。 |
@@ -562,6 +563,7 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_LOG_FORMAT` | `text` | 设为 `json` 时每条 stderr 日志是一行 JSON；敏感值会脱敏。 |
 | `PI_COFFEE_RECOVER_ON_START` | `1` | daemon 崩溃后自动恢复崩溃时仍活跃的会话；`0` 表示留给人手动 `pi_resume`。 |
 | `PI_COFFEE_SECRET_POLICY` | `reject` | 协调面遇到疑似密钥时的策略：`reject` 拒绝写入，`redact` 用标记替换。 |
+| `PI_COFFEE_EXTENSION` | `extensions/pi-coordinator.ts` | worker 侧协调扩展路径。 |
 | `PI_COFFEE_AUDIT_MAX_MB` | `32` | 审计日志（哈希链）单个文件达到该大小（MiB）后轮转。 |
 | `PI_COFFEE_EVIDENCE_TTL_DAYS` | `30` | 验收证据包保留天数（`0` 关闭 TTL 清理）。 |
 | `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | 每个会话至少保留的最新证据包数量。 |

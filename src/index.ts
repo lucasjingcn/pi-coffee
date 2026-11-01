@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { loadConfig } from "./config.js";
 import { Coordinator } from "./manager.js";
 import { buildServer } from "./mcp-server.js";
+import { capabilitiesPayload } from "./capabilities.js";
 import { daemonCodeDir, recordCodeVersion } from "./code-version.js";
 import type { LockMode } from "./locks.js";
 import { z } from "zod";
@@ -172,6 +173,12 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       case "/internal/health":
         return sendJson(res, 200, { ok: true, sessions: coord.list().length, workerStartupPolicy: WORKER_STARTUP_POLICY,
           draining: coord.isDraining(), active: coord.activeWorkers() });
+
+      case "/internal/capabilities":
+        return sendJson(res, 200, capabilitiesPayload({
+          workerStartupPolicy: WORKER_STARTUP_POLICY,
+          internalEndpoints: Object.keys(internalSchemas),
+        }));
 
       case "/internal/hello": {
         const sid = url.searchParams.get("sessionId") || body.sessionId;

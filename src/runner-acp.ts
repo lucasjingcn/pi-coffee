@@ -13,6 +13,7 @@ import { dirname } from "node:path";
 import { EventEmitter } from "node:events";
 import type { PiSessionState, PiSessionStats, RpcResponse, UiResponse } from "./types.js";
 import type { WorkerTransport } from "./runner.js";
+import { PI_COFFEE_VERSION } from "./version.js";
 
 export interface AcpClientOptions {
   command: string[];
@@ -88,7 +89,7 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
     const initialized = await this.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
-      clientInfo: { name: "pi-coffee", version: "0.3.0" },
+      clientInfo: { name: "pi-coffee", version: PI_COFFEE_VERSION },
     }, timeoutMs);
     if (!initialized || typeof initialized !== "object") throw new Error("ACP initialize returned an invalid result");
     const session = await this.request("session/new", { cwd: this.opts.cwd, mcpServers: [] }, timeoutMs);
