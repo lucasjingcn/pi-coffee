@@ -70,3 +70,22 @@ test('bashPaths extracts only literal shell write targets', () => {
     assert.deepEqual([...new Set(bashPaths(c.cmd))].sort(), [...new Set(c.paths)].sort(), c.title);
   }
 });
+
+test('literal copy/move/install targets are write targets', () => {
+  const cases = [
+    ['cp payload.txt ../outside/copied.txt', ['../outside/copied.txt']],
+    ['mv a b .git/config', ['.git/config']],
+    ['install -m 644 a b', ['b']],
+    ['cp -t ../outside a b', ['../outside']],
+    ['dd if=in.bin of=../outside/out.bin', ['../outside/out.bin']],
+    ['touch ../outside/x .git/config', ['../outside/x', '.git/config']],
+    ['mkdir -p ../outside/d', ['../outside/d']],
+    ['sh -c "printf x > ../outside/f"', ['../outside/f']],
+    ['bash -lc "cp a ../outside/g"', ['../outside/g']],
+    ['cat a | cp /dev/stdin ../outside/h', ['../outside/h']],
+    ['echo hi > /dev/stderr', []],
+  ];
+  for (const [cmd, expected] of cases) {
+    assert.deepEqual(bashPaths(cmd).sort(), [...expected].sort(), cmd);
+  }
+});

@@ -69,8 +69,26 @@ if ! command -v codex >/dev/null 2>&1; then
   echo "error: Codex CLI is required on PATH to register the MCP server" >&2
   exit 1
 fi
+# `codex mcp add` refuses a duplicate name, so the old registration has to be
+# removed first. Back up the config so a failed add restores what the user had.
+CODEX_CONFIG="$CODEX_HOME_DIR/config.toml"
+codex_backup=""
+if [ -f "$CODEX_CONFIG" ]; then
+  codex_backup="$(mktemp)"
+  cp -p "$CODEX_CONFIG" "$codex_backup"
+fi
 codex mcp remove pi >/dev/null 2>&1 || true
-codex mcp add pi -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
+if ! codex mcp add pi -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"; then
+  if [ -n "$codex_backup" ]; then
+    cp -p "$codex_backup" "$CODEX_CONFIG"
+    echo "error: could not register the pi MCP server; restored $CODEX_CONFIG" >&2
+  else
+    echo "error: could not register the pi MCP server" >&2
+  fi
+  rm -f "$codex_backup"
+  exit 1
+fi
+rm -f "$codex_backup"
 
 echo "==> install user pi command"
 npm run install:cli
@@ -78,7 +96,7 @@ npm run install:cli
 # The installer ships pi, so register the same MCP server there too.
 echo "==> register MCP server with pi"
 PI_BIN="$HOME/.local/bin/pi"
-"$PI_BIN" mcp remove pi >/dev/null 2>&1 || true
+# `pi mcp add` replaces an existing entry, so no destructive remove is needed.
 "$PI_BIN" mcp add pi --description "pi-coffee: spawn, review, verify, and merge isolated pi coding workers" -- "$NODE_BIN" "$DIR/scripts/proxy.mjs"
 
 # --- provider credentials --------------------------------------------------

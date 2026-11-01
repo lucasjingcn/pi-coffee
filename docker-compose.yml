@@ -6,12 +6,14 @@ services:
     image: pi-coffee:latest
     restart: unless-stopped
     ports:
-      # Loopback only by default. Change to 0.0.0.0:8787 (with a token) to expose it.
-      - "127.0.0.1:${PI_COFFEE_PORT:-8787}:${PI_COFFEE_PORT:-8787}"
+      # Loopback only by default. The container always listens on 8787 (set below);
+      # PI_COFFEE_HOST_PORT only selects the published host port.
+      - "127.0.0.1:${PI_COFFEE_HOST_PORT:-8787}:8787"
     env_file:
       - .env
     environment:
       PI_COFFEE_HOST: 0.0.0.0
+      PI_COFFEE_PORT: "8787"
       PI_COFFEE_DEFAULT_REPO: /workspace
     volumes:
       # Daemon state (locks, mailbox, board, session metadata).

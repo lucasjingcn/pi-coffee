@@ -178,7 +178,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   // The daemon passes the value it recorded at startup; direct callers (tests)
   // record now so pi_status still has a baseline to compare against disk.
   const codeDir = codeVersion ? codeVersion.dir : daemonCodeDir();
-  const runningDistMtimeMs = codeVersion ? codeVersion.distMtimeMs : recordCodeVersion(codeDir);
+  const codeVersionRecord = codeVersion ?? recordCodeVersion(codeDir);
   const server = new McpServer(
     { name: "pi-coffee", version: PI_COFFEE_VERSION },
     { instructions: MCP_INSTRUCTIONS },
@@ -591,7 +591,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     },
     async ({ session_id, detail }) => {
       const view = detail ?? "summary";
-      const code = checkCodeVersion(codeDir, runningDistMtimeMs);
+      const code = checkCodeVersion(codeDir, codeVersionRecord);
       const drain = drainView(coord);
       const draining = drain ? { draining: drain.draining, drain_active: drain.active } : {};
       if (session_id) return json({ ...sessionView(coord.snapshot(session_id), view), code, ...draining });
@@ -741,7 +741,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
       annotations: { readOnlyHint: false, idempotentHint: false },
       inputSchema: {
         session_id: z.string(), control_key: z.string().optional(), verification_id: z.string().min(1),
-        requirements: z.array(z.object({id: z.string().min(1), met: z.boolean(), evidence: z.string().min(1)})),
+        requirements: z.array(z.object({id: z.string().trim().min(1), met: z.boolean(), evidence: z.string().min(1)})),
         test_changes: z.array(z.object({path: z.string().min(1), approved: z.boolean(), reason: z.string().min(1)})),
       },
     },
@@ -960,7 +960,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     async ({ session_id, control_key, control_keys, message, kind, from, deliver }) => {
       if (session_id === "*") coord.assertControlsForAll(control_keys);
       else coord.assertControl(session_id, control_key);
-      const res = coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
+      const res = await coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
       const receipt = await coord.messageReceipt(res.id);
       return json({ ...res, sha256: receipt.sha256, readBack: receipt.readBack });
     },

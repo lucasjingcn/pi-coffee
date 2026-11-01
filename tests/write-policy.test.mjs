@@ -51,6 +51,9 @@ test('write policy fails closed on outages and malformed replies, recovers and r
         assert.equal((await run('write',{path})).block,true,path);
       }
       assert.equal((await run('bash',{command:'printf wrong > ../outside/file.txt'})).block,true);
+      assert.equal((await run('bash',{command:'cp payload.txt ../outside/escaped.txt'})).block,true,'cp destination is a write target');
+      assert.equal((await run('bash',{command:'dd if=/dev/null of=../outside/out.bin'})).block,true,'dd of= is a write target');
+      assert.equal((await run('bash',{command:'bash -c "printf x > ../outside/f"'})).block,true,'literal -c scripts are scanned');
       assert.equal(await run('bash',{command:'ls .. 2>/dev/null | head -5'}),undefined,'null device redirects stay allowed');
       assert.equal(await run('bash',{command:'grep -r x . >/dev/null 2>&1'}),undefined,'silencing output stays allowed');
       assert.equal(await run('bash',{command:'ls .. 2>/dev/stderr | head -5'}),undefined,'stderr redirects stay allowed');

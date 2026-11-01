@@ -17,8 +17,10 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates git procps ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
-# Bundle pi so users do not install it separately.
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+# Bundle pi so users do not install it separately. Pin the version CI verifies
+# instead of floating to whatever the registry calls latest.
+ARG PI_VERSION=1.4.0
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
 WORKDIR /app
 COPY package.json package-lock.json ./

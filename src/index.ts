@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadConfig } from "./config.js";
@@ -20,7 +21,7 @@ const dashboard = createDashboardHandler({ coord, token: config.token, actions: 
 // Captured once at daemon startup: pi_status compares this in-memory value with
 // the current dist/manager.js mtime so a rebuilt dist without a restart is visible.
 const codeDir = daemonCodeDir();
-const runningCodeMtimeMs = recordCodeVersion(codeDir);
+const runningCode = recordCodeVersion(codeDir);
 
 function log(...args: unknown[]): void {
   logLine("pi-coffee", ...args);
@@ -30,23 +31,40 @@ function log(...args: unknown[]): void {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+/** Request bodies above this size are refused with 413 Payload Too Large. */
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
+
+/** Distinct error so the caller can answer 413 instead of blaming malformed JSON. */
+class PayloadTooLargeError extends Error {}
+
 /** Read and JSON-parse a request body, rejecting anything over 32 MiB. */
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let settled = false;
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
 
     req.on("data", (chunk: Buffer) => {
+      if (settled) return;
       size += chunk.length;
-      if (size > 32 * 1024 * 1024) {
-        reject(new Error("body too large"));
-        req.destroy();
+      if (size > MAX_BODY_BYTES) {
+        // Draining instead of destroying lets the 413 response reach the client;
+        // destroying the socket used to turn the promised 400 into ECONNRESET.
+        fail(new PayloadTooLargeError(`request body exceeds ${MAX_BODY_BYTES / (1024 * 1024)} MiB`));
+        req.resume();
         return;
       }
       chunks.push(chunk);
     });
 
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
       const raw = Buffer.concat(chunks).toString("utf8");
       if (!raw) return resolve(undefined);
       try {
@@ -56,7 +74,7 @@ function readBody(req: IncomingMessage): Promise<unknown> {
       }
     });
 
-    req.on("error", reject);
+    req.on("error", (error) => fail(error));
   });
 }
 
@@ -66,13 +84,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
+/** Constant-time secret comparison; hashing first equalizes unequal lengths. */
+function secretEquals(presented: string, expected: string): boolean {
+  const left = createHash("sha256").update(presented).digest();
+  const right = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(left, right);
+}
+
 /** Accept either the custom header or a standard bearer token. */
 function authorized(req: IncomingMessage): boolean {
   if (!config.token) return true;
-  if (req.headers["x-pi-coord-token"] === config.token) return true;
+  const header = req.headers["x-pi-coord-token"];
+  if (typeof header === "string" && secretEquals(header, config.token)) return true;
 
   const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth === `Bearer ${config.token}`) return true;
+  if (typeof auth === "string" && secretEquals(auth, `Bearer ${config.token}`)) return true;
   return false;
 }
 
@@ -83,8 +109,24 @@ function requestToken(req: IncomingMessage): string {
   return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : "";
 }
 
+/** Longest command-output tail returned to API clients; full text stays on disk. */
+const VERIFICATION_TAIL_CHARS = 2_000;
+
+function compactOutput(text: string): string {
+  return text.length <= VERIFICATION_TAIL_CHARS ? text : `…${text.slice(-VERIFICATION_TAIL_CHARS)}`;
+}
+
 function visibleSession(meta: ReturnType<typeof coord.snapshot>) {
   const { controlKeyHash: _controlKeyHash, scopeKeyHash: _scopeKeyHash, ...visible } = meta;
+  if (visible.verification) {
+    // The dashboard deliberately withholds raw command output; the internal API
+    // used to return it whole (potentially megabytes per session).
+    const { result } = visible.verification;
+    visible.verification = {
+      ...visible.verification,
+      result: { ...result, stdout: compactOutput(result.stdout), stderr: compactOutput(result.stderr), compacted: true },
+    };
+  }
   return visible;
 }
 
@@ -100,7 +142,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
     return;
   }
 
-  const server = buildServer(coord, { dir: codeDir, distMtimeMs: runningCodeMtimeMs });
+  const server = buildServer(coord, runningCode);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -220,7 +262,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       // still active and never signals a pid, so no unrelated process is ever killed.
       case "/internal/shutdown": {
         if (workerSid) return sendJson(res, 403, { error: "worker token cannot stop the daemon" });
-        const active = coord.activeWorkers();
+        const active = coord.activeWorkers() + coord.pendingSpawns();
         if (active > 0) {
           return sendJson(res, 409, { error: `refusing to stop with ${active} active worker(s); drain and wait for zero`, active });
         }
@@ -293,7 +335,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
           if (to === "*") throw new Error("worker broadcast is unavailable across session scopes");
           coord.assertSameScope(workerSid, to);
         }
-        const result = coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true);
+        const result = await coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true);
         const receipt = await coord.messageReceipt(result.id);
         return sendJson(res, 200, { ...result, sha256: receipt.sha256, readBack: receipt.readBack });
       }
@@ -323,7 +365,15 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         return sendJson(res, 404, { error: `unknown endpoint ${url.pathname}` });
     }
   } catch (e) {
-    return sendJson(res, 500, { error: String(e instanceof Error ? e.message : e) });
+    const message = String(e instanceof Error ? e.message : e);
+    if (e instanceof PayloadTooLargeError) return sendJson(res, 413, { error: message });
+    // Client errors keep their meaning; a server fault stays a 500 but does not
+    // echo internal paths or stack text to the caller.
+    if (/worker token cannot|worker broadcast is unavailable/.test(message)) {
+      return sendJson(res, 403, { error: message });
+    }
+    log("internal handler error:", e);
+    return sendJson(res, 500, { error: "internal error" });
   }
 }
 
@@ -341,13 +391,14 @@ const server = createServer((req, res) => {
   }
 
   if (url.pathname === "/metrics") {
-    if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+    const headOnly = req.method === "HEAD";
+    if (!headOnly && req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
     if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
     void (async () => {
       try {
         const snapshot = await buildMetricsSnapshot(coord, startedAt, coord.isDraining());
         res.writeHead(200, { "content-type": METRICS_CONTENT_TYPE, "cache-control": "no-store" });
-        res.end(renderMetrics(snapshot));
+        res.end(headOnly ? undefined : renderMetrics(snapshot));
       } catch (e) {
         log("metrics error:", e);
         if (!res.headersSent) sendJson(res, 500, { error: String(e) });
@@ -375,6 +426,13 @@ const server = createServer((req, res) => {
         try {
           parsedBody = await readBody(req);
         } catch (e) {
+          if (e instanceof PayloadTooLargeError) {
+            return sendJson(res, 413, {
+              jsonrpc: "2.0",
+              error: { code: -32600, message: e.message },
+              id: null,
+            });
+          }
           return sendJson(res, 400, {
             jsonrpc: "2.0",
             error: { code: -32700, message: String(e instanceof Error ? e.message : e) },

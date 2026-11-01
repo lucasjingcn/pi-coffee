@@ -30,7 +30,7 @@ async function persisted(dir) {
 
 test("mailbox message is hash-stamped, persisted and read back", async () => {
   await fixture(async ({ coord, dir }) => {
-    const posted = coord.postMessage("codex", "*", "hello workers", "note", false);
+    const posted = await coord.postMessage("codex", "*", "hello workers", "note", false);
     assert.match(posted.sha256, HEX64);
     const receipt = await coord.messageReceipt(posted.id);
     assert.equal(receipt.readBack, true);
@@ -61,7 +61,7 @@ test("a tampered persisted message fails read-back verification", async () => {
   try {
     const first = new Coordinator(loadConfig({ dataDir: dir, workspaceRoot: join(dir, "w"), autoClean: false }));
     await first.init();
-    const posted = first.postMessage("codex", "*", "original text", "note", false);
+    const posted = await first.postMessage("codex", "*", "original text", "note", false);
     await first.messageReceipt(posted.id); // persists
     await first.stopAll();
 

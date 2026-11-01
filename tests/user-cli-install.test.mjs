@@ -61,6 +61,9 @@ test('all installation entry points include user CLI setup',()=>{
 });
 test('all installation entry points register the MCP server with pi',()=>{
  assert.match(readFileSync('install.sh','utf8'),/\$PI_BIN" mcp add pi/);
+ const installer=readFileSync('install.sh','utf8');
+ assert.match(installer,/codex_backup=/, "Codex config is backed up before re-registering");
+ assert.doesNotMatch(installer,/\$PI_BIN" mcp remove/, "pi mcp add replaces, so no destructive remove");
  assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$piCmd mcp add pi/);
 });
 

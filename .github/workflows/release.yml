@@ -22,6 +22,10 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci
+      - name: Verify the tag matches the package version
+        shell: bash
+        run: |
+          node -e "const version = require('./package.json').version; const tag = process.env.GITHUB_REF_NAME || ''; if (tag !== 'v' + version) { console.error('tag ' + tag + ' does not match package version ' + version); process.exit(1); }"
       - run: npm run verify
       - name: Pack npm tarball
         run: npm pack

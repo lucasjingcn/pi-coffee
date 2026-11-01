@@ -5,7 +5,10 @@ import { envFilePath, loadEnvFile } from "./lib/env.mjs";
 loadEnvFile(envFilePath(), { override: true });
 const port = Number(process.env.PI_COFFEE_PORT || "8787");
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PI_COFFEE_PORT");
-const url = `http://127.0.0.1:${port}/internal/health`;
+// PI_COFFEE_URL is what status/upgrade/dsh use; honour it so the installer probes
+// the endpoint the client will actually use, not a different local port.
+const endpoint = new URL(process.env.PI_COFFEE_URL || `http://127.0.0.1:${port}`);
+const url = `${endpoint.origin}/internal/health`;
 const headers = process.env.PI_COFFEE_TOKEN ? { "x-pi-coord-token": process.env.PI_COFFEE_TOKEN } : {};
 const deadline = Date.now() + 15_000;
 while (Date.now() < deadline) {

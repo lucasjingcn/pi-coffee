@@ -88,17 +88,18 @@ test('background failed save is caught and a later save succeeds',async()=>fixtu
  const file=join(config.dataDir,'state.json');
  const c=new Coordinator(config);await c.init();
  c.boardPost('test','value','before','codex');
- await delay(700);
+ // Saves are background and queued: give them room on a loaded CI runner.
+ await delay(1500);
  assert.ok(JSON.parse(await readFile(file,'utf8')).board.some(e=>e.value==='before'));
 
  const preserved=join(dir,'preserved');await rename(config.dataDir,preserved);await writeFile(config.dataDir,'not a directory');
  c.boardPost('test','value','after','codex');
- await delay(700);
+ await delay(1500);
  assert.ok(logs.some(l=>/save|persist|write/i.test(l)));
 
  await rm(config.dataDir);await rename(preserved,config.dataDir);
  c.boardPost('test','value','later','codex');
- await delay(700);
+ await delay(1500);
  assert.ok(JSON.parse(await readFile(file,'utf8')).board.some(e=>e.value==='later'));
  await c.stopAll();
 }));

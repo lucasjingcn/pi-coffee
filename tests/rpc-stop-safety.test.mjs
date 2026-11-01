@@ -62,6 +62,25 @@ process.on('SIGTERM',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1
   }, {stopThrows:true});
 });
 
+test('an unterminated oversized stdout line fails the client closed', {timeout:20000}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-oversize-'));
+  const bin = join(dir, 'oversize.js');
+  await writeFile(bin, "process.stdout.write(Buffer.alloc(9*1024*1024,120)); setInterval(()=>{},1000);");
+  const client = new PiRpcClient({cwd:dir, piBin:bin});
+  try {
+    const settled = Promise.race([
+      new Promise((resolve) => client.once('exit', () => resolve('exit'))),
+      new Promise((resolve) => client.once('shutdown_failed', () => resolve('shutdown_failed'))),
+    ]);
+    await client.start(3000).catch(() => {});
+    assert.ok(['exit', 'shutdown_failed'].includes(await settled), 'the client terminates instead of buffering forever');
+    assert.equal(client.hasExited, true);
+  } finally {
+    try { await client.stop(); } catch { /* unconfirmed shutdown keeps locks by design */ }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('terminal pipe error publishes exit only after safe shutdown', async () => {
   await fixture(`process.stdin.on('end',()=>setTimeout(()=>process.exit(0),200));setInterval(()=>{},1000);`,async c=>{
     let reported=false;

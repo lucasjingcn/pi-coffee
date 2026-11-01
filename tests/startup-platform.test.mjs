@@ -31,14 +31,16 @@ test("pinned local pi CLI resolves on this platform", () => {
   }
 });
 
-test("npm start loads the private env file before binding the daemon", async () => {
+test("npm start loads the private env file when the environment does not override it", async () => {
   const temp = mkdtempSync(join(tmpdir(), "pi-coffee-start-"));
   const port = await freePort();
   const envFile = join(temp, "env");
   writeEnvFile({ PI_COFFEE_PORT: String(port), PI_COFFEE_DATA_DIR: join(temp, "state") }, envFile);
   const child = spawn(process.execPath, ["scripts/start.mjs"], {
     cwd: root,
-    env: { ...process.env, PI_COFFEE_ENV_FILE: envFile, PI_COFFEE_PORT: "1" },
+    // A clean process environment: the settings file supplies the port. An
+    // exported PI_COFFEE_* would win (see the env-parse precedence test).
+    env: { ...process.env, PI_COFFEE_ENV_FILE: envFile },
     stdio: "ignore",
   });
   let exited = false;

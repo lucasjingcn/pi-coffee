@@ -25,11 +25,12 @@ async function withDist(fn, mtimeSeconds = FIRST_MTIME_SECONDS) {
 test("an unchanged dist/manager.js is not stale", async () => {
   await withDist(async (root) => {
     const recorded = recordCodeVersion(root);
-    assert.equal(typeof recorded, "number", "a present dist records a numeric mtime");
+    assert.equal(typeof recorded.distMtimeMs, "number", "a present dist records a numeric mtime");
+    assert.equal(typeof recorded.distSha256, "string", "and a content hash");
     const status = checkCodeVersion(root, recorded);
     assert.equal(status.stale, false);
-    assert.equal(status.runningDistMtimeMs, recorded);
-    assert.equal(status.diskDistMtimeMs, recorded);
+    assert.equal(status.runningDistMtimeMs, recorded.distMtimeMs);
+    assert.equal(status.diskDistMtimeMs, recorded.distMtimeMs);
     assert.equal(status.hint, undefined, "no restart hint while the daemon matches disk");
   });
 });
@@ -37,11 +38,13 @@ test("an unchanged dist/manager.js is not stale", async () => {
 test("a rebuilt dist/manager.js marks the running daemon stale and asks for a restart", async () => {
   await withDist(async (root, managerPath) => {
     const recorded = recordCodeVersion(root);
+    // A real rebuild writes new bytes; mtime alone is not trusted.
+    await writeFile(managerPath, "export const rebuilt = true;\n");
     await utimes(managerPath, REBUILT_MTIME_SECONDS, REBUILT_MTIME_SECONDS);
     const status = checkCodeVersion(root, recorded);
     assert.equal(status.stale, true);
-    assert.equal(status.runningDistMtimeMs, recorded, "the startup value is preserved for comparison");
-    assert.notEqual(status.diskDistMtimeMs, recorded);
+    assert.equal(status.runningDistMtimeMs, recorded.distMtimeMs, "the startup value is preserved for comparison");
+    assert.notEqual(status.diskDistMtimeMs, recorded.distMtimeMs);
     assert.equal(status.hint, CODE_STALE_HINT);
     assert.equal(status.hint, "restart daemon to load current code");
   });
@@ -50,7 +53,7 @@ test("a rebuilt dist/manager.js marks the running daemon stale and asks for a re
 test("a missing dist on either side is reported instead of guessed", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-code-version-missing-"));
   try {
-    assert.equal(recordCodeVersion(root), null, "no dist yet");
+    assert.equal(recordCodeVersion(root).distMtimeMs, null, "no dist yet");
     const absent = checkCodeVersion(root, null);
     assert.equal(absent.stale, false, "absent on both sides is consistent");
     assert.equal(absent.runningDistMtimeMs, null);
@@ -70,4 +73,23 @@ test("a missing dist on either side is reported instead of guessed", async () =>
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("content changes with an unchanged mtime still mark the daemon stale", async () => {
+  await withDist(async (root, managerPath) => {
+    const recorded = recordCodeVersion(root);
+    // Same mtime, different bytes (cp -p / rsync -t / image layer restore).
+    await writeFile(managerPath, "export const v = 2;\n");
+    await utimes(managerPath, FIRST_MTIME_SECONDS, FIRST_MTIME_SECONDS);
+    const status = checkCodeVersion(root, recorded);
+    assert.equal(status.stale, true, "content decides when both hashes are known");
+    assert.equal(status.runningDistMtimeMs, recorded.distMtimeMs);
+  });
+});
+
+test("a legacy numeric mtime record keeps working", async () => {
+  await withDist(async (root) => {
+    const recorded = recordCodeVersion(root);
+    assert.equal(checkCodeVersion(root, recorded.distMtimeMs).stale, false);
+  });
 });

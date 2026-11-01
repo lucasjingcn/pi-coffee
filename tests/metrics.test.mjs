@@ -211,10 +211,11 @@ test("non-finite gauges clamp to zero and counters never go negative", () => {
 // buildMetricsSnapshot: public coordinator state only
 // ---------------------------------------------------------------------------
 
-function fakeCoordinator({ sessions = [], worker = { currency: "USD", total: null }, activeWorkers = 0, maxSessions = 4 } = {}) {
+function fakeCoordinator({ sessions = [], worker = { currency: "USD", total: null }, activeWorkers = 0, maxSessions = 4, spawnsSinceStart = sessions.length } = {}) {
   return {
     config: { maxSessions },
     activeWorkers: () => activeWorkers,
+    spawnsSinceStart: () => spawnsSinceStart,
     metrics: async () => ({ sessions, worker }),
   };
 }
@@ -235,7 +236,7 @@ test("buildMetricsSnapshot maps coordinator state onto the snapshot", async () =
   assert.equal(built.maxSessions, 6);
   assert.equal(built.draining, false);
   assert.deepEqual(built.sessionsTotal, { working: 1, idle: 1, stopped: 1 });
-  assert.equal(built.spawnsTotal, 3);
+  assert.equal(built.spawnsTotal, 3, "the spawn counter defaults to the fixture session count");
   assert.equal(built.verificationsTotal, 2);
   assert.equal(built.mergesTotal, 1);
   assert.equal(built.costUsdTotal, 12.5);
@@ -277,4 +278,14 @@ test("buildMetricsSnapshot tolerates a coordinator without evidence yet", async 
   assert.equal(built.spawnsTotal, 0);
   assert.equal(built.costUsdTotal, undefined);
   parseExposition(renderMetrics(built));
+});
+
+test("the spawn counter ignores persisted history from a previous daemon run", async () => {
+  const coord = fakeCoordinator({
+    sessions: [{ id: "pi-old", status: "stopped" }, { id: "pi-older", status: "stopped" }],
+    spawnsSinceStart: 0,
+  });
+  const built = await buildMetricsSnapshot(coord, Date.now());
+  assert.equal(built.spawnsTotal, 0, "known history is not a spawn in this process");
+  assert.match(renderMetrics(built), /pi_coffee_spawns_total 0/);
 });

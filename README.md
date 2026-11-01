@@ -320,7 +320,9 @@ PI_COFFEE_TOKEN = "optional-shared-secret"
 ```
 
 Set `PI_COFFEE_TOKEN` in `.env` too if you want authentication. The port is published on loopback by
-default; expose it on `0.0.0.0` only together with a token.
+default; expose it on `0.0.0.0` only together with a token. The container runs as root so it can write
+the `/data` volume and the bind-mounted workspace; for an untrusted repository pass `--user <uid>:<gid>`
+and make `/data` writable for that uid (or use separate OS/container isolation).
 
 Without Compose:
 
@@ -582,7 +584,9 @@ snapshot) and remember that `--network none` means no provider access.
 Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.
 Untrusted workers require separate OS/container isolation, credential restrictions, and appropriate
-read-only acceptance mounts; that isolation is not provided by this release.
+read-only acceptance mounts; that isolation is not provided by this release. Worker agent directories
+link the global `skills`, `prompts`, `themes` and extension directories so a worker sees the same
+content, which means a write through a dynamic bash path can reach global configuration too.
 
 ## Cleaning up finished work
 
@@ -652,8 +656,11 @@ Everything is configured through environment variables.
 | `PI_COFFEE_BASE_REF` | `HEAD` | Base ref for new worktrees. |
 | `PI_COFFEE_AUTO_CLEAN` | `1` | Remove finished workers' worktrees automatically (branches are kept). |
 | `PI_COFFEE_WORKTREE_TTL_MIN` | `60` | Minutes a finished, idle worker is kept before the sweeper cleans it. |
+| `PI_COFFEE_WORKTREE_FINAL_TTL_MIN` | `10080` | Minutes a clean worktree of an unfinished/abandoned stopped worker is kept before final retention. `0` disables it; the branch is always kept. |
+| `PI_COFFEE_WORKER_WARN_MS` / `PI_COFFEE_WORKER_STALL_MS` / `PI_COFFEE_WORKER_IDLE_MS` | `60000` / `600000` / `1800000` | Watchdog thresholds: no-activity warning, stalled worker, idle worker. |
 | `PI_COFFEE_DELETE_BRANCHES` | `0` | Default for the `delete_branch` flag on an explicit `pi_stop`. `pi_gc` ignores this. |
 | `PI_COFFEE_WORKER_PLUGINS` | *(empty)* | Comma-separated glob allowlist of global plugins a worker may inherit: npm/git package sources, external extension entries, and MCP server names. Empty means none; `*` restores full inheritance. Core `builtin:` extensions always survive. |
+| `PI_COFFEE_EXTENSION` | bundled `extensions/pi-coordinator.ts` | Coordinator extension loaded into every worker. |
 | `PI_COFFEE_TOKEN` | *(none)* | Optional shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_DATA_DIR` | `~/.pi-coffee` | Daemon state: locks, mailbox, board, session metadata. |
 | `PI_COFFEE_LOG_MAX_MB` | `5` | Archive a daemon log at the next start once it exceeds this size. `0` disables rotation. |

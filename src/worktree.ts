@@ -383,6 +383,8 @@ export interface MergeResult {
   into: string;
   conflicts: string[];
   output: string;
+  /** True when the target worktree is dirty right after a successful merge. */
+  targetDirty?: boolean;
 }
 
 /**
@@ -417,8 +419,12 @@ export async function mergeBranch(
   // spaces, Unicode or newlines survive exactly. A git failure here must
   // surface rather than be reported as "no conflicts".
   const conflicts = nulPaths(await gitRaw(repo, ["diff", "--name-only", "--diff-filter=U", "-z"]));
+  // A post-merge hook (codegen, dependency sync, husky) can dirty the target
+  // worktree after the merge lands; the caller must see that before recording a
+  // success, because assertTarget will refuse to close the session on a dirty tree.
+  const targetDirty = outcome.ok ? !(await isWorktreeClean(repo)) : false;
 
-  return { ok: outcome.ok, branch, into, conflicts, output };
+  return { ok: outcome.ok, branch, into, conflicts, output, targetDirty };
 }
 
 export async function pushBranch(repo: string, remote = "origin", branch?: string): Promise<string> {

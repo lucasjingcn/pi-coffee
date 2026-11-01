@@ -45,7 +45,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
-      - run: node --test tests/startup-platform.test.mjs
+      - run: npm run typecheck:extensions
+      # Platform-neutral suites only; the rest of the suite exercises POSIX
+      # process groups, bash and symlinks and is covered on ubuntu/macos.
+      - run: node --test tests/startup-platform.test.mjs tests/env-parse.test.mjs tests/config-validation.test.mjs
       - shell: powershell
         run: |
           foreach ($path in @('deploy/windows/install.ps1', 'deploy/windows/install-task.ps1', 'deploy/windows/run-task.ps1')) {
