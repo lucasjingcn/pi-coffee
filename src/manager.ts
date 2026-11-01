@@ -1059,6 +1059,7 @@ export class Coordinator {
         try {
           if (!entry.workerProcess) throw new Error("missing process ownership proof");
           await stopOwnedWorker(entry.workerProcess);
+          if (entry.sandbox?.kind === "docker" && this.sandbox) await this.sandbox.removeWorker(entry.id);
           entry.shutdownUnconfirmed = false;
           entry.heldLocks = [];
           entry.status = "stopped";
@@ -1105,6 +1106,7 @@ export class Coordinator {
 
   private async writeState(): Promise<void> {
     const data = {
+      schemaVersion: 2,
       counter: this.counter,
       locks: this.locks.export(),
       mailbox: this.mailbox.export(),
@@ -1219,6 +1221,7 @@ export class Coordinator {
     if (meta.workerProcess) {
       try {
         await stopOwnedWorker(meta.workerProcess);
+        if (meta.sandbox?.kind === "docker" && this.sandbox) await this.sandbox.removeWorker(meta.id);
         meta.workerProcess = undefined;
         this.scheduleSave();
       } catch (error) {
@@ -1670,6 +1673,7 @@ export class Coordinator {
     if (resumeEntry?.runner?.kind === "acp") {
       throw new Error("ACP worker sessions cannot be resumed; spawn a new session");
     }
+    if (resumeEntry) this.assertSandboxMatches(resumeEntry);
     const running = this.runtimes.get(id);
     if (running && running.meta.status !== "stopped") {
       throw new Error(`session ${id} is ${running.meta.status}; stop it before resuming`);
@@ -1700,7 +1704,6 @@ export class Coordinator {
       this.dispatchingRepos.set(repoIdentity, (this.dispatchingRepos.get(repoIdentity) ?? 0) + 1);
       dispatchIdentity = repoIdentity;
       const resumed = await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
-      await this.auditStrict("orchestrator", "resume", resumed.id, { provider: resumed.provider, model: resumed.model });
       return resumed;
     } finally {
       if (dispatchIdentity) {
@@ -1780,6 +1783,9 @@ export class Coordinator {
     meta.provider = provider;
     meta.model = model;
     meta.thinking = thinking;
+    // Fail closed before the process starts: a failed audit append must not leave
+    // a resumed worker running behind a failed resume call.
+    await this.auditStrict("orchestrator", "resume", id, { provider, model });
     // A crash may have left the previous container behind: clear it before the
     // deterministic --name can be reused. Missing containers are ignored.
     if (this.sandbox) await this.sandbox.removeWorker(id);
@@ -2281,6 +2287,15 @@ export class Coordinator {
     if (blocked.length) throw new Error(`blocked_by sessions are not integrated yet: ${blocked.map((result) => result.label).join(", ")}`);
   }
 
+  /** Refuse to silently change a session's recorded isolation backend after a config change. */
+  private assertSandboxMatches(meta: SessionMeta): void {
+    const recorded = meta.sandbox?.kind ?? "worktree";
+    const effective = this.sandbox ? "docker" : "worktree";
+    if (recorded !== effective) {
+      throw new Error(`session ${meta.id} was recorded with the ${recorded} sandbox but the daemon now uses ${effective}; restart with the original backend or spawn a new session`);
+    }
+  }
+
   private assertUnfinished(rt: Runtime): void {
     if (rt.meta.outcome !== undefined) throw new Error(`session ${rt.meta.id} is finished`);
     if (rt.meta.status === "stopping") throw new Error("session is stopping; worker is not writable");
@@ -2448,6 +2463,7 @@ export class Coordinator {
   async verify(id: string, into?: string, timeoutMs = 600_000): Promise<Verification> {
     const rt = this.get(id);
     this.assertUnfinished(rt);
+    this.assertSandboxMatches(rt.meta);
     return this.withRepoGuard(rt, async () => {
       await rt.client.refreshStreaming();
       if (rt.client.isStreaming || rt.meta.pendingQuestions.length) throw new Error("settle the worker and its questions before verification");
@@ -2478,6 +2494,7 @@ export class Coordinator {
     return this.withRepoGuard(rt, async () => {
       const target = into ?? await currentBranch(rt.meta.repo);
       const proof = await this.integrationGate.assertCurrent(rt.meta, target);
+      await this.auditStrict("orchestrator", "merge", id, { target, workerSha: proof.workerSha, phase: "starting" });
       const result = await mergeBranch(rt.meta.repo, proof.workerSha, target, { noFf });
       if (result.ok) {
         const mergedSha = await resolveRef(rt.meta.repo, "HEAD");
@@ -2487,7 +2504,7 @@ export class Coordinator {
           mergedSha, candidateTree: tree, integratedAt: Date.now() };
         this.scheduleSave();
       }
-      if (result.ok) await this.auditStrict("orchestrator", "merge", id, { target,
+      if (result.ok) await this.auditBestEffort("orchestrator", "merge_complete", id, { target,
         mergedSha: rt.meta.integration?.mergedSha, candidateTree: proof.candidateTree });
       return { ...result, branch: rt.meta.branch };
     });
@@ -2501,30 +2518,33 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertUnfinished(rt);
     if (!this.config.allowPush) throw new Error("pushing and PR creation are disabled (PI_COFFEE_ALLOW_PUSH=0)");
-    const proof = rt.meta.verification;
-    if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
-      throw new Error("current successful pi_verify evidence is required before creating a PR");
-    }
-    const base = opts.base ?? proof.targetBranch;
-    await this.integrationGate.assertCurrent(rt.meta, base);
-    await pushBranch(rt.meta.repo, this.config.ghRemote, rt.meta.branch);
-    const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
-    if (existing) {
-      rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
+    return this.withRepoGuard(rt, async () => {
+      const proof = rt.meta.verification;
+      if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
+        throw new Error("current successful pi_verify evidence is required before creating a PR");
+      }
+      const base = opts.base ?? proof.targetBranch;
+      await this.integrationGate.assertCurrent(rt.meta, base);
+      await pushBranch(rt.meta.repo, this.config.ghRemote, rt.meta.branch);
+      const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
+      if (existing) {
+        rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
+        this.scheduleSave();
+        await this.auditStrict("orchestrator", "pr", id, { number: existing.number, reused: true });
+        return { created: false, pr: rt.meta.pr };
+      }
+      const title = (opts.title ?? `pi-coffee: ${rt.meta.spec?.goal ?? rt.meta.name}`).slice(0, 200);
+      const body = opts.body ?? this.renderPrBody(rt, proof);
+      const label = opts.label ?? this.config.prLabel;
+      const pr = await this.gh.createPr(rt.meta.repo, {
+        base, head: rt.meta.branch, title, body, ...(label ? { label } : {}),
+      });
+      if (label) await this.gh.addLabel(rt.meta.repo, pr.number, label);
+      rt.meta.pr = { number: pr.number, url: pr.url };
       this.scheduleSave();
-      await this.auditStrict("orchestrator", "pr", id, { number: existing.number, reused: true });
-      return { created: false, pr: rt.meta.pr };
-    }
-    const title = (opts.title ?? `pi-coffee: ${rt.meta.spec?.goal ?? rt.meta.name}`).slice(0, 200);
-    const body = opts.body ?? this.renderPrBody(rt, proof);
-    const pr = await this.gh.createPr(rt.meta.repo, {
-      base, head: rt.meta.branch, title, body,
-      ...(opts.label ?? this.config.prLabel ? { label: opts.label ?? this.config.prLabel } : {}),
+      await this.auditStrict("orchestrator", "pr", id, { number: pr.number, created: true, base });
+      return { created: true, pr: rt.meta.pr };
     });
-    rt.meta.pr = { number: pr.number, url: pr.url };
-    this.scheduleSave();
-    await this.auditStrict("orchestrator", "pr", id, { number: pr.number, created: true, base });
-    return { created: true, pr: rt.meta.pr };
   }
 
   private renderPrBody(rt: Runtime, proof: Verification): string {
@@ -2549,21 +2569,32 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertUnfinished(rt);
     if (!this.config.allowPush) throw new Error("merge-queue mode is disabled (PI_COFFEE_ALLOW_PUSH=0)");
-    const proof = rt.meta.verification;
-    if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
-      throw new Error("current successful pi_verify evidence is required before queuing a merge");
-    }
-    const base = into ?? proof.targetBranch;
-    await this.integrationGate.assertCurrent(rt.meta, base);
-    if (!rt.meta.pr) {
-      const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
-      if (!existing) throw new Error("create a pull request first with pi_pr");
-      rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
-    }
-    await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number);
-    this.scheduleSave();
-    await this.auditStrict("orchestrator", "merge_queue", id, { number: rt.meta.pr.number, base });
-    return { ok: true, queued: true, pr: rt.meta.pr, note: "merge queue accepted the PR; verify the merged commit before recording success" };
+    return this.withRepoGuard(rt, async () => {
+      const proof = rt.meta.verification;
+      if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
+        throw new Error("current successful pi_verify evidence is required before queuing a merge");
+      }
+      const base = into ?? proof.targetBranch;
+      await this.integrationGate.assertCurrent(rt.meta, base);
+      await pushBranch(rt.meta.repo, this.config.ghRemote, rt.meta.branch);
+      if (!rt.meta.pr) {
+        const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
+        if (!existing) throw new Error("create a pull request first with pi_pr");
+        rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
+      }
+      const viewed = await this.gh.viewPr(rt.meta.repo, rt.meta.pr.number);
+      if (viewed.state && viewed.state.toUpperCase() !== "OPEN") {
+        throw new Error(`pull request ${viewed.number} is ${viewed.state}; only an open PR can be queued`);
+      }
+      if (!viewed.headRefOid || viewed.headRefOid !== proof.workerSha) {
+        throw new Error(`pull request head ${viewed.headRefOid ?? "unknown"} does not match verified worker ${proof.workerSha}; push and re-verify first`);
+      }
+      await this.auditStrict("orchestrator", "merge_queue", id, { number: rt.meta.pr.number, base, phase: "starting" });
+      await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number);
+      this.scheduleSave();
+      await this.auditBestEffort("orchestrator", "merge_queue_complete", id, { number: rt.meta.pr.number, base });
+      return { ok: true, queued: true, pr: rt.meta.pr, note: "merge queue accepted the PR; verify the merged commit before recording success" };
+    });
   }
 
   async push(id: string, remote = "origin", branch?: string): Promise<string> {
@@ -2913,15 +2944,26 @@ export class Coordinator {
       if (outcome !== "abandoned") {
         throw new Error("archived sessions without a live verification gate can only be marked abandoned");
       }
+      const previousOutcome = historic.outcome;
+      const previousNote = historic.outcomeNote;
       historic.outcome = outcome;
       if (note !== undefined) historic.outcomeNote = note;
-      await this.emitFinishEvent(historic, outcome);
-      await this.auditStrict("orchestrator", "finish", id, { outcome });
+      try {
+        await this.emitFinishEvent(historic, outcome);
+        await this.auditStrict("orchestrator", "finish", id, { outcome });
+      } catch (error) {
+        historic.outcome = previousOutcome;
+        historic.outcomeNote = previousNote;
+        this.scheduleSave();
+        throw error;
+      }
       this.scheduleSave();
       this.notifyWaiters();
       return;
     }
     this.assertUnfinished(rt);
+    const previousOutcome = rt.meta.outcome;
+    const previousNote = rt.meta.outcomeNote;
     await this.withRepoGuard(rt, async () => {
       const readonlySuccess = (outcome === "success_first" || outcome === "success_second")
         && (rt.meta.spec?.purpose === "review" || rt.meta.spec?.purpose === "investigation");
@@ -2955,8 +2997,17 @@ export class Coordinator {
       this.scheduleSave();
       this.notifyWaiters();
     });
-    await this.emitFinishEvent(rt.meta, outcome);
-    await this.auditStrict("orchestrator", "finish", id, { outcome });
+    try {
+      await this.emitFinishEvent(rt.meta, outcome);
+      await this.auditStrict("orchestrator", "finish", id, { outcome });
+    } catch (error) {
+      rt.meta.outcome = previousOutcome;
+      rt.meta.outcomeNote = previousNote;
+      const historic = this.history.find((entry) => entry.id === id);
+      if (historic) { historic.outcome = previousOutcome; historic.outcomeNote = previousNote; }
+      this.scheduleSave();
+      throw error;
+    }
     if (rt.meta.status === "stopped") {
       this.archive(rt.meta);
       this.scheduleSave();

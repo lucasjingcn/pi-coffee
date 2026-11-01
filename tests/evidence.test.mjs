@@ -250,3 +250,21 @@ test("symlinked artifacts are skipped instead of copied outside the candidate", 
     });
     assert.deepEqual(files, []);
   }));
+
+
+test("manifest validators never carry raw stdout/stderr", () =>
+  dataDirFixture(async (dataDir) => {
+    const secret = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4";
+    const ref = await writeEvidenceBundle(dataDir, baseInput({
+      secretPolicy: "redact",
+      validators: [{ id: "acceptance", required: true, command: "node --test", code: 0, timedOut: false, passed: true,
+        stdout: `token ${secret}\n`, stderr: `err ${secret}\n` }],
+      logs: { stdout: `token ${secret}\n`, stderr: "", diff: "" },
+    }));
+    const dir = evidenceDir(dataDir, ref);
+    const raw = await readFile(join(dir, "manifest.json"), "utf8");
+    assert.equal(raw.includes(secret), false);
+    const manifest = await readEvidenceManifest(dir);
+    assert.equal(manifest.validators[0].stdout, undefined);
+    assert.equal(manifest.validators[0].stderr, undefined);
+  }));

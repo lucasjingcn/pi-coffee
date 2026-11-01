@@ -159,9 +159,28 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
     const pending = this.serverRequests.get(requestId);
     if (!pending) return;
     this.serverRequests.delete(requestId);
-    const result = response.cancelled
-      ? { outcome: { outcome: "cancelled" } }
-      : { outcome: { outcome: "selected", optionId: pending.optionIds[0] ?? "allow" } };
+    const options = pending.optionIds;
+    const pick = (pattern: RegExp, fallback: string | undefined): string | undefined =>
+      options.find((optionId) => pattern.test(optionId)) ?? fallback;
+    let result: unknown;
+    if (response.cancelled) {
+      result = { outcome: { outcome: "cancelled" } };
+    } else if (typeof response.value === "string" && response.value !== "") {
+      const optionId = options.includes(response.value)
+        ? response.value
+        : pick(new RegExp(response.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), undefined);
+      result = optionId
+        ? { outcome: { outcome: "selected", optionId } }
+        : { outcome: { outcome: "cancelled" } };
+    } else if (response.confirmed === false) {
+      const optionId = pick(/reject|deny|decline|refuse/i, options[options.length - 1]);
+      result = optionId
+        ? { outcome: { outcome: "selected", optionId } }
+        : { outcome: { outcome: "cancelled" } };
+    } else {
+      const optionId = pick(/allow|approve|once|accept/i, options[0]) ?? "allow";
+      result = { outcome: { outcome: "selected", optionId } };
+    }
     this.write({ jsonrpc: "2.0", id: requestId, result });
   }
 

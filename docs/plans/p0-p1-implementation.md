@@ -334,3 +334,7 @@ Run each item against the final branch. Record evidence (command + output) in th
   tests; full suite 433/433.
 - **M14 complete** — 2026-11-01: 0.3.0 version bump, CHANGELOG release section, README/zh refresh;
   verify green.
+- **M15 review fixes** — 2026-11-01: post-merge read-only review found MCP field stripping,
+  gh `--json` incompatibility, ACP deny mapping, sandbox-backend drift, manifest validator leakage,
+  merge-queue head checks and several smaller gaps; fixed with targeted tests (455/455) and released
+  as 0.3.1.

@@ -66,6 +66,28 @@ All notable changes to pi-coffee are recorded here. The format follows
 - CI runs the extension typecheck plus platform-neutral suites on Windows, and a
   release refuses a tag that does not match `package.json`.
 
+## [0.3.1] - 2026-11-01
+
+### Fixed
+
+- `pi_spawn` now forwards `blocked_by` and accepts `spec.isolation`; both were silently stripped by
+  the MCP schema/call, so the dependency gate and docker policy never ran from MCP.
+- `pi_pr` parses the URL printed by `gh pr create` (gh 2.102 rejects `--json`), reuses only open PRs,
+  and treats a missing label as cosmetic; merge-queue pushes the branch and refuses a PR whose head is
+  not the verified worker.
+- ACP permission answers map `value`/`confirmed:false` to the matching reject option instead of always
+  selecting the first (allow) option.
+- Verification and resume refuse a session whose recorded sandbox differs from the daemon backend;
+  startup recovery removes the docker worker container as well as stopping its CLI process group.
+- Evidence manifests no longer embed raw validator stdout/stderr (they bypassed redaction and caps).
+- State now writes `schemaVersion: 2`, loads legacy v1 state, and refuses a newer schema.
+- Dashboard send honours the two-strikes gate; oversized action bodies drain instead of resetting the
+  socket; every rejected action writes a denial audit entry.
+- `pi_merge`/`pi_resume` audit before mutating, so an audit failure cannot leave a completed action
+  reported as failed; finish restores the previous outcome if its audit append fails.
+- Verification sandbox forwards allowlisted env by name (`-e NAME`), keeping values out of `docker ps`.
+- Capabilities lists health/shutdown/capabilities endpoints; PR operations take the repository guard.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added

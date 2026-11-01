@@ -59,7 +59,7 @@ export class GhClient {
   }
 
   async findPr(repo: string, head: string): Promise<PullRequest | undefined> {
-    const result = await this.run(repo, ["pr", "list", "--head", head, "--state", "all", "--json", "number,url,state", "--limit", "1"]);
+    const result = await this.run(repo, ["pr", "list", "--head", head, "--state", "open", "--json", "number,url,state", "--limit", "1"]);
     let parsed: unknown;
     try { parsed = JSON.parse(result.stdout || "[]"); } catch { throw new Error("gh pr list returned invalid JSON"); }
     if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
@@ -69,15 +69,38 @@ export class GhClient {
   }
 
   async createPr(repo: string, input: CreatePrInput): Promise<PullRequest> {
-    const args = ["pr", "create", "--base", input.base, "--head", input.head, "--title", input.title, "--body", input.body];
-    if (input.label) args.push("--label", input.label);
-    args.push("--json", "number,url");
-    const result = await this.run(repo, args);
+    const baseArgs = ["pr", "create", "--base", input.base, "--head", input.head, "--title", input.title, "--body", input.body];
+    let result: GhRunResult;
+    try {
+      result = await this.run(repo, input.label ? [...baseArgs, "--label", input.label] : baseArgs);
+    } catch (error) {
+      // A missing label is cosmetic; retry without it rather than failing the PR.
+      if (!input.label) throw error;
+      result = await this.run(repo, baseArgs);
+    }
+    const match = /(https?:\/\/\S+?\/pull\/(\d+))/.exec(result.stdout);
+    if (!match) throw new Error("gh pr create did not print a pull request URL");
+    return { number: Number(match[2]), url: match[1] };
+  }
+
+  /** Read the PR head and state so merge-queue cannot queue an older commit. */
+  async viewPr(repo: string, number: number): Promise<PullRequest & { headRefOid?: string }> {
+    const result = await this.run(repo, ["pr", "view", String(number), "--json", "number,url,state,headRefOid"]);
     let parsed: unknown;
-    try { parsed = JSON.parse(result.stdout); } catch { throw new Error("gh pr create returned invalid JSON"); }
-    const record = parsed as Partial<PullRequest>;
-    if (typeof record.number !== "number" || typeof record.url !== "string") throw new Error("gh pr create returned an invalid PR record");
-    return { number: record.number, url: record.url };
+    try { parsed = JSON.parse(result.stdout); } catch { throw new Error("gh pr view returned invalid JSON"); }
+    const record = parsed as Partial<PullRequest> & { headRefOid?: unknown };
+    if (typeof record.number !== "number" || typeof record.url !== "string") throw new Error("gh pr view returned an invalid PR record");
+    return {
+      number: record.number,
+      url: record.url,
+      ...(typeof record.state === "string" ? { state: record.state } : {}),
+      ...(typeof record.headRefOid === "string" ? { headRefOid: record.headRefOid } : {}),
+    };
+  }
+
+  /** Best-effort label add after creation (a missing label never invalidates the PR). */
+  async addLabel(repo: string, number: number, label: string): Promise<void> {
+    await this.run(repo, ["pr", "edit", String(number), "--add-label", label]).catch(() => undefined);
   }
 
   async queueMerge(repo: string, number: number, method: "squash" | "merge" = "squash"): Promise<GhRunResult> {

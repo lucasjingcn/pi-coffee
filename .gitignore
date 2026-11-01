@@ -24,3 +24,6 @@ credentials*.json
 state.json
 state.json.bak
 *.tmp
+
+# Symlinked dependency tree in local worktrees
+/node_modules

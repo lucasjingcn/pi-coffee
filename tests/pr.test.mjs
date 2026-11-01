@@ -20,11 +20,21 @@ if (args[0] === "pr" && args[1] === "list") {
   process.exit(0);
 }
 if (args[0] === "pr" && args[1] === "create") {
-  const pr = { number: 7, url: "https://example.test/pull/7" };
+  const pr = { number: 7, url: "https://example.test/pull/7", state: "OPEN", headRefOid: process.env.FAKE_GH_HEAD ?? "" };
+  const labelIndex = args.indexOf("--label");
+  if (labelIndex >= 0 && process.env.FAKE_GH_LABEL_FAIL === "1") { console.error("could not add label"); process.exit(1); }
   if (process.env.FAKE_GH_STATE) fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(pr));
+  console.log(pr.url);
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "view") {
+  const state = process.env.FAKE_GH_STATE;
+  const pr = state && fs.existsSync(state) ? JSON.parse(fs.readFileSync(state, "utf8")) : { number: 7, url: "https://example.test/pull/7", state: "OPEN", headRefOid: "" };
+  if (process.env.FAKE_GH_HEAD) pr.headRefOid = process.env.FAKE_GH_HEAD;
   console.log(JSON.stringify(pr));
   process.exit(0);
 }
+if (args[0] === "pr" && args[1] === "edit") process.exit(0);
 if (args[0] === "pr" && args[1] === "merge") process.exit(0);
 process.exit(0);
 `;
@@ -81,6 +91,8 @@ async function fixture(fn, overrides = {}) {
     delete process.env.FAKE_GH_LOG;
     delete process.env.FAKE_GH_STATE;
     delete process.env.FAKE_GH_FAIL;
+    delete process.env.FAKE_GH_HEAD;
+    delete process.env.FAKE_GH_LABEL_FAIL;
     await c.stopAll();
     await rm(root, { recursive: true, force: true });
   }
@@ -114,9 +126,10 @@ test("pi_pr pushes the branch, embeds evidence and is idempotent", () =>
   }));
 
 test("merge-queue mode queues the PR after evidence checks", () =>
-  fixture(async ({ c, log }) => {
-    await c.verify("s1");
+  fixture(async ({ c, log, meta }) => {
+    const proof = await c.verify("s1");
     await c.createPr("s1");
+    process.env.FAKE_GH_HEAD = proof.workerSha;
     const queued = await c.mergeViaQueue("s1");
     assert.equal(queued.ok, true);
     assert.equal(queued.queued, true);
@@ -142,4 +155,27 @@ test("gh failures surface without recording a PR", () =>
     process.env.FAKE_GH_FAIL = "1";
     await assert.rejects(c.createPr("s1"), /gh pr list failed: gh auth failed/);
     assert.equal(meta.pr, undefined);
+  }));
+
+
+test("merge-queue refuses a PR whose head is not the verified worker", () =>
+  fixture(async ({ c }) => {
+    const proof = await c.verify("s1");
+    await c.createPr("s1");
+    process.env.FAKE_GH_HEAD = "f".repeat(40);
+    await assert.rejects(c.mergeViaQueue("s1"), /does not match verified worker/);
+    assert.equal((await calls(process.env.FAKE_GH_LOG)).filter((argv) => argv[1] === "merge").length, 0);
+    assert.ok(proof.workerSha);
+  }));
+
+test("a missing PR label is retried without the label", () =>
+  fixture(async ({ c, log }) => {
+    await c.verify("s1");
+    process.env.FAKE_GH_LABEL_FAIL = "1";
+    const result = await c.createPr("s1");
+    assert.equal(result.created, true);
+    const creates = (await calls(log)).filter((argv) => argv[0] === "pr" && argv[1] === "create");
+    assert.equal(creates.length, 2);
+    assert.ok(creates[0].includes("--label"));
+    assert.ok(!creates[1].includes("--label"));
   }));

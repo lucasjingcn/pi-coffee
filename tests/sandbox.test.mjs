@@ -30,7 +30,8 @@ if (argv[0] === "run") {
     if (argv[j] !== "-e") continue;
     const spec = argv[j + 1];
     const eq = spec.indexOf("=");
-    env[spec.slice(0, eq)] = spec.slice(eq + 1);
+    if (eq < 0) env[spec] = process.env[spec];
+    else env[spec.slice(0, eq)] = spec.slice(eq + 1);
   }
   const bashIdx = argv.indexOf("bash");
   const cmd = argv[bashIdx + 2];
@@ -126,8 +127,9 @@ test("verification commands run inside the docker sandbox and record the image",
     assert.match(mount, /:\/workspace$/);
     assert.equal(run[run.indexOf("-w") + 1], "/workspace");
     assert.ok(run.includes("fake:test"));
+    assert.ok(run.includes("FAKE_PASSTHROUGH"), "allowlisted names are forwarded by reference");
     const envArgs = run.filter((arg) => arg.startsWith("FAKE_PASSTHROUGH=") || arg.startsWith("HOME=") || arg.startsWith("FAKE_SECRET_KEY="));
-    assert.deepEqual(envArgs, ["FAKE_PASSTHROUGH=yes"]);
+    assert.deepEqual(envArgs, [], "allowlisted values must not appear in docker argv");
     const manifest = await readEvidenceManifest(evidenceDir(c.config.dataDir, proof.evidence));
     assert.equal(manifest.sandbox.kind, "docker");
     assert.equal(manifest.sandbox.image, "fake:test");
@@ -207,6 +209,41 @@ test("spec.isolation cannot bypass the configured sandbox policy", async () => {
       );
     } finally {
       await dockerCoord.stopAll();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("verify refuses when the recorded sandbox differs from the daemon backend", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-mismatch-"));
+  try {
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    await writeFile(join(repo, "file.txt"), "x");
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-qm", "init"]);
+    const config = loadConfig({ dataDir: join(root, "data"), workspaceRoot: join(root, "workers"), defaultRepo: repo, autoClean: false });
+    const c = new Coordinator(config);
+    await c.init();
+    c.runtimes.set("s1", {
+      meta: {
+        id: "s1", name: "mismatch", repo, worktree: repo, cwd: repo, branch: "pi/test", baseRef: "HEAD",
+        status: "idle", createdAt: 1, lastActivity: 1, pendingQuestions: [],
+        spec: { goal: "x", scope: ["file.txt"] }, acceptance: { files: [], hashes: {}, command: "true" },
+        sandbox: { kind: "docker", image: "x" },
+      },
+      client: { getState: async () => ({ isStreaming: false }), stop: async () => {}, isStreaming: false, refreshStreaming: async () => {} },
+      repoIdentity: resolveRepoIdentity(repo), lastNotifiedQuestionIds: new Set(),
+    });
+    try {
+      await assert.rejects(c.verify("s1"), /recorded with the docker sandbox but the daemon now uses worktree/);
+    } finally {
+      await c.stopAll();
     }
   } finally {
     await rm(root, { recursive: true, force: true });

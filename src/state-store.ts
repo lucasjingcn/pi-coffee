@@ -8,6 +8,8 @@ import { logLine } from "./log.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
 export interface StateSnapshot {
+  /** 1 = pre-0.3 state without a version field; 2 = 0.3+ (validated, forward-only). */
+  schemaVersion: number;
   counter: number;
   mailbox: MailMessage[];
   board: BoardEntry[];
@@ -42,7 +44,7 @@ function safeReason(error: unknown): string {
 }
 
 function emptyState(): StateSnapshot {
-  return { counter: 0, mailbox: [], board: [], history: [], orchestratorCosts: [] };
+  return { schemaVersion: 2, counter: 0, mailbox: [], board: [], history: [], orchestratorCosts: [] };
 }
 
 /**
@@ -53,6 +55,15 @@ function emptyState(): StateSnapshot {
  */
 export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
   if (!isRecord(raw)) fail(file, "expected a JSON object");
+
+  let schemaVersion = 1;
+  if (raw.schemaVersion !== undefined) {
+    if (typeof raw.schemaVersion !== "number" || !Number.isSafeInteger(raw.schemaVersion) || raw.schemaVersion < 1) {
+      fail(file, '"schemaVersion" must be a positive integer');
+    }
+    if (raw.schemaVersion > 2) fail(file, `state schema ${raw.schemaVersion} is newer than this daemon supports (2); upgrade the daemon`);
+    schemaVersion = raw.schemaVersion;
+  }
 
   let counter = 0;
   if (raw.counter !== undefined) {
@@ -89,7 +100,7 @@ export function validateSnapshot(raw: unknown, file: string): StateSnapshot {
     counter = Math.max(counter, n);
   });
 
-  return { counter, mailbox, board, history, orchestratorCosts };
+  return { schemaVersion, counter, mailbox, board, history, orchestratorCosts };
 }
 
 function optionalArray<T>(

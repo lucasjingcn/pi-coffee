@@ -235,6 +235,8 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
               .describe("Coordinator-authored hard requirements with unique IDs; each needs met=true and evidence in pi_review before merge."),
             validation_paths: z.array(z.string()).optional()
               .describe("Additional worktree-relative validation files/directories; edits to existing definitions need per-file pi_review approval."),
+            isolation: z.enum(["worktree", "docker"]).optional()
+              .describe("Requested execution backend; the daemon policy must allow it or the spawn is refused"),
             runner: z.object({
               kind: z.enum(["pi", "acp"]),
               command: z.array(z.string().min(1)).min(1).max(32).optional().describe("ACP agent argv; defaults to PI_COFFEE_ACP_COMMAND"),
@@ -351,6 +353,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
         thinking: args.thinking,
         prompt: args.prompt,
         spec,
+        blocked_by: args.blocked_by,
         acceptanceFiles: args.acceptance_files,
         acceptanceCommand: args.acceptance_command,
         controlKeyHash: createHash("sha256").update(controlKey).digest("hex"),
