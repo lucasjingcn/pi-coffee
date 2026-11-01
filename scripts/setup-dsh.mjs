@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { loadDaemonEnv } from "./lib/env.mjs";
 
 /** Server namespace; DSH names the tools `mcp__pi-coffee__<tool>`. */
 const SERVER_NAME = "pi-coffee";
@@ -152,9 +152,27 @@ function mcpUrl(options) {
   return `http://${DEFAULT_HOST}:${resolvePort()}/mcp`;
 }
 
+/** Token visible to this process; `SHELL_TOKEN` is the part DSH will also see. */
+const SHELL_TOKEN = process.env.PI_COFFEE_TOKEN;
+
 function hasToken() {
   const token = process.env.PI_COFFEE_TOKEN;
   return typeof token === "string" && token.length > 0;
+}
+
+/**
+ * The http row references `PI_COFFEE_TOKEN` so no secret is written to config,
+ * but only scripts/proxy.mjs loads ~/.pi-coffee/env for the stdio transport: a
+ * DSH process does not, so a token that lives only in that file resolves to an
+ * empty header and every call gets 401.
+ */
+function warnIfTokenIsFileOnly(options) {
+  if (options.transport === "stdio") return;
+  if (!hasToken() || (typeof SHELL_TOKEN === "string" && SHELL_TOKEN.length > 0)) return;
+  console.error(
+    "setup-dsh: PI_COFFEE_TOKEN comes from the settings file, which DSH does not load; " +
+      "export it in the environment DSH starts with, or use --transport stdio (scripts/proxy.mjs reads the file).",
+  );
 }
 
 /** DSH home: `$DSH_HOME` or `~/.dsh` (convention used by @deepseek-ai/dsh-home-paths). */
@@ -402,9 +420,10 @@ function main() {
   }
 
   try {
-    // Match the daemon: its private env file wins over the ambient environment,
-    // so the port/token state we report is the one /mcp actually serves.
-    loadEnvFile(envFilePath(), { override: true });
+    // Match the daemon: the ambient environment wins and the private env file
+    // only fills gaps, so the port/token state we report is the one /mcp serves.
+    loadDaemonEnv();
+    warnIfTokenIsFileOnly(options);
     return run(options);
   } catch (error) {
     if (error instanceof UsageError) {

@@ -38,11 +38,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { loadDaemonEnv } from "./lib/env.mjs";
 
-// Apply the same settings file the daemon launchers use; without this, a daemon
-// started from a generated env file was inspected against the wrong dataDir.
-loadEnvFile(envFilePath(), { override: true });
+// Apply the same settings file the daemon launchers use, with the same
+// precedence; without this, a daemon started from a generated env file was
+// inspected against the wrong dataDir.
+loadDaemonEnv();
 
 /** Mirrors SESSION_DIR_TTL_MS in src/manager.ts (48 hours). */
 const SESSION_DIR_TTL_MS = 48 * 60 * 60 * 1000;

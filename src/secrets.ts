@@ -16,7 +16,8 @@ export type SecretKind =
   | "slack-token"
   | "jwt"
   | "private-key"
-  | "credential-assignment";
+  | "credential-assignment"
+  | "bearer-token";
 
 export interface SecretFinding {
   kind: SecretKind;
@@ -42,8 +43,16 @@ const RULES: Rule[] = [
   { kind: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   {
     kind: "credential-assignment",
+    // Case-insensitive: `password:` and `api_key=` are the common spellings, and
+    // an uppercase-only rule matched the least likely of them.
     pattern:
-      /\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS[_-]?KEY)[A-Za-z0-9_]*\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{12,}["']?/g,
+      /\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS[_-]?KEY)[A-Za-z0-9_]*\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{12,}["']?/gi,
+  },
+  {
+    kind: "bearer-token",
+    // `Authorization: Bearer <credential>` — the shape of a pasted HTTP header,
+    // which the name=value rule cannot see because "Bearer" is not a name.
+    pattern: /\bauthorization\b\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   },
 ];
 

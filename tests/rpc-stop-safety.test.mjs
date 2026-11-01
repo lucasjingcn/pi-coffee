@@ -45,19 +45,23 @@ process.on('SIGTERM',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1
   });
 });
 
-test('shutdown stays unconfirmed when SIGKILL leaves detached tool descendants', {skip:process.platform==='win32' || psUnavailable}, async () => {
+test('SIGKILL forces detached tool descendants out before the stop is confirmed', {skip:process.platform==='win32' || psUnavailable}, async () => {
+  // pi ignores the signal and its detached tool ignores SIGTERM too. The stop must
+  // still end with no recorded descendant running: it escalates on the tool as
+  // well, instead of releasing locks while that tool keeps writing.
   await fixture(`const {spawn}=require('node:child_process'); const fs=require('node:fs');
 const tool=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore',detached:true});
 fs.writeFileSync('tool.pid',String(tool.pid));
 process.on('SIGTERM',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1000);`, async (c,dir) => {
     const tool=Number(await readFile(join(dir,'tool.pid'),'utf8'));
     try {
-      await assert.rejects(c.stop(), /descendant process\(es\) alive; retain locks/);
-      // The rejection is the contract: shutdown is not reported confirmed. The
-      // root may still be settling, so only require that it is no longer running.
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await c.stop();
+      assert.equal(c.hasExited, true);
+      assert.throws(()=>process.kill(tool,0),{code:'ESRCH'},
+        'the detached tool must be gone before the shutdown is reported confirmed');
     } finally {
       try { process.kill(-tool,'SIGKILL'); } catch {}
+      try { process.kill(tool,'SIGKILL'); } catch {}
     }
   }, {stopThrows:true});
 });
@@ -153,4 +157,26 @@ test('Windows already exited root cannot establish descendant tree shutdown', as
   c.killWindowsTree=async()=>assert.fail('must not act on a reused or exited PID');
   await assert.rejects(stopAsWindows(c),/cannot confirm Windows tool tree after root exit; retain locks/);
   assert.equal(c.hasExited,false);
+});
+
+test('a graceful stdin-EOF exit still stops detached tool descendants', {skip:process.platform==='win32' || psUnavailable}, async () => {
+  // pi's stdin-EOF path exits through `shutdown()` without running its SIGTERM
+  // handler, so the group kill never reaches a detached bash tool. Confirming the
+  // stop without checking them released the locks (and possibly the worktree)
+  // while the tool was still writing.
+  await fixture(`const {spawn}=require('node:child_process'); const fs=require('node:fs');
+const tool=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore',detached:true});
+fs.writeFileSync('tool.pid',String(tool.pid));
+process.stdin.on('end',()=>process.exit(0)); setInterval(()=>{},1000);`, async (c,dir) => {
+    const tool=Number(await readFile(join(dir,'tool.pid'),'utf8'));
+    try {
+      await c.stop();
+      assert.equal(c.hasExited,true);
+      assert.throws(()=>process.kill(tool,0),{code:'ESRCH'},
+        'the detached tool must be stopped before the shutdown is reported confirmed');
+    } finally {
+      try { process.kill(-tool,'SIGKILL'); } catch {}
+      try { process.kill(tool,'SIGKILL'); } catch {}
+    }
+  });
 });

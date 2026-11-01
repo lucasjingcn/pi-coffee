@@ -37,6 +37,17 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 /** Distinct error so the caller can answer 413 instead of blaming malformed JSON. */
 class PayloadTooLargeError extends Error {}
 
+/**
+ * True for a request that arrived over the loopback interface (IPv4, IPv6 or an
+ * IPv4-mapped IPv6 address). Used only where the deployment carries no token:
+ * there the local caller is the operator by definition.
+ */
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const value = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return value === "::1" || value === "0:0:0:0:0:0:0:1" || value.startsWith("127.");
+}
+
 /** Read and JSON-parse a request body, rejecting anything over 32 MiB. */
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -162,6 +173,15 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, parsedBody: 
 // ---------------------------------------------------------------------------
 
 const internalString = z.string().min(1);
+
+/**
+ * Read-only or operator-only internal routes that carry no request payload, so
+ * they have no schema entry. Listed once here so `/internal/capabilities` and
+ * the switch cannot drift apart.
+ */
+const INTERNAL_SCHEMALESS_ROUTES = ["/internal/health", "/internal/capabilities", "/internal/sessions",
+  "/internal/locks", "/internal/shutdown"] as const;
+
 const internalSchemas: Record<string, z.ZodTypeAny> = {
   "/internal/hello": z.object({ sessionId: internalString.optional() }),
   "/internal/status": z.object({ sessionId: internalString.optional() }),
@@ -182,11 +202,19 @@ const internalSchemas: Record<string, z.ZodTypeAny> = {
 async function handleInternal(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const token = requestToken(req);
   const workerSid = token ? coord.workerSessionForToken(token) : undefined;
-  const master = Boolean(config.token) && authorized(req) && !workerSid;
+  const tokenConfigured = Boolean(config.token);
+  const master = tokenConfigured && authorized(req) && !workerSid;
   const mutating = new Set(["/internal/hello", "/internal/claim", "/internal/authorize-write",
     "/internal/release", "/internal/read", "/internal/send", "/internal/board/post",
     "/internal/drain", "/internal/shutdown"]);
-  if (!workerSid && !master && (Boolean(config.token) || (coord.hasProtectedSessions() && mutating.has(url.pathname)))) {
+  // Operator-only endpoints. With no token configured every caller is equally
+  // anonymous, so a loopback caller is the operator: the protected-session rule
+  // used to lock `npm run upgrade` and the HTTP shutdown out of their own daemon
+  // for good, because no credential can ever satisfy it in that deployment.
+  const operatorEndpoint = url.pathname === "/internal/drain" || url.pathname === "/internal/shutdown";
+  const loopbackOperator = !tokenConfigured && !workerSid && isLoopbackAddress(req.socket.remoteAddress);
+  if (!workerSid && !master && !(operatorEndpoint && loopbackOperator)
+    && (tokenConfigured || (coord.hasProtectedSessions() && mutating.has(url.pathname)))) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
 
@@ -216,6 +244,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       body = result.data;
     }
   } catch (error) {
+    // An oversized body is its own status: mapping it to 400 hides the real
+    // cause from clients that only special-case 413.
+    if (error instanceof PayloadTooLargeError) return sendJson(res, 413, { error: error.message });
     return sendJson(res, 400, { error: String(error instanceof Error ? error.message : error) });
   }
 
@@ -232,7 +263,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       case "/internal/capabilities":
         return sendJson(res, 200, capabilitiesPayload({
           workerStartupPolicy: WORKER_STARTUP_POLICY,
-          internalEndpoints: [...new Set([...Object.keys(internalSchemas), "/internal/health", "/internal/shutdown", "/internal/capabilities"])],
+          // Every route the switch below serves: the schema map covers the
+          // payload endpoints, the rest are read-only lookups with no schema.
+          internalEndpoints: [...new Set([...Object.keys(internalSchemas), ...INTERNAL_SCHEMALESS_ROUTES])],
         }));
 
       case "/internal/hello": {

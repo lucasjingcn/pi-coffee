@@ -105,6 +105,17 @@ export function loadEnvFile(file = envFilePath(), { override = false } = {}) {
   return { file, loaded: true, values };
 }
 
+/**
+ * Load the settings file with the daemon's precedence: an exported PI_COFFEE_*
+ * (or provider key) wins, and the file only fills the gaps. Every client script
+ * must use this same order — otherwise the proxy, health probe, inspect, upgrade
+ * and status talk to a different port/token/dataDir than the daemon they report
+ * on, which follows `scripts/start.mjs`.
+ */
+export function loadDaemonEnv(file = envFilePath()) {
+  return loadEnvFile(file, { override: false });
+}
+
 /** Write the env file with restrictive permissions. */
 export function writeEnvFile(entries, file = envFilePath()) {
   mkdirSync(dirname(file), { recursive: true });

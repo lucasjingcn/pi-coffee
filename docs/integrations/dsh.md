@@ -184,8 +184,10 @@ structure parses as well, because the entry list is read as YAML/JSON).
 
 The daemon, the proxy, and the setup script agree on these. `~/.pi-coffee/env` (override the path
 with `PI_COFFEE_ENV_FILE`) is loaded by `scripts/start.mjs`, `scripts/proxy.mjs`,
-`scripts/check-health.mjs`, and `scripts/setup-dsh.mjs`; for the daemon the file wins over the
-ambient environment.
+`scripts/check-health.mjs`, `scripts/status.mjs`, `scripts/inspect.mjs`, `scripts/doctor.mjs`,
+`scripts/upgrade.mjs` and `scripts/setup-dsh.mjs`, all with the same precedence: an exported
+`PI_COFFEE_*` wins and the file only fills the gaps. Two copies of one key with different values
+therefore cannot make the proxy talk to a different daemon than the launcher started.
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |

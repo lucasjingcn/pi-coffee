@@ -4,7 +4,7 @@ import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { acceptancePath } from "./acceptance.js";
-import { currentBranch, git, isWorktreeClean, resolveRef, worktreeDiff } from "./worktree.js";
+import { currentBranch, git, gitRaw, isWorktreeClean, resolveRef, worktreeDiff } from "./worktree.js";
 import { existingValidationChanges } from "./validation-changes.js";
 import { reviewContractHash, validateCandidateReview, validateReviewSpec, type CandidateReview } from "./candidate-review.js";
 import type { DelegationSpec } from "./types.js";
@@ -203,7 +203,14 @@ export class IntegrationGate {
       const verificationStartedAt = Date.now();
       const configuredBudget = this.options.verifyTimeoutMs ?? 900_000;
       const verifyBudgetMs = budgetMs !== undefined ? Math.min(configuredBudget, Math.max(1, budgetMs)) : configuredBudget;
-      const defaultValidatorTimeoutMs = this.options.validatorTimeoutMs ?? 600_000;
+      const defaultValidatorTimeoutMs = validators.length === 1
+        // A per-validator default exists to stop one validator from starving the
+        // ones after it. With a single validator there is nothing to starve, so
+        // the whole budget is available: this keeps the historical contract where
+        // the caller's `timeout_ms` (passed as the budget) bounds the legacy
+        // single acceptance command instead of a hidden 10-minute cap.
+        ? verifyBudgetMs
+        : (this.options.validatorTimeoutMs ?? 600_000);
       const runs: ValidatorRun[] = [];
       for (const validator of validators) {
         const remaining = verifyBudgetMs - (Date.now() - verificationStartedAt);
@@ -337,7 +344,10 @@ async function isCandidateClean(dir: string, validators: ResolvedValidator[]): P
   if (await isWorktreeClean(dir)) return true;
   const patterns = validators.flatMap((validator) => validator.artifacts);
   if (patterns.length === 0) return false;
-  const status = await git(dir, ["status", "--porcelain", "--untracked-files=all"]);
+  // `gitRaw`: a modified tracked file starts with a space (` M path`), and a
+  // trimmed first line loses that column, so `slice(3)` would eat two path
+  // characters and no artifact glob could ever match a tracked report file.
+  const status = await gitRaw(dir, ["status", "--porcelain", "--untracked-files=all"]);
   const paths = status.split("\n").filter(Boolean).map((line) => {
     const raw = line.slice(3).trim();
     const arrow = raw.lastIndexOf(" -> ");

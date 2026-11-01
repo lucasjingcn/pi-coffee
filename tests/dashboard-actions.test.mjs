@@ -9,6 +9,7 @@ function fakeCoord() {
     calls,
     audit: { append: async (...args) => { calls.push(["audit", ...args]); } },
     list: () => [],
+    allSessions: () => [],
     setOutcome: async (...args) => { calls.push(["finish", ...args]); },
     send: async (...args) => { calls.push(["send", ...args]); },
     merge: async (...args) => { calls.push(["merge", ...args]); },
@@ -118,6 +119,26 @@ test("valid actions call the coordinator with explicit arguments", async () => {
     ["finish", "s1", "success_first", "read-only accepted"],
     ["stop", "s1", { preserveWorktree: true }],
   ]);
+});
+
+test("finish records the outcome the operator asks for", async () => {
+  const coord = fakeCoord();
+  await withServer({ coord, token: TOKEN, actions: true }, async (base) => {
+    const second = await fetch(`${base}/dashboard/api/actions/sessions/s1/finish`, {
+      method: "POST",
+      headers: actionHeaders(TOKEN, { "x-pi-coffee-confirm": "s1" }),
+      body: JSON.stringify({ note: "needed a correction", outcome: "success_second" }),
+    });
+    assert.equal(second.status, 200);
+    // `abandoned` belongs to pi_stop, and an unknown value must not be recorded.
+    const bogus = await fetch(`${base}/dashboard/api/actions/sessions/s1/finish`, {
+      method: "POST",
+      headers: actionHeaders(TOKEN, { "x-pi-coffee-confirm": "s1" }),
+      body: JSON.stringify({ note: "x", outcome: "abandoned" }),
+    });
+    assert.equal(bogus.status, 400);
+  });
+  assert.deepEqual(coord.calls, [["finish", "s1", "success_second", "needed a correction"]]);
 });
 
 test("messages and unknown routes are rejected before dispatch", async () => {

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** Verify the just-installed background daemon without exposing credentials. */
-import { envFilePath, loadEnvFile } from "./lib/env.mjs";
+import { loadDaemonEnv } from "./lib/env.mjs";
 
-loadEnvFile(envFilePath(), { override: true });
+loadDaemonEnv();
 const port = Number(process.env.PI_COFFEE_PORT || "8787");
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PI_COFFEE_PORT");
 // PI_COFFEE_URL is what status/upgrade/dsh use; honour it so the installer probes
@@ -15,11 +15,16 @@ while (Date.now() < deadline) {
   try {
     const response = await fetch(url, { headers, signal: AbortSignal.timeout(1500) });
     if (response.ok && (await response.json()).ok === true) {
-      console.log(`pi-coffee is healthy at http://127.0.0.1:${port}/mcp`);
+      console.log(`pi-coffee is healthy at ${endpoint.origin}/mcp`);
       process.exit(0);
     }
   } catch { /* daemon may still be starting */ }
   await new Promise((resolve) => setTimeout(resolve, 250));
+}
+if (endpoint.origin !== `http://127.0.0.1:${port}`) {
+  // PI_COFFEE_URL names another endpoint on purpose (a remote daemon); say so,
+  // because this probe then says nothing about the local service.
+  console.error(`probed PI_COFFEE_URL (${endpoint.origin}); the local daemon was not verified.`);
 }
 console.error("pi-coffee did not become healthy. Check the background task or service logs.");
 process.exit(1);

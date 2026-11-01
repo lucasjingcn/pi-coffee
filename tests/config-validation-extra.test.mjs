@@ -79,3 +79,27 @@ test("workerPlugins parses env and overrides; empty denies by default", () => {
     else process.env[key] = saved;
   }
 });
+
+test("worker sandbox refuses a network that cannot reach the daemon", () => {
+  assert.throws(
+    () => loadConfig({ sandbox: "docker", sandboxImage: "img:1", sandboxNetwork: "none" }),
+    /sandboxNetwork|PI_COFFEE_SANDBOX_NETWORK/,
+  );
+  const ok = loadConfig({ sandbox: "docker", sandboxImage: "img:1", sandboxNetwork: "bridge" });
+  assert.equal(ok.sandboxNetwork, "bridge");
+});
+
+test("the container's coord host is configurable and defaults to host.docker.internal", () => {
+  const key = "PI_COFFEE_SANDBOX_COORD_HOST";
+  const saved = process.env[key];
+  try {
+    delete process.env[key];
+    assert.equal(loadConfig().sandboxCoordHost, "host.docker.internal");
+    process.env[key] = "172.17.0.1";
+    assert.equal(loadConfig().sandboxCoordHost, "172.17.0.1");
+    assert.equal(loadConfig({ sandboxCoordHost: "10.0.0.5" }).sandboxCoordHost, "10.0.0.5");
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});

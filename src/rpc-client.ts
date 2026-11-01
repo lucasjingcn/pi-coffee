@@ -319,22 +319,31 @@ export class PiRpcClient extends EventEmitter {
       return !alive() && (proc.exitCode !== null || proc.signalCode !== null);
     };
     try { proc.stdin.end(); } catch { /* termination below still applies */ }
-    let escalated = false;
-    let tracked: number[] | null = null;
+    // pi tears its detached tools down only in its SIGTERM/SIGHUP handlers; the
+    // stdin-EOF shutdown path returns before them, so a fast exit here still
+    // leaves bash tools in their own process groups. Sample the tree while the
+    // worker can still have children, then verify survivors on every path — not
+    // only after a SIGKILL.
+    const tracked = await descendantPids(pid);
     if (!await wait(1000)) {
-      // pi runs its own detached-tool cleanup on SIGTERM. If it has to be killed,
-      // the tools it put in their own process group survive the group kill, so
-      // record the descendants first and verify them afterwards.
-      tracked = await descendantPids(pid);
+      // pi runs its own detached-tool cleanup on SIGTERM.
       signal("SIGTERM");
       if (!await wait(1000)) {
         signal("SIGKILL");
-        escalated = true;
         if (!await wait(3000)) throw new Error("pi rpc shutdown could not confirm worker and tool process exit; retain locks");
       }
     }
-    if (escalated && tracked !== null && tracked.length > 0) {
-      const survivors = await survivingDescendants(tracked, 1500);
+    if (tracked !== null && tracked.length > 0) {
+      let survivors = await survivingDescendants(tracked, 1500);
+      if (survivors !== null && survivors.length > 0) {
+        // Nothing else owns these: a group kill cannot reach a detached child.
+        for (const child of survivors) { try { process.kill(child, "SIGTERM"); } catch { /* already gone */ } }
+        survivors = await survivingDescendants(survivors, 1500);
+        if (survivors !== null && survivors.length > 0) {
+          for (const child of survivors) { try { process.kill(child, "SIGKILL"); } catch { /* already gone */ } }
+          survivors = await survivingDescendants(survivors, 1000);
+        }
+      }
       if (survivors !== null && survivors.length > 0) {
         throw new Error(`pi rpc shutdown confirmed the worker group but left ${survivors.length} descendant process(es) alive; retain locks`);
       }

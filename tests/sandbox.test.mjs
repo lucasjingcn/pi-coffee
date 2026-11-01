@@ -249,3 +249,29 @@ test("verify refuses when the recorded sandbox differs from the daemon backend",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a validator's explicit env wins over an allowlisted host name", () =>
+  fixture(async ({ c, meta, dockerLog }) => {
+    process.env.FAKE_PASSTHROUGH = "from-daemon";
+    meta.spec.validators = [{ id: "env", command: "true", env: { FAKE_PASSTHROUGH: "from-validator" } }];
+    await c.verify("s1");
+    delete process.env.FAKE_PASSTHROUGH;
+    const run = (await dockerCalls(dockerLog)).find((argv) => argv[0] === "run");
+    assert.ok(run, "expected a docker run call");
+    // Inline value present, by-name reference gone: docker resolves later `-e NAME`
+    // entries from the CLI environment, so emitting both would silently win.
+    assert.ok(run.includes("FAKE_PASSTHROUGH=from-validator"), run.join(" "));
+    const occurrences = run.filter((arg) => arg === "FAKE_PASSTHROUGH").length;
+    assert.equal(occurrences, 0, "the by-name reference must be dropped when a value is explicit");
+  }));
+
+test("a container that cannot be removed keeps the shutdown unconfirmed", async () => {
+  const { DockerSandbox } = await import("../dist/sandbox.js");
+  const config = { image: "fake:test", network: "bridge", envAllow: [], dockerBin: "docker" };
+  const sandbox = new DockerSandbox(config,
+    async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon", timedOut: false }));
+  await assert.rejects(sandbox.removeWorker("s1"), /docker rm -f .* failed/);
+  const missing = new DockerSandbox(config,
+    async () => ({ code: 1, stdout: "", stderr: "Error: No such container: pi-coffee-s1", timedOut: false }));
+  await missing.removeWorker("s1");
+});

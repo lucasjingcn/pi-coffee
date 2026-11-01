@@ -157,6 +157,39 @@ test("declared artifact globs are copied and tolerated in the candidate", () =>
     assert.equal((await verifyEvidenceBundle(dir)).ok, true);
   }));
 
+test("a single validator uses the whole budget instead of the per-validator default", () =>
+  fixture(async ({ c, meta }) => {
+    // PI_COFFEE_VALIDATOR_TIMEOUT_MS only protects *later* validators from a
+    // greedy predecessor; with one command the caller's timeout_ms is the bound,
+    // which is what `pi_verify(session, timeout_ms)` has always promised.
+    c.config.validatorTimeoutMs = 1000;
+    meta.acceptance = { files: [], hashes: {}, command: "sleep 3 && echo done" };
+    const started = Date.now();
+    const proof = await c.verify("s1", undefined, 60_000);
+    const elapsed = Date.now() - started;
+    assert.equal(proof.passed, true, proof.failure);
+    assert.ok(elapsed >= 2500, `expected the command to run past the 1s default, took ${elapsed}ms`);
+  }));
+
+test("declared artifact globs also tolerate a rewritten tracked file", () =>
+  fixture(async ({ c, meta, worker, git }) => {
+    // A committed report file is ` M path` in status --porcelain: parsing the
+    // trimmed output used to eat two characters of its path.
+    await mkdir(join(worker, "report"), { recursive: true });
+    await writeFile(join(worker, "report", "out.xml"), "<old/>");
+    git(worker, "add", "report/out.xml");
+    git(worker, "commit", "-qm", "tracked report");
+    meta.spec.scope = ["src/item.txt", "report"];
+    meta.spec.validators = [{
+      id: "report",
+      command: 'echo "<new/>" > report/out.xml',
+      artifacts: ["report/**"],
+    }];
+    const proof = await c.verify("s1");
+    assert.equal(proof.passed, true, proof.failure);
+    assert.equal(proof.failure, undefined);
+  }));
+
 test("spawn rejects acceptance_command together with validators", () =>
   fixture(async ({ c, repo }) => {
     await assert.rejects(

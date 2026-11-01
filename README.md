@@ -643,7 +643,7 @@ Everything is configured through environment variables.
 | Variable | Default | Meaning |
 |---|---|---|
 | `PI_COFFEE_HOST` | `127.0.0.1` | Bind address. Loopback by default. |
-| `PI_COFFEE_PORT` | `8787` | Port for `/mcp` and `/internal/*`. |
+| `PI_COFFEE_PORT` | `8787` | Port for `/mcp` and `/internal/*`. Under `docker compose` the container always listens on `8787`; set `PI_COFFEE_HOST_PORT` (compose only) to change the published host port. |
 | `PI_COFFEE_PI_BIN` | pinned local pi CLI with `npm run start` | Explicit pi CLI override. |
 | `PI_COFFEE_BASH_BIN` | detected Bash | Bash executable for acceptance commands; on Windows, Git for Windows supplies it. |
 | `PI_COFFEE_DEFAULT_REPO` | *(none)* | Default repository for `pi_spawn`. If unset, every spawn must pass `repo`. |
@@ -674,11 +674,12 @@ Everything is configured through environment variables.
 | `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | Newest evidence bundles kept per session regardless of TTL. |
 | `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | Total size budget for one evidence bundle (MiB). |
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | Per-file budget inside a bundle; oversized logs keep a tail and are listed in `truncated`. |
-| `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | Default per-validator timeout (ms) when a validator does not set `timeoutMs`. |
+| `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | Default per-validator timeout (ms) when a validator does not set `timeoutMs`, for chains of two or more validators. A single validator (including the legacy `acceptance_command`) uses the whole `PI_COFFEE_VERIFY_TIMEOUT_MS`/`timeout_ms` budget instead. |
 | `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | Overall budget (ms) for the whole validator chain. |
 | `PI_COFFEE_SANDBOX` | `worktree` | Execution backend: `worktree` (today's host behavior) or `docker`. |
 | `PI_COFFEE_SANDBOX_IMAGE` | *(empty)* | Required for `docker`: image containing bash and the project toolchain. |
-| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access. |
+| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access and is refused with `PI_COFFEE_SANDBOX=docker`, because workers authorize writes against the daemon. |
+| `PI_COFFEE_SANDBOX_COORD_HOST` | `host.docker.internal` | Host name a worker container uses to reach the daemon. Docker Desktop maps this to the host; on Linux it resolves to the bridge gateway, so the daemon must listen on an interface the bridge can reach. |
 | `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(empty)* | Comma-separated host env names forwarded into containers (nothing else is passed). |
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
 | `PI_COFFEE_RUNNER` | `pi` | Default worker runner: `pi` (pinned CLI) or `acp` (Agent Client Protocol). |
@@ -741,6 +742,12 @@ write locking. Run one daemon per state directory.
 - The daemon binds to loopback and has no authentication by default. Setting `PI_COFFEE_TOKEN` enables
   it: the same secret must be presented on `/mcp` and `/internal/*`, either as
   `x-pi-coord-token` or `Authorization: Bearer <token>`.
+- Without a token, the operator endpoints (`/internal/drain`, `/internal/shutdown`) accept a
+  loopback caller even once protected sessions exist: with no credential configured, nothing could
+  ever authorize the upgrade path, and the POST-only rule already stops a web page from using them.
+  Worker tokens never reach them.
+- Mutating `/internal/*` endpoints only answer POST/PATCH, so a link or a cross-site form cannot
+  trigger them; oversized bodies get `413`, an unparsable payload `400`.
 - If you expose the daemon beyond loopback, use the token and a trusted network or VPN. A token on
   a shared network is not a substitute for network controls.
 - File claims are a coordination mechanism, not a sandbox. Treat a worker as able to run arbitrary
@@ -756,7 +763,8 @@ write locking. Run one daemon per state directory.
 | Acceptance commands fail on Windows | Git Bash is unavailable | Install Git for Windows and rerun `npm run doctor`. |
 | `git` complains about "dubious ownership" | The daemon user differs from the repo owner | The daemon already passes `safe.directory=*` to its own git calls; if you see this elsewhere, check your git version. |
 | Sessions show `stopped` or `error` after a restart | Shutdown confirmed or survivor ownership unresolved | Inspect handoff; respawn only after safe transfer. Transcript files are preserved. |
-| The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port. |
+| The daemon exits with `EADDRINUSE` | The port is taken | Set `PI_COFFEE_PORT` to a free port (under `docker compose`, set `PI_COFFEE_HOST_PORT` instead: the container always listens on `8787`). |
+| `npm run upgrade` says the daemon refused to drain | A previous upgrade left the daemon draining, or the drain started but no worker finished in time | The script cancels the drain on every failure; if it was interrupted, `pi_drain` with `action=cancel`. |
 | `codex mcp add` is not found | `codex` is not on the daemon user's `PATH` | Register the server manually in `~/.codex/config.toml`. |
 | `pi_wait` / `pi_verify` ends in a transport or request timeout | The client's per-tool timeout is shorter than the call | Raise it (`tool_timeout_sec` for Codex, `timeout` for pi) and re-read state with `pi_status`; the worker was never stopped. |
 | A worker is blocked by a file claim | Another worker holds a conflicting claim | Use `coord_send` to coordinate, or `pi_release` if the claim is stale. |

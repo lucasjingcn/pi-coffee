@@ -13,15 +13,31 @@ case "$(uname -s)" in
     # Under sudo the daemon belongs to SUDO_USER's GUI domain, not root's.
     uid="$(id -u)"
     if [ -n "${SUDO_USER:-}" ]; then uid="$(id -u "$SUDO_USER" 2>/dev/null || printf '%s' "$uid")"; fi
-    if launchctl print "gui/$uid/com.picoffee.daemon" 2>/dev/null | grep -q 'state = running'; then
-      echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
-      exit 1
-    fi ;;
+    # Capture first: `launchctl ... | grep -q` returns 141 under `pipefail`
+    # whenever grep exits before launchctl finishes writing, which silently
+    # disabled this guard and let the install interrupt running workers.
+    daemon_state="$(launchctl print "gui/$uid/com.picoffee.daemon" 2>/dev/null || true)"
+    case "$daemon_state" in
+      *"state = running"*)
+        echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
+        exit 1 ;;
+    esac ;;
   Linux)
     # Check the system unit too: `systemctl --user` cannot reach the user bus
     # under sudo, so the user-only check silently passed during a root upgrade.
-    if systemctl is-active --quiet pi-coffee 2>/dev/null \
-      || systemctl --user is-active --quiet pi-coffee 2>/dev/null; then
+    # Under sudo, ask the invoking user's own systemd instead — the system unit
+    # knows nothing about a --user install, so that half stays green otherwise.
+    user_active=""
+    if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+      target_uid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+      if [ -n "$target_uid" ]; then
+        user_active="$(sudo -u "$SUDO_USER" XDG_RUNTIME_DIR="/run/user/$target_uid" \
+          systemctl --user is-active pi-coffee 2>/dev/null || true)"
+      fi
+    else
+      user_active="$(systemctl --user is-active pi-coffee 2>/dev/null || true)"
+    fi
+    if systemctl is-active --quiet pi-coffee 2>/dev/null || [ "$user_active" = "active" ]; then
       echo "error: pi-coffee is running. Stop it after workers finish, then rerun npm run install:local." >&2
       exit 1
     fi ;;

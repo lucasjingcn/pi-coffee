@@ -439,6 +439,15 @@ export class Coordinator {
         this.notifyWaiters();
       }
     }
+    // Sessions archived by a restart have no runtime, so the loop above never
+    // sees them: without this pass a worktree deferred at shutdown (or left when
+    // a cleanup threw) would outlive its TTL for the whole daemon lifetime.
+    for (const entry of [...this.history]) {
+      if (this.runtimes.has(entry.id)) continue;
+      if (now - (entry.lastActivity ?? 0) < ttlMs) continue;
+      await this.cleanMeta(entry).catch(() => {});
+      await this.cleanSessionDir(entry).catch(() => {});
+    }
     await this.sweepFinalRetention(now).catch(() => {});
     await this.reclaimStale().catch(() => {});
     await this.sweepSessionDirs(now).catch(() => {});
@@ -1535,6 +1544,7 @@ export class Coordinator {
       envAllow: this.config.sandboxEnvAllow,
       port: this.config.port,
       dockerBin: this.config.dockerBin,
+      coordHost: this.config.sandboxCoordHost,
     }) : undefined;
     const client: WorkerTransport = runnerKind === "acp"
       ? new AcpClient({
@@ -1557,7 +1567,7 @@ export class Coordinator {
           env: {
             PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : workerAgentDir,
             PI_COORD_URL: this.sandbox
-              ? `http://host.docker.internal:${this.config.port}`
+              ? `http://${this.config.sandboxCoordHost}:${this.config.port}`
               : `http://${this.config.host}:${this.config.port}`,
             PI_COORD_SESSION_ID: id,
             PI_COORD_TOKEN: workerToken,
@@ -1568,7 +1578,13 @@ export class Coordinator {
     // Persist before the first prompt; never return a live worker whose control credential was lost.
     if (opts.controlKey && opts.scopeKey) {
       try { await this.vault.save(id, opts.controlKey, opts.scopeKey); }
-      catch { this.releaseRuntimeReservations(rt); throw new Error("worker control credential persistence failed"); }
+      catch {
+        this.releaseRuntimeReservations(rt);
+        // The worktree and branch already exist and no history entry does, so
+        // nothing else would ever reclaim them.
+        if (meta.worktree) await removeWorktree(meta.repo, meta.worktree, meta.branch).catch(() => {});
+        throw new Error("worker control credential persistence failed");
+      }
     }
     this.runtimes.set(id, rt);
     this.workerTokens.set(workerToken, id);
@@ -1746,6 +1762,17 @@ export class Coordinator {
     const id = entry.id;
     const acceptancePaths = entry.acceptance?.files ?? [];
 
+    const provider = opts.provider ?? entry.provider ?? this.config.provider;
+    const model = opts.model ?? entry.model ?? this.config.model;
+    const thinking = opts.thinking ?? entry.thinking ?? this.config.thinking;
+    // Fail closed before the process starts *and* before any lock is taken: a
+    // failed audit append must neither leave a resumed worker running behind a
+    // failed resume call nor leave the scope claimed by a session with no runtime.
+    await this.auditStrict("orchestrator", "resume", id, { provider, model });
+    // A crash may have left the previous container behind: clear it before the
+    // deterministic --name can be reused. Missing containers are ignored.
+    if (this.sandbox) await this.sandbox.removeWorker(id);
+
     // The spec still owns the scope: re-claim it before the process starts, so a
     // concurrent dispatch cannot take files this worker is about to edit again.
     const scope = normalizedScope(entry.spec?.scope ?? []);
@@ -1777,18 +1804,9 @@ export class Coordinator {
 
     const workerToken = randomBytes(32).toString("base64url");
     const sessionDir = join(this.config.dataDir, "sessions", id);
-    const provider = opts.provider ?? entry.provider ?? this.config.provider;
-    const model = opts.model ?? entry.model ?? this.config.model;
-    const thinking = opts.thinking ?? entry.thinking ?? this.config.thinking;
     meta.provider = provider;
     meta.model = model;
     meta.thinking = thinking;
-    // Fail closed before the process starts: a failed audit append must not leave
-    // a resumed worker running behind a failed resume call.
-    await this.auditStrict("orchestrator", "resume", id, { provider, model });
-    // A crash may have left the previous container behind: clear it before the
-    // deterministic --name can be reused. Missing containers are ignored.
-    if (this.sandbox) await this.sandbox.removeWorker(id);
     const resumeSandboxPrefix = this.sandbox ? buildWorkerDockerPrefix({
       sessionId: id,
       worktree: meta.worktree,
@@ -1799,6 +1817,7 @@ export class Coordinator {
       envAllow: this.config.sandboxEnvAllow,
       port: this.config.port,
       dockerBin: this.config.dockerBin,
+      coordHost: this.config.sandboxCoordHost,
     }) : undefined;
     const client = new PiRpcClient({
       cwd: meta.worktree,
@@ -1814,7 +1833,7 @@ export class Coordinator {
       env: {
         PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : join(sessionDir, "agent"),
         PI_COORD_URL: this.sandbox
-          ? `http://host.docker.internal:${this.config.port}`
+          ? `http://${this.config.sandboxCoordHost}:${this.config.port}`
           : `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
         PI_COORD_TOKEN: workerToken,
@@ -2176,6 +2195,21 @@ export class Coordinator {
       .concat(this.history.filter(meta => meta.shutdownUnconfirmed && !this.runtimes.has(meta.id)));
   }
 
+  /**
+   * Live runtimes plus every archived session the daemon still knows, newest
+   * activity first. The read-only console reads this: showing only live
+   * sessions left its outcome/verification columns permanently empty while
+   * `/metrics` counted the archived ones.
+   */
+  allSessions(limit = 200): SessionMeta[] {
+    const live = this.list();
+    const ids = new Set(live.map((meta) => meta.id));
+    const archived = this.history.filter((meta) => !ids.has(meta.id))
+      .sort((left, right) => (right.lastActivity ?? 0) - (left.lastActivity ?? 0))
+      .slice(0, Math.max(0, limit));
+    return live.concat(archived.map((meta) => ({ ...meta, pendingQuestions: [...meta.pendingQuestions] })));
+  }
+
   snapshot(id: string): SessionMeta {
     const rt = this.runtimes.get(id);
     if (rt) return this.snapshotOf(rt);
@@ -2478,11 +2512,14 @@ export class Coordinator {
             : runCommand(command, cwd, effectiveTimeout, false, env);
         },
         timeoutMs);
-      rt.meta.verification = proof;
-      this.scheduleSave();
+      // Audit before the proof becomes usable: `pi_merge` only re-checks the
+      // recorded verification (assertCurrent), so writing it first would let a
+      // failed audit append still leave a mergeable "passed" candidate behind.
       await this.auditStrict("orchestrator", "verify", id, { verificationId: proof.id, passed: proof.passed,
         targetBranch: proof.targetBranch, evidence: proof.evidence?.dir ?? null,
         evidenceManifestSha256: proof.evidence?.manifestSha256 ?? null });
+      rt.meta.verification = proof;
+      this.scheduleSave();
       return proof;
     });
   }

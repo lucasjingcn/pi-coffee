@@ -70,17 +70,34 @@ export class GhClient {
 
   async createPr(repo: string, input: CreatePrInput): Promise<PullRequest> {
     const baseArgs = ["pr", "create", "--base", input.base, "--head", input.head, "--title", input.title, "--body", input.body];
-    let result: GhRunResult;
+    const parse = (result: GhRunResult): PullRequest => {
+      const match = /(https?:\/\/\S+?\/pull\/(\d+))/.exec(result.stdout);
+      if (!match) throw new Error("gh pr create did not print a pull request URL");
+      return { number: Number(match[2]), url: match[1] };
+    };
+    if (!input.label) return parse(await this.run(repo, baseArgs));
+    let labelledError: unknown;
     try {
-      result = await this.run(repo, input.label ? [...baseArgs, "--label", input.label] : baseArgs);
+      return parse(await this.run(repo, [...baseArgs, "--label", input.label]));
     } catch (error) {
-      // A missing label is cosmetic; retry without it rather than failing the PR.
-      if (!input.label) throw error;
-      result = await this.run(repo, baseArgs);
+      labelledError = error;
     }
-    const match = /(https?:\/\/\S+?\/pull\/(\d+))/.exec(result.stdout);
-    if (!match) throw new Error("gh pr create did not print a pull request URL");
-    return { number: Number(match[2]), url: match[1] };
+    // A missing label is cosmetic, but the failure can arrive after the pull
+    // request exists (a label is applied once the PR is created), so adopting
+    // the existing PR beats retrying into "already exists" and reporting a
+    // failure for work that actually happened.
+    const existing = await this.findPr(repo, input.head).catch(() => undefined);
+    if (existing) {
+      await this.addLabel(repo, existing.number, input.label);
+      return existing;
+    }
+    try {
+      return parse(await this.run(repo, baseArgs));
+    } catch (error) {
+      const first = labelledError instanceof Error ? labelledError.message : String(labelledError);
+      const second = error instanceof Error ? error.message : String(error);
+      throw new Error(`${first}; retrying without --label failed too: ${second}`);
+    }
   }
 
   /** Read the PR head and state so merge-queue cannot queue an older commit. */

@@ -61,6 +61,12 @@ export interface Config {
   sandboxImage: string;
   /** Container network mode. `none` opts out of model/provider access. */
   sandboxNetwork: "bridge" | "none";
+  /**
+   * Host name a worker container uses to reach this daemon. `host.docker.internal`
+   * works with Docker Desktop (and on Linux once the daemon listens on the bridge
+   * interface); elsewhere point it at an address the container can dial.
+   */
+  sandboxCoordHost: string;
   /** Host environment variable names forwarded into sandbox containers. */
   sandboxEnvAllow: string[];
   /** Docker CLI path (fake binary in tests). */
@@ -112,6 +118,12 @@ function env(name: string): string | undefined {
 const INTEGER_RE = /^[+-]?\d+$/;
 /** Strict decimal number: optional sign, digits, optional fraction (no whitespace/exponent). */
 const NUMBER_RE = /^[+-]?\d+(?:\.\d+)?$/;
+
+/** True for a listener address only the same host can dial. */
+function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase();
+  return value === "localhost" || value === "::1" || value === "[::1]" || value.startsWith("127.");
+}
 
 function invalid(field: string, key: string, detail: string): never {
   throw new Error(`Invalid configuration for ${field} [${key}]: ${detail}`);
@@ -402,6 +414,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     sandboxImage: overrides.sandboxImage ?? env("PI_COFFEE_SANDBOX_IMAGE") ?? "",
     sandboxNetwork: resolveSandboxNetwork(overrides),
     sandboxEnvAllow: resolveEnvAllow(overrides),
+    sandboxCoordHost: overrides.sandboxCoordHost ?? env("PI_COFFEE_SANDBOX_COORD_HOST") ?? "host.docker.internal",
     dockerBin: overrides.dockerBin ?? env("PI_COFFEE_DOCKER_BIN") ?? "docker",
     runner: resolveRunner(overrides),
     acpCommand: resolveAcpCommand(overrides),
@@ -420,6 +433,24 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");
   if (base.sandbox === "docker" && base.sandboxImage.trim() === "") {
     invalid("sandboxImage", "PI_COFFEE_SANDBOX_IMAGE", "is required when PI_COFFEE_SANDBOX=docker");
+  }
+  if (base.sandbox === "docker") {
+    // Worker containers authorize every write against the daemon, so a container
+    // without network reaches no daemon: spawn would report success and the
+    // worker could not write a single file.
+    if (base.sandboxNetwork === "none") {
+      invalid("sandboxNetwork", "PI_COFFEE_SANDBOX_NETWORK",
+        "worker containers need the daemon for write authorization; keep the bridge network");
+    }
+    // Docker's host-gateway is the bridge address, while the default listener is
+    // loopback-only. On Linux that combination cannot connect (Docker Desktop on
+    // macOS proxies loopback into the container), so refuse it up front instead
+    // of spawning workers that can never write.
+    if (process.platform === "linux" && base.sandboxCoordHost === "host.docker.internal" && isLoopbackHost(base.host)) {
+      invalid("sandboxCoordHost", "PI_COFFEE_SANDBOX_COORD_HOST",
+        `the daemon listens on ${base.host}, which a container cannot reach through host-gateway; `
+        + "set PI_COFFEE_HOST to a reachable interface (with PI_COFFEE_TOKEN) or point this at a coord address the containers can reach");
+    }
   }
   if (base.dashboardActions && !base.token) {
     invalid("dashboardActions", "PI_COFFEE_DASHBOARD_ACTIONS", "requires PI_COFFEE_TOKEN to be set");
