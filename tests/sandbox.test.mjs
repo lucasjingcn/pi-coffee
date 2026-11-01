@@ -136,8 +136,17 @@ test("verification commands run inside the docker sandbox and record the image",
     const gitDir = realpathSync(join(root, "repo", ".git"));
     assert.ok(run.includes(`${gitDir}:${gitDir}`), `expected the git metadata mount in ${run.join(" ")}`);
     assert.equal(run.includes("--user"), process.platform === "linux", "host user only where bind mounts keep real ownership");
-    const envArgs = run.filter((arg) => arg.startsWith("FAKE_PASSTHROUGH=") || arg.startsWith("HOME=") || arg.startsWith("FAKE_SECRET_KEY="));
-    assert.deepEqual(envArgs, [], "allowlisted values must not appear in docker argv");
+    // Allowlisted host names are forwarded by reference (`-e NAME`), so no host
+    // value may reach argv. The one value the sandbox writes itself is its own
+    // writable HOME default, and only on Linux where `--user` applies.
+    const hostValues = run.filter((arg) => arg.startsWith("FAKE_PASSTHROUGH=") || arg.startsWith("FAKE_SECRET_KEY="));
+    assert.deepEqual(hostValues, [], "allowlisted values must not appear in docker argv");
+    const homeValues = run.filter((arg) => arg.startsWith("HOME="));
+    assert.deepEqual(
+      homeValues,
+      process.platform === "linux" ? ["HOME=/tmp"] : [],
+      "only the sandbox's own writable HOME, never the host's HOME",
+    );
     const manifest = await readEvidenceManifest(evidenceDir(c.config.dataDir, proof.evidence));
     assert.equal(manifest.sandbox.kind, "docker");
     assert.equal(manifest.sandbox.image, "fake:test");
