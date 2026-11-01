@@ -40,7 +40,12 @@ All notable changes to pi-coffee are recorded here. The format follows
   directory is also mounted read-only inside the sandbox, so a sandboxed command
   can no longer plant a hook that `pi_commit`/`pi_merge` would later execute on the
   host, while `git add`/`git commit` inside the container keep working.
-- The Docker runtime image now installs `procps`: the worker-ownership probe uses
+- `PI_COFFEE_VERIFY_TMPDIR` selects where verification candidates are created
+  (default: the system temp dir). The candidate is bind-mounted into the sandbox,
+  so a docker daemon that cannot see the system temp dir — colima shares only
+  `$HOME` — used to mount an empty `/workspace` and fail every docker verification
+  for reasons the acceptance command could not explain.
+- - The Docker runtime image now installs `procps`: the worker-ownership probe uses
   `ps`, so `pi_spawn`/`pi_resume` failed in the container (which only installed
   bash, git and ripgrep). `npm run doctor` now checks for `ps` too.
 - Verification rejects an acceptance command that commits changes to the

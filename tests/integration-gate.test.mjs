@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {chmod, mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
+import {chmod, mkdtemp, mkdir, realpath, writeFile, readFile, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
@@ -44,6 +44,43 @@ test('integration and successful finish require daemon-executed verification',()
   assert.equal(head(),before);await noSuccess();
   await c.exec('s1','true');await assert.rejects(c.merge('s1'),/pi_verify/);
 }));
+
+test('verification candidates are created under the configured temp root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-verify-tmpdir-'));
+  const chosen = join(root, 'verify-root');
+  const marker = join(root, 'cwd.txt');
+  const repo = join(root, 'repo');
+  await mkdir(join(repo, 'src'), {recursive:true});
+  const git = (cwd, ...args) => execFileSync('git', ['-C',cwd,...args], {encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git(repo,'init','-q','-b','main');git(repo,'config','user.name','test');git(repo,'config','user.email','test@example.com');
+  await writeFile(join(repo,'src/item.txt'),'base');
+  git(repo,'add','src');git(repo,'commit','-qm','base');
+  const baseRef = git(repo,'rev-parse','HEAD');
+  const worker = join(root,'worker');
+  git(repo,'worktree','add','-q','-b','pi/tmp',worker,baseRef);
+  await writeFile(join(worker,'src/item.txt'),'changed');
+  git(worker,'add','src/item.txt');git(worker,'commit','-qm','worker');
+  const c = new Coordinator(loadConfig({dataDir:join(root,'data'),workspaceRoot:join(root,'workers'),defaultRepo:repo,
+    autoClean:false,verifyTmpDir:chosen}));
+  await c.init();
+  const meta = {id:'s1',name:'tmpdir',repo,worktree:worker,cwd:worker,branch:'pi/tmp',baseRef,status:'idle',
+    createdAt:1,lastActivity:1,pendingQuestions:[],spec:{goal:'x',scope:['src/item.txt']},
+    acceptance:{files:[],hashes:{},command:`pwd -P > ${JSON.stringify(marker)}`}};
+  c.runtimes.set('s1',{meta,client:{getState:async()=>({isStreaming:false}),stop:async()=>{},isStreaming:false,refreshStreaming:async()=>{}},
+    repoIdentity:resolveRepoIdentity(repo),lastNotifiedQuestionIds:new Set()});
+  try {
+    const proof = await c.verify('s1');
+    assert.equal(proof.passed,true,proof.failure);
+    const cwd = (await readFile(marker,'utf8')).trim();
+    const realChosen = await realpath(chosen);   // created on demand by the gate
+    // A docker daemon that cannot see os.tmpdir() (colima shares only $HOME) would
+    // mount an empty /workspace; the candidate must come from the configured root.
+    assert.ok(cwd.startsWith(`${realChosen}/`) || cwd.startsWith(`${chosen}/`), `${cwd} should be under ${chosen}`);
+  } finally {
+    await c.stopAll();
+    await rm(root,{recursive:true,force:true});
+  }
+});
 
 test('a command that destroys the candidate repository cannot leak a raw git error or a registration',()=>
   fixture(async({c,repo,git})=>{

@@ -1,5 +1,5 @@
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SecretPolicy } from "./secrets.js";
 
@@ -55,6 +55,13 @@ export interface Config {
   validatorTimeoutMs: number;
   /** Overall verification budget (ms) across the whole validator chain. */
   verifyTimeoutMs: number;
+  /**
+   * Parent directory for verification candidates (default: the system temp dir).
+   * Point it at a path the docker daemon can bind-mount when that is not the case
+   * — colima, for example, shares only `$HOME`, so a candidate under
+   * `os.tmpdir()` would be mounted as an empty directory.
+   */
+  verifyTmpDir: string;
   /** Default execution backend for workers and verification commands. */
   sandbox: "worktree" | "docker";
   /** Docker image used when the sandbox is docker (must contain bash and the project toolchain). */
@@ -289,6 +296,15 @@ function resolveEnvAllow(overrides: Partial<Config>): string[] {
   return [...new Set(names)];
 }
 
+/** Parent directory for verification candidates: absolute, created on demand. */
+function resolveVerifyTmpDir(overrides: Partial<Config>): string {
+  const raw = overrides.verifyTmpDir ?? env("PI_COFFEE_VERIFY_TMPDIR") ?? tmpdir();
+  if (raw.trim() === "" || !isAbsolute(raw)) {
+    invalid("verifyTmpDir", "PI_COFFEE_VERIFY_TMPDIR", "expected an absolute directory path");
+  }
+  return raw;
+}
+
 /** Container user: `auto`, `root`, or an explicit `uid:gid`. */
 function resolveSandboxUser(overrides: Partial<Config>): string {
   const raw = overrides.sandboxUser ?? env("PI_COFFEE_SANDBOX_USER") ?? "auto";
@@ -426,6 +442,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       max: 3_600_000,
       description: "an integer between 1000 and 3600000",
     }),
+    verifyTmpDir: resolveVerifyTmpDir(overrides),
     sandbox: resolveSandbox(overrides),
     sandboxImage: overrides.sandboxImage ?? env("PI_COFFEE_SANDBOX_IMAGE") ?? "",
     sandboxNetwork: resolveSandboxNetwork(overrides),

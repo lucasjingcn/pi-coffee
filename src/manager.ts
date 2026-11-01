@@ -341,6 +341,7 @@ export class Coordinator {
     }
     this.integrationGate = new IntegrationGate({
       dataDir: config.dataDir,
+      tmpDir: config.verifyTmpDir,
       secretPolicy: config.secretPolicy,
       maxFileBytes: config.evidenceMaxFileMb * 1024 * 1024,
       maxTotalBytes: config.evidenceMaxMb * 1024 * 1024,

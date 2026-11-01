@@ -89,6 +89,28 @@ test("worker sandbox refuses a network that cannot reach the daemon", () => {
   assert.equal(ok.sandboxNetwork, "bridge");
 });
 
+test("the verification temp root is configurable and must be absolute", () => {
+  const key = "PI_COFFEE_VERIFY_TMPDIR";
+  const saved = process.env[key];
+  try {
+    delete process.env[key];
+    assert.ok(loadConfig().verifyTmpDir.length > 0);
+    process.env[key] = "/var/tmp/pi-coffee-verify";
+    assert.equal(loadConfig().verifyTmpDir, "/var/tmp/pi-coffee-verify");
+    // A relative path would land wherever the daemon happens to run; a blank value
+    // that is not empty (spaces) is a typo, not "unset" (an empty env var falls back
+    // to the default, like every other key here).
+    for (const bad of ["tmp/verify", "   "]) {
+      process.env[key] = bad;
+      assert.throws(() => loadConfig(), /verifyTmpDir|PI_COFFEE_VERIFY_TMPDIR/, JSON.stringify(bad));
+    }
+    assert.equal(loadConfig({ verifyTmpDir: "/mnt/shared/verify" }).verifyTmpDir, "/mnt/shared/verify");
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});
+
 test("the container user accepts auto, root or an explicit uid:gid and nothing else", () => {
   const key = "PI_COFFEE_SANDBOX_USER";
   const saved = process.env[key];

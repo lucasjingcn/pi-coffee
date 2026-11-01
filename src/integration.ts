@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { acceptancePath } from "./acceptance.js";
@@ -117,6 +117,11 @@ export interface IntegrationGateOptions {
   validatorTimeoutMs?: number;
   /** Overall budget across the whole chain. */
   verifyTimeoutMs?: number;
+  /**
+   * Parent directory for candidate checkouts (default: the system temp dir).
+   * Must be a path the sandbox can bind-mount when verification runs in docker.
+   */
+  tmpDir?: string;
   /** Current sandbox record (image digest may become available after a probe). */
   sandbox?: () => import("./sandbox.js").SandboxRecord | undefined;
   now?: () => number;
@@ -186,7 +191,9 @@ export class IntegrationGate {
     const targetSha = await assertTarget(meta.repo, branch);
     const changedFiles = await checkChanges(meta);
     const validationChanges = await existingValidationChanges(meta.repo, meta.baseRef, workerSha, meta.spec.validation_paths);
-    const temp = await mkdtemp(join(tmpdir(), "pi-coffee-verify-"));
+    const tmpRoot = this.options.tmpDir ?? tmpdir();
+    await mkdir(tmpRoot, { recursive: true });
+    const temp = await mkdtemp(join(tmpRoot, "pi-coffee-verify-"));
     const candidate = join(temp, "candidate");
     let added = false;
     try {
