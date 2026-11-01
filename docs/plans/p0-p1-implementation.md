@@ -88,11 +88,16 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(verify): validator chain with per-validator evidence`.
 
 ### M6 — Evidence retention + `pi_evidence` tool + merge gate · S–M
-- TTL/per-session retention in sweeper and `pi_gc` (`evidence_removed`), `.tmp` cleanup.
-- `pi_evidence` (`list|get|verify`) with read-only annotation; merge re-reads manifest and fails
-  closed on missing/mutated evidence.
-- Acceptance: `node --test tests/evidence-retention.test.mjs tests/evidence-mcp.test.mjs`; merge
-  refusal tests.
+- `pruneEvidence` removes expired bundles, keeps the newest `keepPerSession`, and clears stale
+  `.tmp-*` directories after one hour; wired into the autoClean sweeper and `pi_gc`
+  (`evidence_removed`, `evidence_bytes`).
+- `pi_evidence` (`list|get|verify`) with a read-only annotation; `get` returns the manifest, `verify`
+  recomputes every file hash.
+- `IntegrationGate.assertCurrent` re-reads the recorded bundle (manifest sha256 + all file hashes), so
+  `pi_merge` and successful outcomes fail closed when the bundle is missing or modified; legacy
+  records without an evidence ref keep working.
+- Acceptance: `node --test tests/evidence-mcp.test.mjs` (MCP surface, tamper/missing merge refusal,
+  retention/prune); full suite.
 - Commit: `feat(evidence): retention, inspection tool and merge gate`.
 
 ### M7 — Sandbox phase A (verification commands) · M
@@ -273,3 +278,6 @@ Run each item against the final branch. Record evidence (command + output) in th
 - **M5 complete** — 2026-11-01: validator chain (`spec.validators`) with per-step/overall budgets,
   artifact capture, legacy compatibility and spec validation; 8 new tests; test-file concurrency
   lowered to 2 to keep host-loaded runs stable; full suite 397/397 three consecutive runs.
+- **M6 complete** — 2026-11-01: evidence retention (TTL + keep-per-session + stale temp cleanup),
+  `pi_evidence` MCP tool, and merge/outcome integrity checks against the recorded bundle; 4 new
+  tests; full suite 401/401 twice.

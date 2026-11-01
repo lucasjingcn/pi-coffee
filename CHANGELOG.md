@@ -30,6 +30,10 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Evidence lifecycle: `pi_evidence` (`list|get|verify`) exposes bundles over MCP, `pi_merge` and
+  successful outcomes fail closed when the recorded bundle is missing or modified, and the sweeper /
+  `pi_gc` prune expired bundles (`evidence_removed`, `evidence_bytes`) while always keeping the newest
+  `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` per session.
 
 ### Security
 

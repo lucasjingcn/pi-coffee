@@ -8,7 +8,7 @@ import { currentBranch, git, isWorktreeClean, resolveRef, worktreeDiff } from ".
 import { existingValidationChanges } from "./validation-changes.js";
 import { reviewContractHash, validateCandidateReview, validateReviewSpec, type CandidateReview } from "./candidate-review.js";
 import type { DelegationSpec } from "./types.js";
-import { collectArtifacts, matchesArtifactPatterns, writeEvidenceBundle, type EvidenceArtifact, type EvidenceRef, type EvidenceValidatorResult } from "./evidence.js";
+import { assertEvidenceIntact, collectArtifacts, matchesArtifactPatterns, writeEvidenceBundle, type EvidenceArtifact, type EvidenceRef, type EvidenceValidatorResult } from "./evidence.js";
 import type { SecretPolicy } from "./secrets.js";
 import type { ValidatorSpec } from "./types.js";
 
@@ -305,6 +305,7 @@ export class IntegrationGate {
       throw new Error("worker changed since verification; run pi_verify again");
     }
     await checkChanges(meta);
+    if (proof.evidence && this.options.dataDir) await assertEvidenceIntact(this.options.dataDir, proof.evidence);
     const expected = integrated ? meta.integration?.mergedSha : proof.targetSha;
     if (!expected || await assertTarget(meta.repo, branch) !== expected) throw new Error("target changed since verification; run pi_verify again");
     if (integrated && (meta.integration?.workerSha !== proof.workerSha

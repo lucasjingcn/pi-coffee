@@ -461,3 +461,134 @@ export async function collectArtifacts(
   await walk(canonicalRoot, 0);
   return files;
 }
+
+/** Assert that a recorded bundle still exists, is unmodified, and matches its manifest hash. */
+export async function assertEvidenceIntact(dataDir: string, ref: EvidenceRef): Promise<void> {
+  const dir = evidenceDir(dataDir, ref);
+  let manifestRaw: string;
+  try {
+    manifestRaw = await readFile(join(dir, "manifest.json"), "utf8");
+  } catch {
+    throw new Error(`evidence bundle is missing: ${ref.dir}`);
+  }
+  const actualManifest = sha256(manifestRaw);
+  if (actualManifest !== ref.manifestSha256) {
+    throw new Error(`evidence manifest changed since verification: ${ref.dir}`);
+  }
+  const result = await verifyEvidenceBundle(dir);
+  if (!result.ok) {
+    throw new Error(`evidence bundle failed integrity check: ${result.mismatches.map((item) => `${item.path} (${item.reason})`).join(", ")}`);
+  }
+}
+
+export interface EvidencePruneOptions {
+  ttlDays: number;
+  keepPerSession: number;
+  now?: number;
+  /** Restrict cleanup to these session ids. */
+  sessionIds?: string[];
+}
+
+export interface EvidencePruneResult {
+  removed: number;
+  bytes: number;
+  temp_removed: number;
+  sessions: string[];
+}
+
+async function directoryBytes(dir: string): Promise<number> {
+  let total = 0;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const absolute = join(dir, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(absolute);
+    else if (entry.isFile()) {
+      try {
+        total += (await lstat(absolute)).size;
+      } catch {
+        // Entry disappeared mid-scan.
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * Remove expired evidence bundles and stale temp directories. Keeps the newest
+ * `keepPerSession` bundles per session regardless of age; `ttlDays: 0` disables
+ * age-based removal but still cleans `.tmp-*` leftovers.
+ */
+export async function pruneEvidence(dataDir: string, options: EvidencePruneOptions): Promise<EvidencePruneResult> {
+  const now = options.now ?? Date.now();
+  const ttlMs = options.ttlDays > 0 ? options.ttlDays * 24 * 60 * 60 * 1000 : 0;
+  const selected = options.sessionIds ? new Set(options.sessionIds) : undefined;
+  const result: EvidencePruneResult = { removed: 0, bytes: 0, temp_removed: 0, sessions: [] };
+  let sessions: string[];
+  try {
+    sessions = await readdir(evidenceRoot(dataDir));
+  } catch {
+    return result;
+  }
+  for (const session of sessions) {
+    if (!ID_RE.test(session)) continue;
+    if (selected && !selected.has(session)) continue;
+    const sessionDir = join(evidenceRoot(dataDir), session);
+    let entries;
+    try {
+      entries = await readdir(sessionDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const bundles: { name: string; createdAt: number; bytes: number }[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const absolute = join(sessionDir, entry.name);
+      if (entry.name.startsWith(".tmp-")) {
+        try {
+          const info = await lstat(absolute);
+          if (now - info.mtimeMs > 60 * 60 * 1000) {
+            await rm(absolute, { recursive: true, force: true });
+            result.temp_removed += 1;
+          }
+        } catch {
+          // Already gone.
+        }
+        continue;
+      }
+      if (!ID_RE.test(entry.name)) continue;
+      try {
+        const manifest = await readEvidenceManifest(absolute);
+        bundles.push({ name: entry.name, createdAt: manifest.createdAt, bytes: await directoryBytes(absolute) });
+      } catch {
+        // Incomplete directory: only remove when it is old enough to be a crash remnant.
+        try {
+          const info = await lstat(absolute);
+          if (now - info.mtimeMs > 60 * 60 * 1000) {
+            await rm(absolute, { recursive: true, force: true });
+            result.temp_removed += 1;
+          }
+        } catch {
+          // Ignore.
+        }
+      }
+    }
+    bundles.sort((a, b) => b.createdAt - a.createdAt);
+    let removedAny = false;
+    for (let index = 0; index < bundles.length; index += 1) {
+      const bundle = bundles[index];
+      if (index < options.keepPerSession) continue;
+      if (ttlMs === 0 || now - bundle.createdAt <= ttlMs) continue;
+      await rm(join(sessionDir, bundle.name), { recursive: true, force: true });
+      result.removed += 1;
+      result.bytes += bundle.bytes;
+      removedAny = true;
+    }
+    if (removedAny) result.sessions.push(session);
+  }
+  return result;
+}

@@ -667,6 +667,28 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
   );
 
   server.registerTool(
+    "pi_evidence",
+    {
+      title: "Inspect verification evidence",
+      description: "List, read or re-verify the durable evidence bundle written by pi_verify (manifest with file hashes, per-validator logs, artifacts and the reviewed diff). Read-only; bundles live under <PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/.",
+      annotations: { readOnlyHint: true, idempotentHint: true },
+      inputSchema: {
+        session_id: z.string(),
+        control_key: z.string().optional(),
+        action: z.enum(["list", "get", "verify"]).optional().describe("Default: list"),
+        verification_id: z.string().optional().describe("Bundle to read; default: newest"),
+      },
+    },
+    async ({ session_id, control_key, action, verification_id }) => {
+      coord.assertControl(session_id, control_key);
+      const view = action ?? "list";
+      if (view === "list") return json(await coord.evidenceList(session_id));
+      if (view === "get") return json(await coord.evidenceGet(session_id, verification_id));
+      return json(await coord.evidenceVerify(session_id, verification_id));
+    },
+  );
+
+  server.registerTool(
     "pi_review",
     {
       title: "Record the orchestrator review of a verified candidate",

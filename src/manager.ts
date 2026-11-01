@@ -22,6 +22,7 @@ import { validateReviewSpec, validateCandidateReview, type CandidateReview, type
 import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
 import { AuditLog } from "./audit.js";
 import { applySecretPolicy } from "./secrets.js";
+import { evidenceDir, listEvidenceBundles, pruneEvidence, readEvidenceManifest, verifyEvidenceBundle } from "./evidence.js";
 import {
   commitAll,
   createWorktree,
@@ -402,6 +403,16 @@ export class Coordinator {
     await this.sweepFinalRetention(now).catch(() => {});
     await this.reclaimStale().catch(() => {});
     await this.sweepSessionDirs(now).catch(() => {});
+    await this.sweepEvidence().catch(() => {});
+  }
+
+  /** Evidence retention follows the same autoClean lifecycle as worktree cleanup. */
+  private async sweepEvidence(): Promise<void> {
+    if (!this.config.autoClean) return;
+    await pruneEvidence(this.config.dataDir, {
+      ttlDays: this.config.evidenceTtlDays,
+      keepPerSession: this.config.evidenceKeepPerSession,
+    });
   }
 
   /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
@@ -829,6 +840,11 @@ export class Coordinator {
     this.notifyWaiters();
     this.scheduleSave();
 
+    const evidencePruned = await pruneEvidence(this.config.dataDir, {
+      ttlDays: this.config.evidenceTtlDays,
+      keepPerSession: this.config.evidenceKeepPerSession,
+      ...(selected ? { sessionIds: [...selected] } : {}),
+    }).catch(() => ({ removed: 0, bytes: 0, temp_removed: 0, sessions: [] }));
     const summary = {
       worktrees_cleaned: cleaned,
       branches_deleted: branches.deleted.length,
@@ -839,12 +855,51 @@ export class Coordinator {
       credentials_reclaimed: reclaimed.credentials,
       transcripts_reclaimed: reclaimed.transcripts,
       history_compacted: reclaimed.compacted,
+      evidence_removed: evidencePruned.removed,
+      evidence_bytes: evidencePruned.bytes,
       remaining_live: this.runtimes.size,
     };
     this.auditBestEffort("orchestrator", "gc", sessionIds?.join(",") ?? "*", {
       worktrees_cleaned: cleaned, sessions_evicted: evicted,
     });
     return summary;
+  }
+
+  /** List evidence bundles for a session, newest first. */
+  async evidenceList(sessionId: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId); // unknown session fails before touching the filesystem
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    return { session_id: sessionId, bundles };
+  }
+
+  /** Read one bundle manifest (default: newest) for a session. */
+  async evidenceGet(sessionId: string, verificationId?: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId);
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    const chosen = verificationId
+      ? bundles.find((bundle) => bundle.verificationId === verificationId)
+      : bundles[0];
+    if (!chosen) throw new Error(verificationId
+      ? `no evidence bundle ${verificationId} for session ${sessionId}`
+      : `no evidence bundles for session ${sessionId}`);
+    const dir = evidenceDir(this.config.dataDir, chosen);
+    const manifest = await readEvidenceManifest(dir);
+    return { session_id: sessionId, verification_id: chosen.verificationId, dir: chosen.dir, manifest };
+  }
+
+  /** Recompute every file hash in a bundle (default: newest) and report mismatches. */
+  async evidenceVerify(sessionId: string, verificationId?: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId);
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    const chosen = verificationId
+      ? bundles.find((bundle) => bundle.verificationId === verificationId)
+      : bundles[0];
+    if (!chosen) throw new Error(verificationId
+      ? `no evidence bundle ${verificationId} for session ${sessionId}`
+      : `no evidence bundles for session ${sessionId}`);
+    const result = await verifyEvidenceBundle(evidenceDir(this.config.dataDir, chosen));
+    return { session_id: sessionId, verification_id: chosen.verificationId, dir: chosen.dir,
+      ok: result.ok, entries: result.manifest.files.length, mismatches: result.mismatches };
   }
 
   private async gcBranches(selected?: Set<string>): Promise<{

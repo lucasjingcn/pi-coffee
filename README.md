@@ -501,6 +501,7 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_diff` | Committed, uncommitted, and untracked changes for a worker branch. |
 | `pi_commit` | Stage and commit everything in a worker's worktree. |
 | `pi_verify` | Run the fixed acceptance command or the `spec.validators` chain (ordered, per-validator timeout, required/optional, artifact globs) against the exact worker + target candidate; record per-step exit codes, timeouts, output and commit/tree evidence, and write a durable evidence bundle (manifest + hashes + per-validator logs + artifacts + diff) under `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/`. The tool result carries the `evidence` reference. Failed, stale or restarted evidence cannot authorize integration. |
+| `pi_evidence` | `action: list\|get\|verify` (default `list`): inspect the durable bundle written by `pi_verify`; `verify` recomputes every file sha256 and reports mismatches. Read-only. |
 | `pi_review` | Record one evidence verdict per requirement and one approval reason per modified existing validation file, bound to the exact verification ID. Incomplete or stale reviews cannot authorize integration. |
 | `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |

@@ -429,6 +429,7 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | 工具 | 作用 |
 |---|---|
 | `pi_spawn` | 建 worktree 和分支，启动 worker。接收结构化 `spec`（`goal`、`scope` 必填，`purpose`、`non_goals`、`contracts`、`constraints`、`task_type` 可选）。`purpose=implementation\|review\|investigation` 区分用途，未填写显示未分类。scope 会立刻声明，范围重叠的工作流在写代码之前就被拒绝。`task_type=design\|security` 会被拦下，除非传 `spec_override`。`acceptance_files` 和 `acceptance_command` 会在 worker 启动前写入并锁定 Codex 写的测试。 |
+| `pi_evidence` | `action: list\|get\|verify`（默认 `list`）：查看 `pi_verify` 写的证据包；`verify` 会重算每个文件的 sha256 并报告不一致。只读。 |
 | `pi_review` | 记录准确候选的统筹方审查。接收 `verification_id`、逐项 `requirements` 和逐文件 `test_changes`；硬性要求或既有验证文件变更未完整确认时，禁止合并。 |
 | `pi_send` | 下指令：`mode=prompt\|steer\|followup`。第 3 条指令会被 two-strikes 规则拦下，除非传 `override:true`。重试不会换模型。 |
 | `pi_drain` | `action=start\|status\|cancel`：重启前开始 drain。drain 期间拒绝新的 spawn/resume，已有 worker 继续跑完；`status` 返回 `active`，可据此等到 0。 |
