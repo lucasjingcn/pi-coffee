@@ -26,6 +26,10 @@ All notable changes to pi-coffee are recorded here. The format follows
   interactive/background distinction directly); and `pi`'s descendant tree was
   sampled *after* closing stdin, so a fast graceful exit could confirm the stop
   with a detached tool still running — it is sampled before EOF now.
+- `loadConfig` validates `overrides.host` instead of only the environment value.
+  The docker coord-host rule reads the listener address, but overrides were applied
+  after validation, so a caller that asked for a reachable interface (tests, the
+  daemon's own config builder) was still rejected as a loopback daemon.
 - Sandbox containers now mount the git metadata their checkout points at. A linked
   worktree keeps `.git` as a file naming `<repo>/.git/worktrees/<name>`, so a
   container that mounted only the candidate made every git-dependent acceptance
