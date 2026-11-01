@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {chmod, mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {Coordinator} from '../dist/manager.js';
@@ -42,6 +43,29 @@ test('integration and successful finish require daemon-executed verification',()
   await assert.rejects(c.setOutcome('s1','success_first'),/pi_verify/);
   assert.equal(head(),before);await noSuccess();
   await c.exec('s1','true');await assert.rejects(c.merge('s1'),/pi_verify/);
+}));
+
+test('a command that destroys the candidate repository cannot leak a raw git error or a registration',()=>
+  fixture(async({c,repo,git})=>{
+    // A sandboxed command can drop the candidate's metadata from inside the
+    // container: `/workspace` is the worktree, but `<common>/worktrees/<name>/gitdir`
+    // still records the host path, so one `git worktree prune` deletes it.
+    await assert.rejects(c.verify('s1'),/verification destroyed the candidate repository/);
+    // repo + worker stay registered; the candidate must not.
+    assert.doesNotMatch(git(repo,'worktree','list'),/candidate/,'no stale candidate registration is left behind');
+  },'rm -rf "$(git rev-parse --absolute-git-dir)"'));
+
+test('a hook planted in the repository git dir never runs during verification',()=>fixture(async({c,repo})=>{
+  // A sandboxed acceptance command can write the repository's git metadata, so a
+  // planted hook must not execute on the host while the candidate is prepared.
+  const hooks = join(repo,'.git','hooks');
+  const marker = join(repo,'post-checkout-ran');
+  await mkdir(hooks,{recursive:true});
+  await writeFile(join(hooks,'post-checkout'),`#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
+  await chmod(join(hooks,'post-checkout'),0o755);
+  const proof = await c.verify('s1');
+  assert.equal(proof.passed,true,proof.failure);
+  assert.equal(existsSync(marker),false,'the candidate checkout must not execute repository hooks');
 }));
 
 test('a worker capability cannot push another worker branch by name',()=>fixture(async({c})=>{

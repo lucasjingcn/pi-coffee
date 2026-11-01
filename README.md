@@ -543,6 +543,7 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_gc` | Reclaim selected stopped work with `session_ids` and matching `control_keys`, including persisted history. Removes clean accepted worktrees and abandoned worktrees with no new commit; dirty, unrecorded, or abandoned work with commits remains. Deletes only branches proven merged; an unscoped call requires every protected worker key. Also reclaims what a session beyond recovery still holds (`transcripts_reclaimed`, `credentials_reclaimed`, `history_compacted`). |
 | `pi_metrics` | Usage and cost evidence for active/historical sessions, optionally filtered by `session_ids`. Missing costs stay unknown; partial ratios do not prove savings. |
 | `pi_record_cost` | Register orchestrator cost evidence with `id`, `amount`, `currency`, `source`, `reference`, and covered `session_ids`; distinguish reported, manual and estimated evidence. |
+| `pi_audit` | `action: verify\|tail` (default `verify`): recompute the hash-chained audit log of every coordinator action and report `{ok, entries, files, firstBrokenSeq?, reason?}`, or return the newest entries. The daemon also verifies the chain at startup and logs the verdict; `GET /internal/audit/verify` answers the same question. Read-only. |
 
 ## Worker-side tools
 
@@ -572,14 +573,26 @@ targets; dynamic scripts, variables, command substitution and globs are not full
 
 Verification commands and workers can run in a Docker sandbox instead of the host
 (`PI_COFFEE_SANDBOX=docker`, `PI_COFFEE_SANDBOX_IMAGE`): each verification run gets a fresh container
-that mounts only the candidate at `/workspace`; each worker gets a deterministic `pi-coffee-worker-<id>`
+that mounts the candidate at `/workspace`; each worker gets a deterministic `pi-coffee-worker-<id>`
 container that mounts its worktree at `/workspace`, its session directory at `/session` and the
-coordinator extension read-only. Only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW` (plus the
-`PI_COORD_*` handshake) are forwarded; the worker reaches the daemon through
-`host.docker.internal`. Containers are removed on stop, failed startup and restart recovery; a docker
+coordinator extension read-only. Both also mount the git metadata their checkout points at: a linked
+worktree's `.git` is a *file* naming `<repo>/.git/worktrees/<name>`, so a container with only the
+worktree mounted makes every `git` command exit 128 (`not a git repository`). The metadata is mounted
+at the absolute paths git recorded, which keeps `git rev-parse`, `git diff`, hooks and `git -C subdir`
+identical to the host. Only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW` (plus the `PI_COORD_*`
+handshake) are forwarded; the worker reaches the daemon through `host.docker.internal`. On Linux the
+containers run as the invoking uid/gid (`PI_COFFEE_SANDBOX_USER`): root-written files in a bind mount
+make the daemon's own cleanup (`git worktree remove`, removing a candidate) fail with EACCES even
+though the command passed. Docker Desktop maps every write back to the host user, so there the image's
+default user is kept. Containers are removed on stop, failed startup and restart recovery; a docker
 request fails closed when the daemon or image is unavailable — there is no host fallback. This isolates
-commands and worker processes, not the daemon: give the sandbox its own provider credential (or
-snapshot) and remember that `--network none` means no provider access.
+commands and worker processes, not the daemon. Git metadata is mounted read-write — the same power a
+host-run command already has — so a command inside a container can rewrite refs or `.git/config`, and
+one `git worktree prune` there deregisters worktrees whose checkout it cannot see (it sees only
+`/workspace`), exactly as the same command would on the host. The repository's hook directory is the
+one exception: it is mounted read-only, because hooks planted there would execute on the host through
+`pi_commit`/`pi_merge`, and verification itself never runs repository hooks for the candidate. Give the sandbox its own provider credential (or
+snapshot), and remember that `--network none` means no provider access.
 
 Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.
@@ -681,6 +694,7 @@ Everything is configured through environment variables.
 | `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access and is refused with `PI_COFFEE_SANDBOX=docker`, because workers authorize writes against the daemon. |
 | `PI_COFFEE_SANDBOX_COORD_HOST` | `host.docker.internal` | Host name a worker container uses to reach the daemon. Docker Desktop maps this to the host; on Linux it resolves to the bridge gateway, so the daemon must listen on an interface the bridge can reach. |
 | `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(empty)* | Comma-separated host env names forwarded into containers (nothing else is passed). |
+| `PI_COFFEE_SANDBOX_USER` | `auto` | Container user: `auto` runs as the invoking uid/gid (plus its supplementary groups) on Linux, so bind-mount writes stay host-owned and cleanup cannot hit EACCES, and keeps the image default on Docker Desktop. `root` keeps the image default everywhere — it restores root only on an image whose default user is root; use `0:0` for that. `uid:gid` pins an exact identity (no supplementary groups) and is Linux-only in practice: on Docker Desktop a uid that differs from the mount's owner makes git report `dubious ownership`. |
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
 | `PI_COFFEE_RUNNER` | `pi` | Default worker runner: `pi` (pinned CLI) or `acp` (Agent Client Protocol). |
 | `PI_COFFEE_ACP_COMMAND` | *(empty)* | ACP agent argv (JSON array or whitespace-separated); required when `PI_COFFEE_RUNNER=acp`. |

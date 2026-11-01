@@ -335,7 +335,7 @@ export class Coordinator {
     if (config.sandbox === "docker") {
       this.sandbox = new DockerSandbox(
         { kind: "docker", image: config.sandboxImage, network: config.sandboxNetwork,
-          envAllow: config.sandboxEnvAllow, dockerBin: config.dockerBin },
+          envAllow: config.sandboxEnvAllow, dockerBin: config.dockerBin, user: config.sandboxUser },
         (command, cwd, timeoutMs) => runCommand(command, cwd, timeoutMs),
       );
     }
@@ -1545,6 +1545,7 @@ export class Coordinator {
       port: this.config.port,
       dockerBin: this.config.dockerBin,
       coordHost: this.config.sandboxCoordHost,
+      user: this.config.sandboxUser,
     }) : undefined;
     const client: WorkerTransport = runnerKind === "acp"
       ? new AcpClient({
@@ -1818,6 +1819,7 @@ export class Coordinator {
       port: this.config.port,
       dockerBin: this.config.dockerBin,
       coordHost: this.config.sandboxCoordHost,
+      user: this.config.sandboxUser,
     }) : undefined;
     const client = new PiRpcClient({
       cwd: meta.worktree,

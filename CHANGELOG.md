@@ -6,8 +6,40 @@ All notable changes to pi-coffee are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The hash-chained audit log is now verifiable in a real deployment: `pi_audit`
+  (`action: verify|tail`), `GET /internal/audit/verify`, and a verification on
+  every daemon start that logs `audit chain verified` or `audit chain BROKEN`
+  with the first broken seq. `AuditLog.verify()` previously had no production
+  caller, so an edited, reordered or truncated entry was detectable only from the
+  test suite.
+
 ### Fixed
 
+- Sandbox containers now mount the git metadata their checkout points at. A linked
+  worktree keeps `.git` as a file naming `<repo>/.git/worktrees/<name>`, so a
+  container that mounted only the candidate made every git-dependent acceptance
+  command exit 128 (`fatal: not a git repository`). The metadata is mounted at the
+  absolute paths git recorded, which leaves `git rev-parse`, `git diff`, hooks and
+  `git -C subdir` behaving exactly as on the host; a plain checkout needs no extra
+  mount. Worker containers get the same treatment, so `git` works inside them too.
+- Sandbox containers run as the invoking uid/gid (and supplementary groups) on
+  Linux (`PI_COFFEE_SANDBOX_USER=auto`; `root` keeps the image default, `0:0` forces
+  root, `uid:gid` pins an exact identity on Linux).
+  As root, every file written into a bind mount landed root-owned on the host and
+  the daemon's own cleanup (`git worktree remove`, removing a verification
+  candidate) failed with EACCES even though the command had passed. Docker Desktop
+  already maps writes back to the host user, so the image default is kept there.
+- Verification no longer touches a candidate whose git metadata was pruned or
+  rewritten from inside the sandbox: `git worktree remove` failing (a container can
+  drop `<common>/worktrees/<name>` with one `git worktree prune`) used to throw out
+  of the cleanup block, discarding a recorded result and leaking the temporary
+  candidate. Cleanup now prunes the stale registration and deletes the checkout,
+  and candidate preparation ignores repository hooks. The repository's hook
+  directory is also mounted read-only inside the sandbox, so a sandboxed command
+  can no longer plant a hook that `pi_commit`/`pi_merge` would later execute on the
+  host, while `git add`/`git commit` inside the container keep working.
 - The Docker runtime image now installs `procps`: the worker-ownership probe uses
   `ps`, so `pi_spawn`/`pi_resume` failed in the container (which only installed
   bash, git and ripgrep). `npm run doctor` now checks for `ps` too.
@@ -65,6 +97,18 @@ All notable changes to pi-coffee are recorded here. The format follows
   registration fails and no longer removes pi's entry before re-adding it.
 - CI runs the extension typecheck plus platform-neutral suites on Windows, and a
   release refuses a tag that does not match `package.json`.
+- The ACP runner serializes turns instead of racing a second `session/prompt`.
+  ACP v1 answers one prompt per turn, yet `steer`/`followUp` sent a second one
+  while the first was still running; whichever returned first cleared the single
+  `streaming` flag, emitted `agent_settled` and flipped the worker to idle, so
+  `pi_wait`, `pi_verify`, `pi_commit` and read-only `pi_finish` could proceed
+  while the agent was still writing the worktree — and the last turn's text (plus
+  any agent-side "session busy" rejection) was lost. Turns are now chained, a
+  queued instruction is acked immediately instead of blocking the orchestrator
+  for the rest of somebody else's turn, and `isStreaming` counts the whole
+  accepted backlog, so `agent_start`/`agent_settled` fire on its edges only. ACP
+  still has no steering channel: a `steer` or follow-up instruction runs as the
+  next turn.
 
 ### Fixed (post-merge review of the 0.3.x hardening)
 

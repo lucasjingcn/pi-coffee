@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Coordinator } from "../dist/manager.js";
@@ -109,7 +109,7 @@ async function dockerCalls(dockerLog) {
 }
 
 test("verification commands run inside the docker sandbox and record the image", () =>
-  fixture(async ({ c, meta, dockerLog }) => {
+  fixture(async ({ c, meta, dockerLog, root }) => {
     process.env.FAKE_PASSTHROUGH = "yes";
     process.env.FAKE_SECRET_KEY = "should-not-be-forwarded";
     meta.spec.validators = [{ id: "tests", command: 'echo sandboxed; test "$(cat src/item.txt)" = changed' }];
@@ -128,6 +128,11 @@ test("verification commands run inside the docker sandbox and record the image",
     assert.equal(run[run.indexOf("-w") + 1], "/workspace");
     assert.ok(run.includes("fake:test"));
     assert.ok(run.includes("FAKE_PASSTHROUGH"), "allowlisted names are forwarded by reference");
+    // A git worktree keeps `.git` as a file pointing outside the worktree, so the
+    // sandbox must also mount the git metadata at the path git recorded there.
+    const gitDir = realpathSync(join(root, "repo", ".git"));
+    assert.ok(run.includes(`${gitDir}:${gitDir}`), `expected the git metadata mount in ${run.join(" ")}`);
+    assert.equal(run.includes("--user"), process.platform === "linux", "host user only where bind mounts keep real ownership");
     const envArgs = run.filter((arg) => arg.startsWith("FAKE_PASSTHROUGH=") || arg.startsWith("HOME=") || arg.startsWith("FAKE_SECRET_KEY="));
     assert.deepEqual(envArgs, [], "allowlisted values must not appear in docker argv");
     const manifest = await readEvidenceManifest(evidenceDir(c.config.dataDir, proof.evidence));
@@ -274,4 +279,57 @@ test("a container that cannot be removed keeps the shutdown unconfirmed", async 
   const missing = new DockerSandbox(config,
     async () => ({ code: 1, stdout: "", stderr: "Error: No such container: pi-coffee-s1", timedOut: false }));
   await missing.removeWorker("s1");
+});
+
+
+test("an explicit container user gets a writable HOME that a validator can still override", async () => {
+  const { DockerSandbox } = await import("../dist/sandbox.js");
+  const commands = [];
+  const sandbox = new DockerSandbox(
+    { image: "fake:test", network: "bridge", envAllow: ["FAKE_PASSTHROUGH"], dockerBin: "docker", user: "1000:1000" },
+    async (command) => {
+      commands.push(command);
+      if (command.includes("version")) return { code: 0, stdout: "26.1.0\n", stderr: "", timedOut: false };
+      if (command.includes("image inspect")) return { code: 0, stdout: "sha256:" + "a".repeat(64) + "\n", stderr: "", timedOut: false };
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    },
+  );
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-user-"));
+  await writeFile(join(root, "file.txt"), "x");
+  try {
+    await sandbox.run(root, "true", 5000, { FAKE_PASSTHROUGH: "from-validator" });
+    const run = commands.find((command) => command.includes(" run "));
+    assert.ok(run, "expected a docker run command");
+    // `/root` belongs to the image's default user: an overridden uid cannot write it.
+    assert.match(run, /--user '1000:1000'/);
+    assert.match(run, /-e 'HOME=\/tmp'/);
+    assert.equal((run.match(/-e .HOME=/g) ?? []).length, 1, "one HOME, not a forwarded host value as well");
+    assert.match(run, /-e 'FAKE_PASSTHROUGH=from-validator'/);
+
+    // An allowlisted HOME is an explicit opt-in and outranks the sandbox default.
+    const allowHome = new DockerSandbox(
+      { image: "fake:test", network: "bridge", envAllow: ["HOME"], dockerBin: "docker", user: "1000:1000" },
+      async (command) => {
+        commands.push(command);
+        if (command.includes("version")) return { code: 0, stdout: "26.1.0\n", stderr: "", timedOut: false };
+        if (command.includes("image inspect")) return { code: 0, stdout: "sha256:" + "a".repeat(64) + "\n", stderr: "", timedOut: false };
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    );
+    commands.length = 0;
+    await allowHome.run(root, "true", 5000);
+    const allowRun = commands.find((command) => command.includes(" run "));
+    assert.doesNotMatch(allowRun, /HOME=\/tmp/, "the forwarded host name replaces the default");
+    assert.match(allowRun, /-e 'HOME'/, "allowlisted names are forwarded by reference");
+
+    // A validator value outranks both: one `-e`, with the explicit value, because
+    // docker resolves a later `-e NAME` from the CLI environment and would win.
+    commands.length = 0;
+    await allowHome.run(root, "true", 5000, { HOME: "/custom-home" });
+    const bothRun = commands.find((command) => command.includes(" run "));
+    assert.deepEqual(bothRun.match(/-e 'HOME(=[^']*)?'/g), ["-e 'HOME=/custom-home'"],
+      "one HOME entry, with the validator value");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

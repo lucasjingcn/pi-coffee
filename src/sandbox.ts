@@ -2,8 +2,23 @@
  * Per-session execution sandboxes.
  *
  * Phase A (this milestone) runs verification/validator commands in a fresh
- * Docker container that only mounts the candidate worktree. The daemon itself
- * keeps running on the host. Phase B will run the worker process the same way.
+ * Docker container that mounts the candidate worktree plus the git metadata the
+ * candidate points at. The daemon itself keeps running on the host. Phase B runs
+ * the worker process the same way.
+ *
+ * Two properties are load-bearing and easy to lose:
+ *
+ * - A git worktree's `.git` is a *file* holding an absolute path to its metadata
+ *   (`<common dir>/worktrees/<name>`), so mounting the worktree alone makes every
+ *   git command inside the container exit 128 (`not a git repository`). The
+ *   mounts below reproduce the host layout at the same absolute paths, which
+ *   keeps `git rev-parse`, `git diff`, hooks and `git -C subdir` behaving exactly
+ *   as they do on the host instead of relying on GIT_DIR overrides.
+ * - Containers otherwise run as the image's default user (usually root). On a
+ *   Linux host that writes root-owned files into the bind mount, so the daemon's
+ *   own cleanup (`git worktree remove`, `rm -rf` of a candidate) fails with
+ *   EACCES. POSIX hosts therefore run as the invoking uid/gid by default; see
+ *   `sandboxUserArgs`.
  *
  * The docker CLI is invoked through an injected shell runner so tests can use a
  * deterministic fake binary and so the daemon keeps a single process-control
@@ -11,7 +26,8 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type SandboxKind = "worktree" | "docker";
 
@@ -28,6 +44,8 @@ export interface SandboxConfig {
   network: "bridge" | "none";
   envAllow: string[];
   dockerBin: string;
+  /** `auto` (host user on Linux), `root`, or an explicit `uid:gid`. */
+  user: string;
 }
 
 export interface SandboxExecResult {
@@ -50,6 +68,168 @@ export interface SandboxProbe {
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
+
+export interface GitMount {
+  /** Absolute host directory to bind-mount. */
+  host: string;
+  /** Absolute path the container must see it at: the one git itself recorded. */
+  container: string;
+  /**
+   * Mounted `:ro`. Used for the repository's hook directory: a container needs to
+   * read git's metadata, but planting a hook there would let it run code on the
+   * host, because `pi_commit`, `pi_merge` and friends execute repository hooks.
+   */
+  readOnly?: boolean;
+}
+
+function isInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function firstLine(path: string): string | undefined {
+  try {
+    const line = readFileSync(path, "utf8").split("\n")[0]?.trim();
+    return line ? line : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function realpathOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Git metadata a container needs so `git` works on a bind-mounted checkout.
+ *
+ * A directory that is itself a git worktree keeps `.git` as a *file* holding an
+ * absolute path to `<common dir>/worktrees/<name>`; mounting only the worktree
+ * leaves every git command dead (`fatal: not a git repository`, exit 128), which
+ * silently kills any acceptance command that shells out to git. Mounting alone is
+ * not enough: the paths must match what git recorded inside `.git` and
+ * `commondir`, so the host directory is bind-mounted at its own recorded absolute
+ * path rather than at a tidy container-local name.
+ *
+ * A plain checkout (`.git` is a directory inside the mounted tree) needs nothing
+ * extra and returns no mounts.
+ */
+export function resolveGitMounts(hostCwd: string, containerCwd: string): GitMount[] {
+  const dotGit = join(hostCwd, ".git");
+  let linkTarget: string | undefined;
+  let stat: Stats;
+  try {
+    const entry = lstatSync(dotGit);
+    if (entry.isSymbolicLink()) {
+      // git follows a symlinked `.git`; mount where the link points, mirroring the
+      // link's own spelling so the container resolves it the way the host does.
+      linkTarget = readlinkSync(dotGit);
+      stat = statSync(dotGit);
+    } else {
+      stat = entry;
+    }
+  } catch {
+    return [];
+  }
+  let gitDirHost: string | undefined;
+  let gitDirContainer: string;
+  const pointer = linkTarget ?? (stat.isFile()
+    ? /^gitdir:\s*(.+)$/i.exec(firstLine(dotGit) ?? "")?.[1]?.trim()
+    : undefined);
+  if (pointer !== undefined) {
+    // Absolute pointers are mirrored verbatim; a relative pointer resolves
+    // against the container's own working directory, exactly as git will.
+    gitDirHost = realpathOrUndefined(isAbsolute(pointer) ? pointer : resolve(hostCwd, pointer));
+    gitDirContainer = isAbsolute(pointer) ? pointer : resolve(containerCwd, pointer);
+  } else if (stat.isDirectory()) {
+    gitDirHost = realpathOrUndefined(dotGit);
+    gitDirContainer = join(containerCwd, ".git");
+  } else {
+    return [];
+  }
+  if (!gitDirHost) return [];
+
+  // Linked worktrees keep objects and refs in the shared common dir two levels up.
+  const commonPointer = firstLine(join(gitDirHost, "commondir"));
+  const commonHost = realpathOrUndefined(
+    commonPointer ? (isAbsolute(commonPointer) ? commonPointer : resolve(gitDirHost, commonPointer)) : gitDirHost,
+  );
+  if (!commonHost) return [];
+  const commonContainer = commonPointer
+    ? (isAbsolute(commonPointer) ? commonPointer : resolve(gitDirContainer, commonPointer))
+    : gitDirContainer;
+
+  const wanted: GitMount[] = commonHost === gitDirHost
+    ? [{ host: commonHost, container: commonContainer }]
+    : (isInside(commonContainer, gitDirContainer) && isInside(commonHost, gitDirHost)
+        // The common dir already contains this worktree's metadata (HEAD, index,
+        // logs); one mount covers both and avoids a nested duplicate.
+        ? [{ host: commonHost, container: commonContainer }]
+        : [{ host: commonHost, container: commonContainer }, { host: gitDirHost, container: gitDirContainer }]);
+
+  const seen = new Set<string>();
+  const mounts = wanted.filter((mount) => {
+    // Nothing to add when the mount target already lives inside the workspace mount.
+    if (mount.container !== containerCwd && isInside(containerCwd, mount.container)) return false;
+    if (seen.has(mount.container)) return false;
+    seen.add(mount.container);
+    return true;
+  });
+  // Hooks stay read-only inside the metadata mount, and last so it nests over it.
+  const commonMount = mounts.find((mount) => mount.host === commonHost);
+  const hooksHost = join(commonHost, "hooks");
+  if (commonMount && isDirectory(hooksHost)) {
+    mounts.push({ host: hooksHost, container: join(commonMount.container, "hooks"), readOnly: true });
+  }
+  return mounts;
+}
+
+/**
+ * `docker run --user` arguments for sandbox containers.
+ *
+ * On a POSIX host the container's default user is usually root, and root writes
+ * into a bind mount land as root-owned files on the host: cleanup then fails with
+ * EACCES (`git worktree remove`, `rm -rf` of a candidate) even though the command
+ * itself succeeded. Linux keeps real uids in bind mounts, so there the container
+ * runs as the invoking user. Docker Desktop (macOS/Windows) maps every write back
+ * to the host user, where running as the image's default user is already correct
+ * and an explicit `--user` would only add a uid that git rejects as a foreign
+ * owner (`detected dubious ownership`).
+ */
+export function sandboxUserArgs(
+  spec: string,
+  platform: NodeJS.Platform = process.platform,
+  identity: { uid?: number; gid?: number; groups?: number[] } = {
+    uid: typeof process.getuid === "function" ? process.getuid() : undefined,
+    gid: typeof process.getgid === "function" ? process.getgid() : undefined,
+    groups: typeof process.getgroups === "function" ? process.getgroups() : undefined,
+  },
+): string[] {
+  if (spec === "root") return [];
+  if (spec !== "auto") return ["--user", spec];
+  if (platform !== "linux") return [];
+  const { uid, gid } = identity;
+  if (uid === undefined || gid === undefined || uid === 0) return [];
+  // `--user uid:gid` drops the host's supplementary groups, which would turn a
+  // group-writable checkout into an in-container EACCES the host user never has.
+  return ["--user", `${uid}:${gid}`,
+    ...(identity.groups ?? []).filter((group) => group !== gid).flatMap((group) => ["--group-add", String(group)])];
+}
+
+/** HOME an overridden container user can actually write (`/root` belongs to root). */
+export const SANDBOX_HOME = "/tmp";
 
 export class DockerSandbox {
   readonly config: SandboxConfig;
@@ -105,8 +285,9 @@ export class DockerSandbox {
 
   /**
    * Run one command in a fresh container with the candidate mounted at
-   * `/workspace`. Fail closed when docker/image probing fails; never fall back
-   * to host execution when the spec asked for a sandbox.
+   * `/workspace` plus the git metadata the candidate points at, so git commands
+   * behave exactly as they do on the host. Fail closed when docker/image probing
+   * fails; never fall back to host execution when the spec asked for a sandbox.
    */
   async run(
     hostCwd: string,
@@ -117,27 +298,33 @@ export class DockerSandbox {
     const probe = await this.probe();
     if (!probe.ok) throw new Error(`sandbox requested but docker is unavailable: ${probe.error ?? "unknown error"}`);
     const name = `pi-coffee-verify-${randomBytes(6).toString("hex")}`;
-    const envArgs: string[] = [];
-    const seen = new Set<string>();
+    const userArgs = sandboxUserArgs(this.config.user ?? "auto");
+    const environment = new Map<string, string | undefined>();
+    // Lowest precedence: the sandbox's own defaults. An overridden user cannot
+    // write to the image's `/root`, so it gets a HOME that exists and is writable;
+    // an allowlisted or validator-provided HOME still overrides it.
+    if (userArgs.length > 0) environment.set("HOME", SANDBOX_HOME);
+    // Allowlisted host names are forwarded by reference (`-e NAME`) so their
+    // values never appear in argv. Listing a name the sandbox defaults already set
+    // is an explicit opt-in, so it replaces that default.
+    for (const key of this.config.envAllow) environment.set(key, undefined);
     // Validator-provided values win, exactly like the worktree backend
     // (`{...process.env, ...extraEnv}`): an explicit `env.NODE_ENV=test` must not
-    // be silently replaced by the daemon's value. Allowlisted host names are
-    // forwarded by reference (`-e NAME`) so their values never appear in argv.
-    for (const [key, value] of Object.entries(extraEnv ?? {})) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-      envArgs.push("-e", `${key}=${value}`);
-    }
-    for (const key of this.config.envAllow) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-      envArgs.push("-e", key);
-    }
+    // be silently replaced by the daemon's value — and a later `-e NAME` would not
+    // even reach the container, because docker resolves it from the CLI
+    // environment, so the explicit value alone must be emitted.
+    for (const [key, value] of Object.entries(extraEnv ?? {})) environment.set(key, value);
+    const envArgs: string[] = [];
+    for (const [key, value] of environment) envArgs.push("-e", value === undefined ? key : `${key}=${value}`);
+
     const argv = [
       shellQuote(this.config.dockerBin), "run", "--rm", "--name", shellQuote(name),
       "--network", shellQuote(this.config.network),
-      "-v", shellQuote(`${resolve(hostCwd)}:/workspace`),
-      "-w", "/workspace",
+      ...userArgs.map((part, index) => (index % 2 === 0 ? part : shellQuote(part))),
+      "-v", shellQuote(`${resolve(hostCwd)}:${WORKER_WORKSPACE}`),
+      ...resolveGitMounts(hostCwd, WORKER_WORKSPACE)
+        .flatMap((mount) => ["-v", shellQuote(`${mount.host}:${mount.container}${mount.readOnly ? ":ro" : ""}`)]),
+      "-w", WORKER_WORKSPACE,
       ...envArgs.map((part, index) => (index % 2 === 0 ? part : shellQuote(part))),
       shellQuote(this.config.image),
       "bash", "-lc", shellQuote(command),
@@ -191,15 +378,20 @@ export interface WorkerContainerOptions {
   dockerBin: string;
   /** Host name the container uses to reach the daemon (`host.docker.internal` by default). */
   coordHost: string;
+  /** `auto` (host user on Linux), `root`, or an explicit `uid:gid`. */
+  user?: string;
 }
 
 /**
  * Prefix that runs the pi CLI inside a per-worker container:
- * worktree -> /workspace, session dir -> /session, worker extension mounted read-only.
+ * worktree -> /workspace, session dir -> /session, worker extension mounted read-only,
+ * plus the git metadata the worktree points at so `git` works inside the container.
  * Only PI_COORD_* values and allowlisted host names are forwarded; `-e NAME` reads
  * the value from the docker CLI environment, so secrets never appear in argv.
  */
 export function buildWorkerDockerPrefix(opts: WorkerContainerOptions): { bin: string; args: string[] } {
+  const userArgs = sandboxUserArgs(opts.user ?? "auto");
+  const gitMounts = resolveGitMounts(opts.worktree, WORKER_WORKSPACE);
   return {
     bin: opts.dockerBin,
     args: [
@@ -207,10 +399,16 @@ export function buildWorkerDockerPrefix(opts: WorkerContainerOptions): { bin: st
       "--network", opts.network,
       // Only meaningful for the gateway alias; harmless for any other coord host.
       "--add-host", "host.docker.internal:host-gateway",
+      ...userArgs,
       "-v", `${resolve(opts.worktree)}:${WORKER_WORKSPACE}`,
+      ...gitMounts.flatMap((mount) => ["-v", `${mount.host}:${mount.container}${mount.readOnly ? ":ro" : ""}`]),
       "-w", WORKER_WORKSPACE,
       "-v", `${resolve(opts.sessionDir)}:${WORKER_SESSION_DIR}`,
       "-v", `${resolve(opts.extensionPath)}:${WORKER_EXTENSION}:ro`,
+      // An overridden user cannot write the image's `/root`, and pi keeps caches
+      // under HOME in addition to its agent dir. An explicitly allowlisted HOME
+      // wins: it is forwarded by name after this default.
+      ...(userArgs.length > 0 && !opts.envAllow.includes("HOME") ? ["-e", `HOME=${SANDBOX_HOME}`] : []),
       "-e", "PI_CODING_AGENT_DIR=/session/agent",
       "-e", `PI_COORD_URL=http://${opts.coordHost}:${opts.port}`,
       "-e", `PI_COORD_SESSION_ID=${opts.sessionId}`,

@@ -69,6 +69,12 @@ export interface Config {
   sandboxCoordHost: string;
   /** Host environment variable names forwarded into sandbox containers. */
   sandboxEnvAllow: string[];
+  /**
+   * Container user: `auto` runs as the invoking uid/gid on Linux (so bind-mount
+   * writes stay host-owned and daemon cleanup cannot hit EACCES), `root` keeps the
+   * image's default user, and `uid:gid` pins an explicit one.
+   */
+  sandboxUser: string;
   /** Docker CLI path (fake binary in tests). */
   dockerBin: string;
   /** Default worker runner: the pinned pi CLI or an ACP agent. */
@@ -283,6 +289,16 @@ function resolveEnvAllow(overrides: Partial<Config>): string[] {
   return [...new Set(names)];
 }
 
+/** Container user: `auto`, `root`, or an explicit `uid:gid`. */
+function resolveSandboxUser(overrides: Partial<Config>): string {
+  const raw = overrides.sandboxUser ?? env("PI_COFFEE_SANDBOX_USER") ?? "auto";
+  if (raw === "auto" || raw === "root") return raw;
+  if (!/^\d+:\d+$/.test(raw)) {
+    invalid("sandboxUser", "PI_COFFEE_SANDBOX_USER", 'expected "auto", "root" or "uid:gid"');
+  }
+  return raw;
+}
+
 /** Plugin allowlist env var: comma-separated globs; `*` allows everything. */
 function resolvePlugins(overrides: Partial<Config>, field: "workerPlugins", key: string, fallback: string[]): string[] {
   const override = overrides[field];
@@ -414,6 +430,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     sandboxImage: overrides.sandboxImage ?? env("PI_COFFEE_SANDBOX_IMAGE") ?? "",
     sandboxNetwork: resolveSandboxNetwork(overrides),
     sandboxEnvAllow: resolveEnvAllow(overrides),
+    sandboxUser: resolveSandboxUser(overrides),
     sandboxCoordHost: overrides.sandboxCoordHost ?? env("PI_COFFEE_SANDBOX_COORD_HOST") ?? "host.docker.internal",
     dockerBin: overrides.dockerBin ?? env("PI_COFFEE_DOCKER_BIN") ?? "docker",
     runner: resolveRunner(overrides),

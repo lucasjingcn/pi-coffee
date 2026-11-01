@@ -190,7 +190,10 @@ export class IntegrationGate {
     const candidate = join(temp, "candidate");
     let added = false;
     try {
-      await git(meta.repo, ["worktree", "add", "--detach", candidate, targetSha]);
+      // Same guard as the merge/commit calls below: a sandboxed acceptance command
+      // can write the repository's git metadata, so a planted `post-checkout` hook
+      // must never execute as part of verification.
+      await git(meta.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", candidate, targetSha]);
       added = true;
       // Git creates the exact merged tree, isolated from both user worktrees.
       await git(candidate, ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "merge", "--no-ff", "--no-commit", workerSha]);
@@ -224,8 +227,19 @@ export class IntegrationGate {
         runs.push({ id: validator.id, required: validator.required, command: validator.command,
           ...runResult, passed: !runResult.timedOut && runResult.code === 0 });
       }
-      const candidateHeadAfter = await resolveRef(candidate, "HEAD");
-      const candidateTreeAfter = await git(candidate, ["rev-parse", "HEAD^{tree}"]);
+      // A sandboxed command can destroy the candidate's own git metadata (one
+      // `git worktree prune` inside the container is enough, since the metadata
+      // still records the host worktree path). Report that as the reason
+      // verification cannot certify the candidate instead of leaking a raw
+      // `fatal: not a git repository` from the post-run checks.
+      let candidateHeadAfter: string;
+      let candidateTreeAfter: string;
+      try {
+        candidateHeadAfter = await resolveRef(candidate, "HEAD");
+        candidateTreeAfter = await git(candidate, ["rev-parse", "HEAD^{tree}"]);
+      } catch (error) {
+        throw new Error(`verification destroyed the candidate repository (${String((error as Error).message ?? error).trim()}); the candidate cannot be certified`);
+      }
       const historyIntact = candidateHeadAfter === sealedHead && candidateTreeAfter === candidateTree;
       const acceptanceFiles = meta.acceptance?.files ?? [];
       const hashes = await acceptanceHashes(candidate, acceptanceFiles);
@@ -302,8 +316,8 @@ export class IntegrationGate {
         reviewContractHash: contractHash, ...(evidence ? { evidence } : {}),
         codeChanged: changedFiles.some((file) => !acceptanceFiles.includes(file)), result: aggregateResult };
     } finally {
-      if (added) await git(meta.repo, ["worktree", "remove", "--force", candidate]);
-      await rm(temp, { recursive: true, force: true });
+      if (added) await discardCandidate(meta.repo, candidate, temp);
+      else await rm(temp, { recursive: true, force: true });
     }
   }
 
@@ -333,6 +347,26 @@ export class IntegrationGate {
     }
     return proof;
   }
+}
+
+/**
+ * Remove a verification candidate without masking the recorded result.
+ *
+ * `git worktree remove` refuses when the candidate's metadata is already gone, and
+ * a sandboxed acceptance command can delete it (one `git worktree prune` inside the
+ * container drops `<common>/worktrees/<name>`, because that directory still records
+ * the host worktree path). A throw from this cleanup would replace a real proof
+ * with a bare error and leak the temporary directory, so fall back to pruning the
+ * stale registration and deleting the checkout.
+ */
+export async function discardCandidate(repo: string, candidate: string, temp: string): Promise<void> {
+  try {
+    await git(repo, ["worktree", "remove", "--force", candidate]);
+  } catch {
+    await git(repo, ["worktree", "prune"]).catch(() => undefined);
+    await rm(candidate, { recursive: true, force: true });
+  }
+  await rm(temp, { recursive: true, force: true });
 }
 
 /**

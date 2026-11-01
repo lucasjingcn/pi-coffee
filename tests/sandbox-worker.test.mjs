@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Coordinator } from "../dist/manager.js";
@@ -25,9 +26,10 @@ if (argv[0] === "image" && argv[1] === "inspect") { console.log("sha256:" + "a".
 process.exit(0);
 `;
 
-test("worker docker prefix mounts only the worker layout", () => {
+test("worker docker prefix mounts the worker layout and no unrelated host paths", () => {
   const prefix = buildWorkerDockerPrefix({
     sessionId: "s42",
+    // Missing on purpose: a worktree that is not there yet contributes no git mount.
     worktree: "/tmp/work",
     sessionDir: "/tmp/sessions/s42",
     extensionPath: "/repo/extensions/pi-coordinator.ts",
@@ -36,6 +38,7 @@ test("worker docker prefix mounts only the worker layout", () => {
     envAllow: ["DEEPSEEK_API_KEY"],
     port: 8787,
     dockerBin: "docker",
+    user: "1000:1000",
   });
   assert.equal(prefix.bin, "docker");
   const args = prefix.args;
@@ -50,6 +53,15 @@ test("worker docker prefix mounts only the worker layout", () => {
   assert.ok(!args.some((arg) => arg.startsWith("PI_COORD_TOKEN=")), "token values must not appear in argv");
   assert.ok(args.includes("agent:latest"));
   assert.equal(args[args.length - 1], "pi");
+  // An explicit user owns neither `/root` nor a HOME pointing into the image.
+  assert.equal(args[args.indexOf("--user") + 1], "1000:1000");
+  assert.equal(args[args.indexOf("-e", args.indexOf("--user")) + 1], "HOME=/tmp");
+  assert.equal(args.filter((arg) => arg.startsWith("HOME=")).length, 1);
+  assert.deepEqual(args.filter((arg) => arg.includes(":") && arg.startsWith("/")), [
+    `/tmp/work:${WORKER_WORKSPACE}`,
+    `/tmp/sessions/s42:${WORKER_SESSION_DIR}`,
+    `/repo/extensions/pi-coordinator.ts:${WORKER_EXTENSION}:ro`,
+  ], "no git metadata mount without a real worktree");
 });
 
 async function fixture(fn) {
@@ -115,6 +127,9 @@ test("spawn builds a containerized worker and stop removes the container", () =>
     assert.ok(prefix.args.includes(`${worker.worktree}:${WORKER_WORKSPACE}`));
     assert.ok(prefix.args.includes(`${join(c.config.dataDir, "sessions", worker.id)}:${WORKER_SESSION_DIR}`));
     assert.ok(prefix.args.includes(`${c.config.extensionPath}:${WORKER_EXTENSION}:ro`));
+    // pi runs `git` inside the container; a linked worktree needs its metadata too.
+    const gitDir = realpathSync(join(repo, ".git"));
+    assert.ok(prefix.args.includes(`${gitDir}:${gitDir}`), `expected the git metadata mount in ${prefix.args.join(" ")}`);
     assert.equal(client.opts.sessionDir, WORKER_SESSION_DIR);
     assert.equal(client.opts.extensionPath, WORKER_EXTENSION);
 

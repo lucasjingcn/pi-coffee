@@ -470,6 +470,7 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_gc` | 回收已完成工作。移除干净的已完成 worktree，只删除已证明合并的分支。对工作已无法挽救的会话还会回收其转录目录、控制凭据、裁掉 history 里的大块证据（`transcripts_reclaimed`、`credentials_reclaimed`、`history_compacted`）。 |
 | `pi_metrics` | 活跃与历史任务的使用量和费用证据，可用 `session_ids` 过滤；缺失费用为未知，部分比值不证明省钱。 |
 | `pi_record_cost` | 登记主代理费用：`id`、`amount`、`currency`、`source`、`reference`、覆盖的 `session_ids`；区分实报、手动和估算来源。 |
+| `pi_audit` | `action: verify\|tail`（默认 `verify`）：重算协调器动作的哈希链审计日志，返回 `{ok, entries, files, firstBrokenSeq?, reason?}`，或返回最新的若干条记录。daemon 每次启动也会校验一次并写日志；`GET /internal/audit/verify` 给出同一结论。只读。 |
 
 ## Worker 端工具
 
@@ -495,12 +496,20 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 隔离、凭据限制和只读验收挂载；本版本不提供该强隔离。
 
 验证命令和 worker 都可以改为在 Docker 沙箱里运行（`PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`）：
-验证命令每次起一个只挂载候选目录到 `/workspace` 的临时容器；worker 则使用确定性的
+验证命令每次起一个把候选目录挂到 `/workspace` 的临时容器；worker 则使用确定性的
 `pi-coffee-worker-<id>` 容器，挂载 worktree 到 `/workspace`、会话目录到 `/session`，并以只读方式挂载
-协调扩展。只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW`（外加 `PI_COORD_*` 握手变量）里的环境变量，worker 通过
-`host.docker.internal` 访问 daemon。停止、启动失败和重启恢复都会删除容器；docker 或镜像不可用时直接
-失败，不会回退到宿主执行。它隔离的是命令和 worker 进程，不是 daemon：请给沙箱准备独立的 provider
-凭据（或快照），并注意 `--network none` 时没有 provider 访问。
+协调扩展。两者还会挂载该 checkout 指向的 git 元数据：linked worktree 的 `.git` 是一个**文件**，里面写着
+`<repo>/.git/worktrees/<name>`，只挂 worktree 会让容器里每条 git 命令都以 128 退出（`not a git repository`）。
+元数据按 git 自己记录的绝对路径挂载，因此 `git rev-parse`、`git diff`、hook 和 `git -C 子目录` 的行为与宿主
+完全一致。只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW`（外加 `PI_COORD_*` 握手变量）里的环境变量，worker 通过
+`host.docker.internal` 访问 daemon。在 Linux 上容器以调用者的 uid/gid 运行（`PI_COFFEE_SANDBOX_USER`）：
+以 root 往 bind mount 里写会让 daemon 自己的清理（`git worktree remove`、删除候选目录）在命令明明成功的情况
+下报 EACCES；Docker Desktop 会把写入映射回宿主用户，那里继续用镜像默认用户。停止、启动失败和重启恢复都会
+删除容器；docker 或镜像不可用时直接失败，不会回退到宿主执行。它隔离的是命令和 worker 进程，不是 daemon：git 元数据是读写挂载（等同于宿主执行已有的权限），
+因此容器里的命令可以改 refs、改 `.git/config`，一条 `git worktree prune` 还会注销它在容器里看不到的 worktree
+（容器只看到 `/workspace`）——与宿主机上执行同一条命令的后果一致。唯一例外是仓库的 hooks 目录：它以只读方式
+挂载，因为写进那里的 hook 会在宿主上被 `pi_commit`/`pi_merge` 执行；验证本身也不会为候选目录执行仓库 hook。请给沙箱准备独立的 provider 凭据（或快照），并注意
+`--network none` 时没有 provider 访问。
 
 ## 清理已完成的工作
 
@@ -581,6 +590,7 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_SANDBOX_IMAGE` | *(空)* | `docker` 必填：包含 bash 和项目工具链的镜像。 |
 | `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | 容器网络模式；`none` 关闭 provider 访问。 |
 | `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(空)* | 逗号分隔的宿主环境变量名，只把这些传进容器。 |
+| `PI_COFFEE_SANDBOX_USER` | `auto` | 容器用户：`auto` 在 Linux 上以调用者 uid/gid（含附加组）运行，bind mount 写入仍归宿主用户、清理不会撞 EACCES，Docker Desktop 上沿用镜像默认用户。`root` 在任何平台都只是"沿用镜像默认用户"——只有镜像默认用户本来就是 root 时才等于 root，要强制 root 请写 `0:0`。`uid:gid` 是精确身份（不带附加组），实际只在 Linux 可用：在 Docker Desktop 上，与挂载点所有者不同的 uid 会让 git 报 `dubious ownership`。 |
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI 路径（测试里用 fake binary）。 |
 | `PI_COFFEE_RUNNER` | `pi` | 默认 worker runner：`pi`（固定 CLI）或 `acp`（Agent Client Protocol）。 |
 | `PI_COFFEE_ACP_COMMAND` | *(空)* | ACP agent argv（JSON 数组或空格分隔）；`PI_COFFEE_RUNNER=acp` 时必填。 |

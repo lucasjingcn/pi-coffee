@@ -89,6 +89,29 @@ test("worker sandbox refuses a network that cannot reach the daemon", () => {
   assert.equal(ok.sandboxNetwork, "bridge");
 });
 
+test("the container user accepts auto, root or an explicit uid:gid and nothing else", () => {
+  const key = "PI_COFFEE_SANDBOX_USER";
+  const saved = process.env[key];
+  try {
+    delete process.env[key];
+    assert.equal(loadConfig().sandboxUser, "auto");
+    process.env[key] = "root";
+    assert.equal(loadConfig().sandboxUser, "root");
+    process.env[key] = "1000:1000";
+    assert.equal(loadConfig().sandboxUser, "1000:1000");
+    // A malformed value must fail loudly: it would otherwise reach `docker run`
+    // as an argument the daemon cannot reason about.
+    for (const bad of ["nobody", "1000", "1000:", ":1000", "1000:1000:1", "root:x"]) {
+      process.env[key] = bad;
+      assert.throws(() => loadConfig(), /sandboxUser|PI_COFFEE_SANDBOX_USER/, bad);
+    }
+    assert.equal(loadConfig({ sandboxUser: "2000:2000" }).sandboxUser, "2000:2000");
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});
+
 test("the container's coord host is configurable and defaults to host.docker.internal", () => {
   const key = "PI_COFFEE_SANDBOX_COORD_HOST";
   const saved = process.env[key];
