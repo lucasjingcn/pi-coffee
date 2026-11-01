@@ -310,7 +310,9 @@ PI_COFFEE_TOKEN = "optional-shared-secret"
 ```
 
 Set `PI_COFFEE_TOKEN` in `.env` too if you want authentication. The port is published on loopback by
-default; expose it on `0.0.0.0` only together with a token.
+default; expose it on `0.0.0.0` only together with a token. The container runs as root so it can write
+the `/data` volume and the bind-mounted workspace; for an untrusted repository pass `--user <uid>:<gid>`
+and make `/data` writable for that uid (or use separate OS/container isolation).
 
 Without Compose:
 
@@ -545,7 +547,9 @@ The locks are coordination protection, not a security sandbox. They cover recogn
 targets; dynamic scripts, variables, command substitution and globs are not fully contained. Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.
 Untrusted workers require separate OS/container isolation, credential restrictions, and appropriate
-read-only acceptance mounts; that isolation is not provided by this release.
+read-only acceptance mounts; that isolation is not provided by this release. Worker agent directories
+link the global `skills`, `prompts`, `themes` and extension directories so a worker sees the same
+content, which means a write through a dynamic bash path can reach global configuration too.
 
 ## Cleaning up finished work
 

@@ -43,6 +43,28 @@ All notable changes to pi-coffee are recorded here. The format follows
 - `npm test` now passes `--test-timeout` and `--test-force-exit`, and the two
   worker-ownership tests skip when `ps` is unavailable instead of leaking a
   detached fixture child and hanging the runner.
+- Stopping a worker no longer fails while the same repository is being verified,
+  merged or executed; the worktree cleanup is deferred to the sweeper instead of
+  leaving the worker alive on SIGTERM.
+- A daemon restart no longer shortens worktree/transcript retention below
+  `PI_COFFEE_WORKTREE_TTL_MIN`; failed spawns remove the worktree and branch they
+  created, including credential-persistence failures.
+- `drain`/`/internal/shutdown` count in-flight spawns, so `active: 0` is a real
+  restart point; claims are refused once a session is stopping/stopped/error,
+  absolute paths from a manual claimant are rejected loudly, and lock keys
+  resolve symlinked prefixes to the same physical path.
+- `pi_message` reports `delivered` only after a confirmed injection; a post-merge
+  hook that dirties the target is surfaced in the merge result.
+- Literal `cp`/`mv`/`install`/`ln`/`rsync`/`touch`/`mkdir` destinations, `dd of=`
+  and literal `sh -c` scripts are recognized write targets.
+- An 8 MiB unterminated pi stdout line fails the RPC client closed instead of
+  buffering without bound; the stdio proxy answers requests in arrival order.
+- Docker pins the bundled pi version and separates the host port from the fixed
+  container port; `npm run start` lets the process environment override the
+  settings file; the installer backs up and restores the Codex config when MCP
+  registration fails and no longer removes pi's entry before re-adding it.
+- CI runs the extension typecheck plus platform-neutral suites on Windows, and a
+  release refuses a tag that does not match `package.json`.
 
 ## [0.2.0] - 2026-10-31
 

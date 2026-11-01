@@ -26,3 +26,23 @@ test("parseEnvFile drops inline comments without harming quoted or comment-beari
   assert.equal(env.EMPTY, "");
   assert.equal(Object.keys(env).length, 8);
 });
+test("the process environment overrides the settings file, which only fills gaps", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadEnvFile } = await import("../scripts/lib/env.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "pi-env-precedence-"));
+  const file = join(dir, "env");
+  writeFileSync(file, "PI_COFFEE_PORT=8787\nPI_COFFEE_MODEL=from-file\n");
+  try {
+    process.env.PI_COFFEE_PORT = "9100";
+    delete process.env.PI_COFFEE_MODEL;
+    loadEnvFile(file, { override: false });
+    assert.equal(process.env.PI_COFFEE_PORT, "9100", "an exported value wins");
+    assert.equal(process.env.PI_COFFEE_MODEL, "from-file", "the file fills a gap");
+  } finally {
+    delete process.env.PI_COFFEE_PORT;
+    delete process.env.PI_COFFEE_MODEL;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

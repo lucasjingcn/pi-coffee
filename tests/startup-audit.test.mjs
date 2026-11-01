@@ -70,6 +70,8 @@ test('container health authenticates at the configured port and fails unauthoriz
   assert.match(docker, /CMD node scripts\/container-health\.mjs/);
   // `ps` proves worker process ownership; the runtime image must ship it.
   assert.match(docker, /apt-get install -y --no-install-recommends [^\n]*procps/);
+  assert.match(docker, /ARG PI_VERSION=/, "the bundled pi version is pinned");
+  assert.match(docker, /@earendil-works\/pi-coding-agent@\$\{PI_VERSION\}/);
   assert.match(compose, /127\.0\.0\.1:\$\{PI_COFFEE_HOST_PORT:-8787\}:8787/);
   assert.match(compose, /scripts\/container-health\.mjs/);
 }));
@@ -88,3 +90,9 @@ test('doctor uses daemon env precedence and background checks require persisted 
   assert.match(background.stdout, /FAIL\s+credentials for pi-audit-no-auth-provider/);
   assert.equal(background.code, 1);
 }));
+
+test('the foreground launcher lets the process environment override the settings file', async () => {
+  const start = await readFile('scripts/start.mjs', 'utf8');
+  assert.match(start, /loadEnvFile\(envFilePath\(\), \{ override: false \}\)/);
+  assert.doesNotMatch(start, /override: true/);
+});

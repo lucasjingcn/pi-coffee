@@ -1,4 +1,5 @@
-import { isAbsolute, normalize, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 
 export type LockMode = "rw" | "ro";
 
@@ -111,10 +112,24 @@ export class LockManager {
   }
 }
 
-/** Normalize a path to an absolute, slash-terminated-free form. */
+/**
+ * Normalize a path to an absolute, slash-terminated-free form and resolve it
+ * physically where possible, so a symlinked prefix and its target share one key.
+ * Non-existent paths fall back to resolving their existing parent, then to the
+ * lexical form (future files still need a stable key).
+ */
 function normalizeAbs(path: string): string {
   const absolute = isAbsolute(path) ? path : resolve("/", path);
-  return normalize(absolute).replace(/\/+$/, "") || "/";
+  const lexical = normalize(absolute).replace(/\/+$/, "") || "/";
+  try {
+    return realpathSync(lexical).replace(/\/+$/, "") || "/";
+  } catch {
+    try {
+      return join(realpathSync(dirname(lexical)), basename(lexical)).replace(/\/+$/, "") || "/";
+    } catch {
+      return lexical;
+    }
+  }
 }
 
 /** True when `a` and `b` are the same path or one is a parent directory of the other. */

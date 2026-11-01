@@ -17,10 +17,10 @@ test('successful immediate delivery is acknowledged and failed delivery stays in
     });
   }
   try {
-    coord.postMessage('sender', '*', 'broadcast', 'broadcast', true);
-    await new Promise(r => setImmediate(r));
+    const result = await coord.postMessage('sender', '*', 'broadcast', 'broadcast', true);
+    assert.equal(result.delivered, true, 'at least one live target confirmed delivery');
     assert.equal(coord.inbox('one', true).length, 0);
-    assert.equal(coord.inbox('two', true).length, 1);
+    assert.equal(coord.inbox('two', true).length, 1, 'a failed injection stays unread');
   } finally {
     await coord.stopAll();
     await rm(dir, { recursive: true, force: true });

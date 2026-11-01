@@ -140,6 +140,9 @@ async function post(body: unknown): Promise<unknown> {
 let buf = "";
 let pending = 0;
 let ended = false;
+// Lines are answered in arrival order: concurrency would let a fast retried
+// request overtake an earlier one during a daemon restart window.
+let chain: Promise<void> = Promise.resolve();
 
 function maybeExit(): void {
   if (ended && pending === 0) process.exit(0);
@@ -148,9 +151,15 @@ function maybeExit(): void {
 function enqueueLine(line: string): void {
   if (!line.trim()) return;
   pending++;
-  void handleLine(line).finally(() => {
-    pending--;
-    maybeExit();
+  chain = chain.then(async () => {
+    try {
+      await handleLine(line);
+    } finally {
+      pending--;
+      maybeExit();
+    }
+  }).catch(() => {
+    // handleLine reports its own errors; keep the chain alive for later lines.
   });
 }
 

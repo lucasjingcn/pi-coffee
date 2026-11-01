@@ -270,7 +270,8 @@ PI_COFFEE_TOKEN = "optional-shared-secret"
 ```
 
 要鉴权的话，`.env` 里也设上 `PI_COFFEE_TOKEN`。端口默认只发布到回环；要暴露到 `0.0.0.0` 请务必
-同时设置 token。
+同时设置 token。容器默认以 root 运行，以便写入 `/data` 卷和挂载的工作区；处理不可信仓库时请用
+`--user <uid>:<gid>` 并把 `/data` 变成该用户可写（或改用独立的 OS/容器隔离）。
 
 不用 Compose 也可以：
 

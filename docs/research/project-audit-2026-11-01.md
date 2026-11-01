@@ -274,3 +274,29 @@
 - 合并后在 `main` 上跑完整 `npm run verify`：368/368 通过（typecheck、扩展类型、构建、离线测试、playbook 一致性），0 失败 0 跳过。
 - 未处理：第 4 节的 P2 清单保持原状；`P1-6` 的逃逸检测依赖 `ps`（`doctor` 现在会检查），无法读取进程表时保留原行为并在注释中说明。
 - 并行工作区 `.agents/worktrees/p0-p1-hardening` 与本分支无关，未合并、未触碰。
+
+## 9. P2 处置（2026-11-01 第二轮）
+
+第 4 节 32 项 P2 的处理结果：
+
+- **已修复（27 项）**：1 启动清扫 TTL、2 在途 spawn 计入 drain/shutdown、3 SIGTERM 不再被
+  repo guard 挡住、4/5 spawn 失败回收 worktree+branch、6 claim 校验会话状态、7 `delivered`
+  语义、8 代码新鲜度改为内容哈希、9 merge 后目标树脏给出 `targetDirty`、10 `/internal`
+  只回验收输出尾部、11 spawns 计数改为进程内计数、12 requirement id trim、13 `cp/mv/dd/sh -c`
+  等字面量写入、14 绝对路径 claim 拒绝、15 锁键 realpath、17 stdout 行上限、18 stdio-proxy 串行、
+  21 pi 版本固定、22 compose 端口、23 start.mjs 优先级、24 安装器 Codex 配置回滚、25
+  `check-health` 支持 `PI_COFFEE_URL`、26 CI Windows 覆盖与 release tag 校验、27 CHANGELOG
+  计数、28 README 环境变量表、29 HEAD 探活、30 超限 body 返回 413、31 常量时间 token 比较、
+  32 越权返回 403 且 500 不回显内部文本。
+- **判定不需改（2 项，附理由）**：
+  - P2-16「`->` 产生伪锁」是**误报**：shell 里未加引号的 `>` 就是重定向，实测 `printf x->b`
+    会创建文件 `b`；扫描器把 `%s` 视作写目标是正确行为，worker 需要自己给参数加引号。
+  - P2-19「agent dir 链接全局资源目录」是**有意的单源设计**：已在 README 写明链接的是全局
+    skills/prompts/themes/extensions，动态 bash 路径可写到全局配置，因此不可信 worker 必须用
+    OS/容器隔离。
+- **按部署取舍文档化（1 项）**：P2-20 容器默认 root 是刻意的（可写 `/data` 卷与 bind mount）；
+  README 已给出 `--user <uid>:<gid>` 方案与隔离建议。
+- **部分处理（1 项）**：P2-9 不做自动回滚（已落地的 merge 无法安全撤销），改为在 merge 结果里
+  返回 `targetDirty`，让调用方在记录成功前就知道需要清理。
+- 验证：合并前 `npm run verify` 全绿；新增/更新回归测试覆盖上述修复（bash 写入识别、启动 TTL、
+  merge 脏树、claim 守卫、`delivered`、stdout 上限、HEAD/413/常量时间鉴权、安装器回滚、CI 断言）。

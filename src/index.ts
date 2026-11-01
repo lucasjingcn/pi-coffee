@@ -255,7 +255,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       // still active and never signals a pid, so no unrelated process is ever killed.
       case "/internal/shutdown": {
         if (workerSid) return sendJson(res, 403, { error: "worker token cannot stop the daemon" });
-        const active = coord.activeWorkers();
+        const active = coord.activeWorkers() + coord.pendingSpawns();
         if (active > 0) {
           return sendJson(res, 409, { error: `refusing to stop with ${active} active worker(s); drain and wait for zero`, active });
         }
@@ -328,7 +328,7 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
           if (to === "*") throw new Error("worker broadcast is unavailable across session scopes");
           coord.assertSameScope(workerSid, to);
         }
-        return sendJson(res, 200, coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
+        return sendJson(res, 200, await coord.postMessage(workerSid ?? from ?? "unknown", to, text, kind ?? "note", deliver ?? true));
       }
 
       case "/internal/board/get": {

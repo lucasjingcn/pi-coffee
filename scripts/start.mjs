@@ -5,7 +5,10 @@ import { resolvePiBin } from "./lib/pi.mjs";
 import { resolveBashBin } from "./lib/bash.mjs";
 import { rotateOwnedLogs, rotationOptionsFromEnv } from "./lib/logs.mjs";
 
-loadEnvFile(envFilePath(), { override: true });
+// Explicit shell/process environment wins; the settings file only fills gaps.
+// `npm run setup` writes defaults, so an exported PI_COFFEE_* must be able to
+// override them (README documents that launcher form).
+loadEnvFile(envFilePath(), { override: false });
 if (!process.env.PI_COFFEE_PI_BIN) process.env.PI_COFFEE_PI_BIN = resolvePiBin() || "pi";
 if (!process.env.PI_COFFEE_BASH_BIN) process.env.PI_COFFEE_BASH_BIN = resolveBashBin() || "bash";
 

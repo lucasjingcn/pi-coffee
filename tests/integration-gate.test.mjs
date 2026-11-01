@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
+import {chmod, mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {Coordinator} from '../dist/manager.js';
@@ -96,6 +96,18 @@ test('passing merged candidate can integrate and close, and evidence survives as
   await assert.rejects(c.exec('s1','true'),/finished/);
   assert.throws(()=>c.authorizeWrite('s1'),/finished/);
   assert.equal(meta.verification.passed,true);
+}));
+
+test('a post-merge hook that dirties the target is reported, not hidden',()=>fixture(async({c,repo})=>{
+  const hook=join(repo,'.git/hooks/post-merge');
+  await writeFile(hook,'#!/bin/sh\nprintf hook > src/generated.txt\n');
+  await chmod(hook,0o755);
+  await c.verify('s1');
+  const merged=await c.merge('s1');
+  assert.equal(merged.ok,true);
+  assert.equal(merged.targetDirty,true,'the caller must see the dirty target');
+  // Closing still refuses (the tree is dirty), but the merge result explains why.
+  await assert.rejects(c.setOutcome('s1','success_first'),/target worktree has staged/);
 }));
 
 test('an already stopped worker can be closed as abandoned',()=>fixture(async({c,meta})=>{

@@ -470,6 +470,131 @@ function isDiscardDevice(raw: string): boolean {
   return DISCARD_DEVICES.has(raw) || DISCARD_DEVICE_PREFIXES.some((prefix) => raw.startsWith(prefix));
 }
 
+
+/** Commands whose final literal operand is the destination (earlier ones are sources). */
+const DEST_LAST_COMMANDS = new Set(["cp", "mv", "install", "ln", "rsync", "scp"]);
+
+/** Commands where every literal operand is created or modified. */
+const ALL_TARGET_COMMANDS = new Set(["touch", "mkdir", "rmdir"]);
+
+/** Whether a word is an option rather than an operand. */
+function isOption(value: string): boolean {
+  return value === "--" || value.startsWith("-");
+}
+
+/**
+ * Consume `cp`/`mv`/`install`/`ln`/`rsync`/`scp` operands and add the
+ * destination. Only literal targets are added; dynamic words are filtered by
+ * `add`. `-t DIR` / `--target-directory` move the destination before the sources.
+ */
+function parseWriteCommand(tokens: Token[], start: number, add: Adder): number {
+  let i = start;
+  let last: string | undefined;
+  let sawTargetDirectory = false;
+
+  for (; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.kind === "io") continue;
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return i - 1;
+      if (REDIRECT_OPS.has(token.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return i - 1;
+    }
+
+    const value = token.value;
+    if (value === "-t" || value === "--target-directory") {
+      const target = tokens[i + 1];
+      if (target && target.kind === "word") {
+        add(target.value);
+        sawTargetDirectory = true;
+        i++;
+      }
+      continue;
+    }
+    if (value.startsWith("--target-directory=")) {
+      add(value.slice("--target-directory=".length));
+      sawTargetDirectory = true;
+      continue;
+    }
+    if (isOption(value)) continue;
+    last = value;
+  }
+
+  if (!sawTargetDirectory && last !== undefined) add(last);
+  return i - 1;
+}
+
+/** Consume `touch`/`mkdir`/`rmdir` operands: each literal operand is a target. */
+function parseAllTargets(tokens: Token[], start: number, add: Adder): number {
+  let i = start;
+  for (; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.kind === "io") continue;
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return i - 1;
+      if (REDIRECT_OPS.has(token.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return i - 1;
+    }
+    if (isOption(token.value)) continue;
+    add(token.value);
+  }
+  return i - 1;
+}
+
+/** `dd` writes to its `of=` operand; `if=` and other operands are read paths. */
+function parseDd(tokens: Token[], start: number, add: Adder): number {
+  let i = start;
+  for (; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.kind === "io") continue;
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return i - 1;
+      if (REDIRECT_OPS.has(token.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return i - 1;
+    }
+    if (token.value.startsWith("of=")) add(token.value.slice(3));
+  }
+  return i - 1;
+}
+
+/**
+ * `sh -c '<literal script>'` can be scanned recursively. Any other invocation
+ * (`bash script.sh`, `sh -lc "$DYNAMIC"`) stays unscanned like other dynamic
+ * scripts.
+ */
+function parseShellScript(tokens: Token[], start: number, add: Adder): number {
+  for (let i = start; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.kind === "op") {
+      if (SEPARATORS.has(token.value)) return start - 1;
+      if (REDIRECT_OPS.has(token.value)) {
+        i = processRedirect(tokens, i, add);
+        continue;
+      }
+      return start - 1;
+    }
+    if (token.kind === "io") continue;
+    if (/^-{1,2}[A-Za-z]*c$/.test(token.value)) {
+      const script = tokens[i + 1];
+      if (script && script.kind === "word") {
+        for (const path of bashPaths(script.value)) add(path);
+        return i + 1;
+      }
+      return i;
+    }
+  }
+  return tokens.length - 1;
+}
+
 /**
  * Extract repo paths a bash command is expected to write. Only literal targets
  * are returned; dynamic expressions are ignored.
@@ -512,6 +637,23 @@ export function bashPaths(cmd: string): string[] {
       }
       if (token.value === "sed") {
         i = parseSed(tokens, i + 1, add);
+        continue;
+      }
+      const command = token.value.split("/").pop() ?? "";
+      if (DEST_LAST_COMMANDS.has(command)) {
+        i = parseWriteCommand(tokens, i + 1, add);
+        continue;
+      }
+      if (ALL_TARGET_COMMANDS.has(command)) {
+        i = parseAllTargets(tokens, i + 1, add);
+        continue;
+      }
+      if (command === "dd") {
+        i = parseDd(tokens, i + 1, add);
+        continue;
+      }
+      if (command === "sh" || command === "bash" || command === "zsh") {
+        i = parseShellScript(tokens, i + 1, add);
         continue;
       }
     }

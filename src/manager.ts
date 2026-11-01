@@ -328,10 +328,15 @@ export class Coordinator {
   private async sweepOnStartup(): Promise<void> {
     if (!this.config.autoClean) return;
 
+    const ttlMs = Math.max(1, this.config.worktreeTtlMin) * 60_000;
+    const now = Date.now();
     const repos = new Set<string>();
     for (const entry of this.history) {
       if (!entry.repo) continue;
       repos.add(entry.repo);
+      // A restart (for example `npm run upgrade`) must not shorten retention:
+      // the periodic sweeper waits for the TTL before touching finished workers.
+      if (now - (entry.lastActivity ?? 0) < ttlMs) continue;
       await this.cleanMeta(entry).catch(() => {});
       await this.cleanSessionDir(entry).catch(() => {});
     }
@@ -1196,7 +1201,7 @@ export class Coordinator {
       draining: this.draining,
       startedAt: this.drainStartedAt ?? null,
       reason: this.drainReason ?? null,
-      active: this.activeWorkers(),
+      active: this.activeWorkers() + this.pendingSpawns(),
       activeSessions: this.list()
         .filter((meta) => meta.status === "starting" || meta.status === "idle" || meta.status === "working" || meta.status === "stopping")
         .map((meta) => meta.id),
@@ -1413,6 +1418,9 @@ export class Coordinator {
       meta.shutdownUnconfirmed = false;
       this.workerTokens.delete(workerToken);
       this.releaseRuntimeReservations(rt);
+      // The worktree/branch were created before startup failed, but no history
+      // entry exists yet, so the sweeper would never reclaim them.
+      if (meta.worktree) await removeWorktree(meta.repo, meta.worktree, meta.branch).catch(() => {});
       this.scheduleSave();
       this.notifyWaiters();
       throw e;
@@ -1865,6 +1873,11 @@ export class Coordinator {
     return this.spawnCount;
   }
 
+  /** Public: spawns/resumes that reserved a slot but have not registered yet. */
+  pendingSpawns(): number {
+    return this.reserved;
+  }
+
   /** Claim a concurrency slot synchronously; throws when the cap (including in-flight spawns) is hit. */
   private reserveSlot(): void {
     if (this.activeCount() + this.reserved >= this.config.maxSessions) {
@@ -2262,8 +2275,9 @@ export class Coordinator {
     }
     const rt = this.get(id);
     if (rt.stopping) return rt.stopping;
-    this.assertRepoAvailable(rt.repoIdentity);
-    // Block writes before the first await; only confirmed shutdown releases ownership.
+    // A stop must always run: refusing it while pi_verify/pi_merge holds the
+    // repository left workers alive during SIGTERM. Repo-mutating cleanup below
+    // is deferred instead; the worker process itself is not shared repo state.
     rt.meta.status = "stopping";
     rt.meta.pendingQuestions = [];
     const stopping = Promise.resolve().then(async () => {
@@ -2275,7 +2289,10 @@ export class Coordinator {
       rt.meta.lastActivity = Date.now();
       this.releaseRuntimeReservations(rt);
       this.archive(rt.meta);
-      if (opts.removeWorktree) {
+      if (this.busyRepos.has(rt.repoIdentity)) {
+        // Repository work (verify/merge/exec) is in flight; leave the worktree
+        // for the sweeper instead of failing a stop that already succeeded.
+      } else if (opts.removeWorktree) {
         const deleteBranch = opts.deleteBranch ?? this.config.deleteBranches;
         await removeWorktree(rt.meta.repo, rt.meta.worktree, deleteBranch ? rt.meta.branch : undefined);
       } else if (!opts.preserveWorktree && this.config.autoClean) {
@@ -2320,6 +2337,21 @@ export class Coordinator {
   // -------------------------------------------------------------------------
 
   claim(sessionId: string, paths: string[], mode: LockMode, repo?: string): ClaimResult {
+    const runtime = this.runtimes.get(sessionId);
+    // A stopping/stopped/error session has already released (or is releasing) its
+    // locks; granting a new claim there would leak a lock nobody releases.
+    if (runtime && (runtime.meta.status === "stopping" || runtime.meta.status === "stopped"
+      || runtime.meta.status === "error")) {
+      throw new Error(`session ${sessionId} is ${runtime.meta.status}; its locks are closed`);
+    }
+    if (!runtime) {
+      const absolute = paths.find((path) => isAbsolute(path));
+      if (absolute) {
+        // A manual claimant has no worktree to strip, so an absolute path would
+        // land in a different key space and silently never conflict.
+        throw new Error(`claim paths must be repo-relative; absolute path rejected: ${absolute}`);
+      }
+    }
     const namespace = this.namespaceFor(sessionId, repo);
     this.assertRepoAvailable(namespace);
     const result = this.locks.claim(sessionId, this.normalizeLockPaths(sessionId, paths), mode, namespace);
@@ -2393,7 +2425,7 @@ export class Coordinator {
   // Mailbox and board
   // -------------------------------------------------------------------------
 
-  postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): { id: string; delivered: boolean } {
+  async postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): Promise<{ id: string; delivered: boolean }> {
     const message = this.mailbox.post(from, to, text, kind);
     this.scheduleSave();
 
@@ -2410,12 +2442,15 @@ export class Coordinator {
         const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
         if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
 
-        // Deliver immediately, then ack only on success so a failed injection is
-        // retried by polling instead of being silently dropped.
-        void this.send(sid, body, rt.client.isStreaming ? "steer" : "followup", false)
-          .then(() => this.markRead([message.id], sid))
-          .catch(() => {});
-        delivered = true;
+        // Deliver before reporting, and ack only on success so a failed injection
+        // is retried by polling instead of being reported as delivered.
+        try {
+          await this.send(sid, body, rt.client.isStreaming ? "steer" : "followup", false);
+          this.markRead([message.id], sid);
+          delivered = true;
+        } catch {
+          // Keep it unread; the polling loop retries.
+        }
       }
     }
     return { id: message.id, delivered };

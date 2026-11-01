@@ -3,6 +3,9 @@ import { EventEmitter } from "node:events";
 import type { PiEvent, PiSessionState, PiSessionStats, RpcResponse, UiRequest, UiResponse } from "./types.js";
 import { parseDescendantPids, parseSurvivingPids } from "./process-tree.js";
 
+/** Longest single JSONL line accepted from pi before the stream is considered corrupt. */
+const MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
+
 export interface PiRpcClientOptions {
   cwd: string;
   piBin?: string;
@@ -349,6 +352,13 @@ export class PiRpcClient extends EventEmitter {
 
   private onStdout(chunk: Buffer): void {
     this.stdoutBuf = Buffer.concat([this.stdoutBuf, chunk]);
+    // Without a cap, one unterminated line grows until the daemon runs out of
+    // memory. Treat it as a protocol failure and fail closed.
+    if (this.stdoutBuf.length > MAX_RPC_LINE_BYTES) {
+      this.stdoutBuf = Buffer.alloc(0);
+      this.terminate(new Error(`pi rpc output line exceeded ${MAX_RPC_LINE_BYTES} bytes; protocol desynchronized`));
+      return;
+    }
     // Split strictly on LF; U+2028/U+2029 are valid inside JSON strings.
     for (;;) {
       const nl = this.stdoutBuf.indexOf(0x0a);

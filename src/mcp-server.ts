@@ -854,7 +854,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     async ({ session_id, control_key, control_keys, message, kind, from, deliver }) => {
       if (session_id === "*") coord.assertControlsForAll(control_keys);
       else coord.assertControl(session_id, control_key);
-      const res = coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
+      const res = await coord.postMessage(from ?? "codex", session_id, message, kind ?? "note", deliver ?? true);
       return json(res);
     },
   );
