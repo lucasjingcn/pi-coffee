@@ -30,6 +30,11 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- Docker sandbox phase A: verification/validator commands run in a fresh per-run container that
+  mounts only the candidate at `/workspace`, forwards only `PI_COFFEE_SANDBOX_ENV_ALLOW` names and is
+  removed after the run or timeout. `PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`;
+  `spec.isolation` can request a backend but cannot bypass the daemon policy. Docker/image absence
+  fails closed with no host fallback, and evidence records the sandbox image/digest/network.
 - Evidence lifecycle: `pi_evidence` (`list|get|verify`) exposes bundles over MCP, `pi_merge` and
   successful outcomes fail closed when the recorded bundle is missing or modified, and the sweeper /
   `pi_gc` prune expired bundles (`evidence_removed`, `evidence_bytes`) while always keeping the newest

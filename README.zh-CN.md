@@ -477,6 +477,11 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 摘要和范围检查能阻止错误成果集成，但不能撤销任意脚本的写入。不可信 worker 需要独立设计的 OS/容器
 隔离、凭据限制和只读验收挂载；本版本不提供该强隔离。
 
+验证命令可以改为在 Docker 沙箱里运行（`PI_COFFEE_SANDBOX=docker` + `PI_COFFEE_SANDBOX_IMAGE`）：
+每次运行起一个只挂载候选目录到 `/workspace` 的临时容器，只注入 `PI_COFFEE_SANDBOX_ENV_ALLOW` 列出的
+环境变量，超时或结束后删除容器。docker 或镜像不可用时直接失败，不会回退到宿主执行。它隔离的是
+命令，不是 daemon 及其凭据：模型 key 仍在宿主进程里，`--network none` 时沙箱内命令无法访问 provider。
+
 ## 清理已完成的工作
 
 已停止的 worker 会留着 resume 需要的一切：`pi_resume` 用同一份转录、worktree、分支、spec 和控制密钥
@@ -547,6 +552,11 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | 包内单文件上限（MiB）；超长日志保留尾部并记入 `truncated`。 |
 | `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | 验证器未写 `timeoutMs` 时的默认单步超时（毫秒）。 |
 | `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | 整条验证器链的总预算（毫秒）。 |
+| `PI_COFFEE_SANDBOX` | `worktree` | 执行后端：`worktree`（当前宿主行为）或 `docker`。 |
+| `PI_COFFEE_SANDBOX_IMAGE` | *(空)* | `docker` 必填：包含 bash 和项目工具链的镜像。 |
+| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | 容器网络模式；`none` 关闭 provider 访问。 |
+| `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(空)* | 逗号分隔的宿主环境变量名，只把这些传进容器。 |
+| `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI 路径（测试里用 fake binary）。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。

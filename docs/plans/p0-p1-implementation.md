@@ -101,11 +101,16 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(evidence): retention, inspection tool and merge gate`.
 
 ### M7 — Sandbox phase A (verification commands) · M
-- `src/sandbox.ts`: backend resolution, docker availability probe, command builder, container name,
-  cleanup; config keys; fake docker shim.
-- `IntegrationGate.verify` runs validators/acceptance through the sandbox when configured; sandbox
-  record in evidence; fail-closed when docker is unavailable.
-- Acceptance: `node --test tests/sandbox.test.mjs` + optional live test skipped without docker.
+- `src/sandbox.ts`: `DockerSandbox` with cached `docker version` + `image inspect` probe, env
+  allowlist (host names only), candidate mount at `/workspace`, unique container names, `docker rm -f`
+  on timeout, and fail-closed behavior with no host fallback.
+- Config: `PI_COFFEE_SANDBOX`/`_IMAGE`/`_NETWORK`/`_ENV_ALLOW`, `PI_COFFEE_DOCKER_BIN`;
+  `spec.isolation` requests a backend but cannot bypass daemon policy; spawn probes docker before
+  creating a worktree and records `meta.sandbox`.
+- `IntegrationGate.verify` runs the validator chain through the sandbox when configured; evidence
+  records image, digest and network.
+- Acceptance: `node --test tests/sandbox.test.mjs` (5 cases: run/record, probe refusal without a
+  worktree, no host fallback, timeout cleanup, isolation policy); full suite.
 - Commit: `feat(sandbox): run verification commands in docker`.
 
 ### M8 — Sandbox phase B (worker process) · M–L
@@ -281,3 +286,5 @@ Run each item against the final branch. Record evidence (command + output) in th
 - **M6 complete** — 2026-11-01: evidence retention (TTL + keep-per-session + stale temp cleanup),
   `pi_evidence` MCP tool, and merge/outcome integrity checks against the recorded bundle; 4 new
   tests; full suite 401/401 twice.
+- **M7 complete** — 2026-11-01: Docker sandbox phase A for verification commands (probe, mounts, env
+  allowlist, timeout cleanup, fail-closed policy, evidence record); 5 new tests; full suite 406/406.

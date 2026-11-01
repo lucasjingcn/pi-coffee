@@ -542,7 +542,16 @@ are hashed. `pi_claim` and `pi_release` can target a specific `repo`; if you lea
 default is used, while worker sessions always use their own repository.
 
 The locks are coordination protection, not a security sandbox. They cover recognizable literal
-targets; dynamic scripts, variables, command substitution and globs are not fully contained. Digest
+targets; dynamic scripts, variables, command substitution and globs are not fully contained.
+
+Verification commands can run in a Docker sandbox instead of the host (`PI_COFFEE_SANDBOX=docker`,
+`PI_COFFEE_SANDBOX_IMAGE`): each run gets a fresh container that mounts only the candidate at
+`/workspace`, receives only the env names in `PI_COFFEE_SANDBOX_ENV_ALLOW`, and is removed after the
+run or a timeout. A docker request fails closed when the daemon or image is unavailable — there is no
+host fallback. This isolates commands, not the daemon or its credentials: the model provider key still
+lives in the host process, and `--network none` means the sandboxed command has no provider access.
+
+Digest
 and scope checks block invalid results from integration but cannot undo arbitrary script writes.
 Untrusted workers require separate OS/container isolation, credential restrictions, and appropriate
 read-only acceptance mounts; that isolation is not provided by this release.
@@ -630,6 +639,11 @@ Everything is configured through environment variables.
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | Per-file budget inside a bundle; oversized logs keep a tail and are listed in `truncated`. |
 | `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | Default per-validator timeout (ms) when a validator does not set `timeoutMs`. |
 | `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | Overall budget (ms) for the whole validator chain. |
+| `PI_COFFEE_SANDBOX` | `worktree` | Execution backend: `worktree` (today's host behavior) or `docker`. |
+| `PI_COFFEE_SANDBOX_IMAGE` | *(empty)* | Required for `docker`: image containing bash and the project toolchain. |
+| `PI_COFFEE_SANDBOX_NETWORK` | `bridge` | Container network mode; `none` disables provider access. |
+| `PI_COFFEE_SANDBOX_ENV_ALLOW` | *(empty)* | Comma-separated host env names forwarded into containers (nothing else is passed). |
+| `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through

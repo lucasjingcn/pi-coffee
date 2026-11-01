@@ -14,7 +14,7 @@ export interface CandidateReview extends CandidateReviewInput {
 }
 
 /** Validate direct callers as well as MCP input and restored state. No semantic approval is inferred. */
-export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | "validation_paths" | "validators">): void {
+export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | "validation_paths" | "validators" | "isolation">): void {
   if (spec?.requirements !== undefined) {
     if (!Array.isArray(spec.requirements)) throw new Error("requirements must be an array");
     const ids = new Set<string>();
@@ -33,6 +33,9 @@ export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | 
     }
   }
   validateValidators(spec?.validators);
+  if (spec?.isolation !== undefined && spec.isolation !== "worktree" && spec.isolation !== "docker") {
+    throw new Error('spec.isolation must be "worktree" or "docker"');
+  }
 }
 
 const VALIDATOR_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;

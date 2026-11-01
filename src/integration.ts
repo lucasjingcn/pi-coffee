@@ -117,6 +117,8 @@ export interface IntegrationGateOptions {
   validatorTimeoutMs?: number;
   /** Overall budget across the whole chain. */
   verifyTimeoutMs?: number;
+  /** Current sandbox record (image digest may become available after a probe). */
+  sandbox?: () => import("./sandbox.js").SandboxRecord | undefined;
   now?: () => number;
 }
 
@@ -275,6 +277,7 @@ export class IntegrationGate {
           ...(failure !== undefined ? { failure } : {}),
           changedFiles,
           logs: { stdout: aggregateResult.stdout, stderr: aggregateResult.stderr, diff },
+          ...(this.options.sandbox?.() ? { sandbox: this.options.sandbox() } : {}),
           secretPolicy: this.options.secretPolicy,
           ...(this.options.maxFileBytes !== undefined ? { maxFileBytes: this.options.maxFileBytes } : {}),
           ...(this.options.maxTotalBytes !== undefined ? { maxTotalBytes: this.options.maxTotalBytes } : {}),

@@ -236,6 +236,15 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       fail(file, `${at}.handoff is invalid`);
   }
 
+  if (entry.sandbox !== undefined) {
+    const sandbox = entry.sandbox;
+    if (!isRecord(sandbox) || (sandbox.kind !== "worktree" && sandbox.kind !== "docker")
+      || (sandbox.image !== undefined && typeof sandbox.image !== "string")
+      || (sandbox.imageDigest !== undefined && typeof sandbox.imageDigest !== "string")
+      || (sandbox.network !== undefined && sandbox.network !== "bridge" && sandbox.network !== "none")) {
+      fail(file, `${at}.sandbox is invalid`);
+    }
+  }
   if (entry.spec !== undefined) {
     const spec = entry.spec;
     if (!isRecord(spec)) fail(file, `${at}.spec must be an object`);
@@ -266,6 +275,23 @@ function validateHistoryEntry(entry: unknown, index: number, file: string): Sess
       || !isRecord(proof.result) || typeof proof.result.stdout !== "string" || typeof proof.result.stderr !== "string"
       || typeof proof.result.timedOut !== "boolean" || !(proof.result.code === null || Number.isInteger(proof.result.code))) {
       fail(file, `${at}.verification is invalid`);
+    }
+    if (proof.evidence !== undefined) {
+      const evidence = proof.evidence;
+      if (!isRecord(evidence) || typeof evidence.dir !== "string"
+        || typeof evidence.manifestSha256 !== "string" || !/^[a-f0-9]{64}$/.test(evidence.manifestSha256)
+        || typeof evidence.files !== "number" || typeof evidence.bytes !== "number"
+        || !Array.isArray(evidence.truncated) || !evidence.truncated.every((v) => typeof v === "string")) {
+        fail(file, `${at}.verification.evidence is invalid`);
+      }
+    }
+    if (proof.validators !== undefined) {
+      if (!Array.isArray(proof.validators) || !proof.validators.every((run) =>
+        isRecord(run) && typeof run.id === "string" && typeof run.required === "boolean"
+        && typeof run.command === "string" && typeof run.timedOut === "boolean"
+        && typeof run.passed === "boolean" && (run.code === null || Number.isInteger(run.code)))) {
+        fail(file, `${at}.verification.validators is invalid`);
+      }
     }
     if ((proof.id !== undefined && (typeof proof.id !== "string" || !proof.id.trim()))
       || (proof.reviewContractHash !== undefined && (typeof proof.reviewContractHash !== "string" || !/^[a-f0-9]{64}$/.test(proof.reviewContractHash)))

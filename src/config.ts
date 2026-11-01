@@ -55,6 +55,16 @@ export interface Config {
   validatorTimeoutMs: number;
   /** Overall verification budget (ms) across the whole validator chain. */
   verifyTimeoutMs: number;
+  /** Default execution backend for workers and verification commands. */
+  sandbox: "worktree" | "docker";
+  /** Docker image used when the sandbox is docker (must contain bash and the project toolchain). */
+  sandboxImage: string;
+  /** Container network mode. `none` opts out of model/provider access. */
+  sandboxNetwork: "bridge" | "none";
+  /** Host environment variable names forwarded into sandbox containers. */
+  sandboxEnvAllow: string[];
+  /** Docker CLI path (fake binary in tests). */
+  dockerBin: string;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -166,6 +176,46 @@ function resolveSecretPolicy(overrides: Partial<Config>): SecretPolicy {
     invalid("secretPolicy", "PI_COFFEE_SECRET_POLICY", 'expected "reject" or "redact"');
   }
   return raw;
+}
+
+/** Sandbox backend: only `worktree` or `docker`. */
+function resolveSandbox(overrides: Partial<Config>): "worktree" | "docker" {
+  const override = overrides.sandbox;
+  if (override !== undefined && override !== "worktree" && override !== "docker") {
+    invalid("sandbox", "PI_COFFEE_SANDBOX", 'expected "worktree" or "docker"');
+  }
+  const raw = env("PI_COFFEE_SANDBOX") ?? "worktree";
+  if (raw !== "worktree" && raw !== "docker") invalid("sandbox", "PI_COFFEE_SANDBOX", 'expected "worktree" or "docker"');
+  return override ?? raw;
+}
+
+/** Container network mode: bridge (default) or none. */
+function resolveSandboxNetwork(overrides: Partial<Config>): "bridge" | "none" {
+  const override = overrides.sandboxNetwork;
+  if (override !== undefined && override !== "bridge" && override !== "none") {
+    invalid("sandboxNetwork", "PI_COFFEE_SANDBOX_NETWORK", 'expected "bridge" or "none"');
+  }
+  const raw = env("PI_COFFEE_SANDBOX_NETWORK") ?? "bridge";
+  if (raw !== "bridge" && raw !== "none") invalid("sandboxNetwork", "PI_COFFEE_SANDBOX_NETWORK", 'expected "bridge" or "none"');
+  return override ?? raw;
+}
+
+/** Comma-separated env-name allowlist (empty by default: forward nothing). */
+function resolveEnvAllow(overrides: Partial<Config>): string[] {
+  const override = overrides.sandboxEnvAllow;
+  if (override !== undefined) {
+    if (!Array.isArray(override) || override.some((value) => typeof value !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value))) {
+      invalid("sandboxEnvAllow", "PI_COFFEE_SANDBOX_ENV_ALLOW", "expected comma-separated environment variable names");
+    }
+    return [...new Set(override)];
+  }
+  const raw = env("PI_COFFEE_SANDBOX_ENV_ALLOW");
+  if (raw === undefined) return [];
+  const names = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+  for (const name of names) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) invalid("sandboxEnvAllow", "PI_COFFEE_SANDBOX_ENV_ALLOW", `invalid environment variable name: ${name}`);
+  }
+  return [...new Set(names)];
 }
 
 /** Plugin allowlist env var: comma-separated globs; `*` allows everything. */
@@ -295,12 +345,20 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       max: 3_600_000,
       description: "an integer between 1000 and 3600000",
     }),
+    sandbox: resolveSandbox(overrides),
+    sandboxImage: overrides.sandboxImage ?? env("PI_COFFEE_SANDBOX_IMAGE") ?? "",
+    sandboxNetwork: resolveSandboxNetwork(overrides),
+    sandboxEnvAllow: resolveEnvAllow(overrides),
+    dockerBin: overrides.dockerBin ?? env("PI_COFFEE_DOCKER_BIN") ?? "docker",
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),
   };
 
   if (base.workerStallMs <= base.workerWarnMs) invalid("workerStallMs", "PI_COFFEE_WORKER_STALL_MS", "must exceed workerWarnMs");
+  if (base.sandbox === "docker" && base.sandboxImage.trim() === "") {
+    invalid("sandboxImage", "PI_COFFEE_SANDBOX_IMAGE", "is required when PI_COFFEE_SANDBOX=docker");
+  }
   // Apply caller overrides last; undefined means "keep the default".
   const defined = Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined));
   return { ...base, ...defined };

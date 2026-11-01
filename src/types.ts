@@ -114,4 +114,6 @@ export interface DelegationSpec {
   validation_paths?: string[];
   /** Ordered verification chain; when present, `acceptance_command` must be omitted. */
   validators?: ValidatorSpec[];
+  /** Requested execution backend. The daemon config must allow it or the spawn is refused. */
+  isolation?: "worktree" | "docker";
 }

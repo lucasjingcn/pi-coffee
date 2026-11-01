@@ -23,6 +23,7 @@ import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
 import { AuditLog } from "./audit.js";
 import { applySecretPolicy } from "./secrets.js";
 import { evidenceDir, listEvidenceBundles, pruneEvidence, readEvidenceManifest, verifyEvidenceBundle } from "./evidence.js";
+import { DockerSandbox } from "./sandbox.js";
 import {
   commitAll,
   createWorktree,
@@ -262,6 +263,8 @@ export class Coordinator {
   readonly config: Config;
   /** Append-only, hash-chained record of coordinator actions. */
   readonly audit: AuditLog;
+  /** Docker sandbox backend when PI_COFFEE_SANDBOX=docker. */
+  private readonly sandbox?: DockerSandbox;
 
   private runtimes = new Map<string, Runtime>();
   private locks = new LockManager();
@@ -306,6 +309,13 @@ export class Coordinator {
     this.vault = new ControlVault(config.dataDir);
     this.store = new StateStore(join(config.dataDir, "state.json"));
     this.audit = new AuditLog({ dir: join(config.dataDir, "audit"), maxBytes: config.auditMaxMb * 1024 * 1024 });
+    if (config.sandbox === "docker") {
+      this.sandbox = new DockerSandbox(
+        { kind: "docker", image: config.sandboxImage, network: config.sandboxNetwork,
+          envAllow: config.sandboxEnvAllow, dockerBin: config.dockerBin },
+        (command, cwd, timeoutMs) => runCommand(command, cwd, timeoutMs),
+      );
+    }
     this.integrationGate = new IntegrationGate({
       dataDir: config.dataDir,
       secretPolicy: config.secretPolicy,
@@ -313,6 +323,7 @@ export class Coordinator {
       maxTotalBytes: config.evidenceMaxMb * 1024 * 1024,
       validatorTimeoutMs: config.validatorTimeoutMs,
       verifyTimeoutMs: config.verifyTimeoutMs,
+      sandbox: () => this.sandbox?.record(),
     });
   }
 
@@ -1324,6 +1335,17 @@ export class Coordinator {
     if (opts.spec?.validators?.length && opts.acceptanceCommand?.trim()) {
       throw new Error("pass spec.validators or acceptance_command, not both");
     }
+    const requestedIsolation = opts.spec?.isolation;
+    if (requestedIsolation === "docker" && this.config.sandbox !== "docker") {
+      throw new Error("sandbox isolation was requested but PI_COFFEE_SANDBOX=worktree; enable the docker sandbox or omit spec.isolation");
+    }
+    if (requestedIsolation === "worktree" && this.config.sandbox === "docker") {
+      throw new Error("daemon policy requires the docker sandbox; spec.isolation=worktree is not allowed");
+    }
+    if (this.sandbox) {
+      const probe = await this.sandbox.probe();
+      if (!probe.ok) throw new Error(`sandbox requested but docker is unavailable: ${probe.error ?? "unknown error"}`);
+    }
     // New work is refused while the daemon is draining for a restart. Checked
     // before the slot reservation so a rejected spawn leaves no reservation behind.
     this.assertNotDraining("spawn");
@@ -1441,6 +1463,7 @@ export class Coordinator {
         hashes: originalAcceptanceHashes,
       } : undefined,
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
+      ...(this.sandbox ? { sandbox: this.sandbox.record() } : {}),
       provider: opts.provider ?? this.config.provider,
       model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
@@ -2265,7 +2288,12 @@ export class Coordinator {
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
       const proof = await this.integrationGate.verify(rt.meta, into ?? await currentBranch(rt.meta.repo),
-        (cwd, command, validatorTimeout, env) => runCommand(command, cwd, validatorTimeout ?? timeoutMs, false, env),
+        (cwd, command, validatorTimeout, env) => {
+          const effectiveTimeout = validatorTimeout ?? timeoutMs;
+          return this.sandbox
+            ? this.sandbox.run(cwd, command, effectiveTimeout, env)
+            : runCommand(command, cwd, effectiveTimeout, false, env);
+        },
         timeoutMs);
       rt.meta.verification = proof;
       this.scheduleSave();
