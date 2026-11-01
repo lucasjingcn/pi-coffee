@@ -366,6 +366,10 @@ repositories retain their own rules.
 7. Close with `pi_finish`, which stops the worker, then inspect `pi_report` / `pi_metrics`.
    A successful outcome needs passing acceptance and, if code changed, an integration record.
    Check `inconsistent_outcomes` before citing recorded successes. Clean up with `pi_gc` when authorized.
+   For GitHub teams, `pi_pr` pushes the verified branch and opens a PR carrying the evidence summary;
+   `pi_merge` with `mode=merge-queue` queues it instead of merging locally. Both require
+   `PI_COFFEE_ALLOW_PUSH=1`; the merge-queue path does not write an integration record, so a later
+   verification of the merged commit is still required before a success outcome.
 
 Candidate review: declare hard requirements in `spec.requirements: [{id,text}]` and project-specific
 validation definitions in `spec.validation_paths` (for example `package.json` or CI scripts).
@@ -513,7 +517,8 @@ Set `PI_COFFEE_LOG_FORMAT=json` for one JSON object per stderr line (`ts`, `leve
 | `pi_verify` | Run the fixed acceptance command or the `spec.validators` chain (ordered, per-validator timeout, required/optional, artifact globs) against the exact worker + target candidate; record per-step exit codes, timeouts, output and commit/tree evidence, and write a durable evidence bundle (manifest + hashes + per-validator logs + artifacts + diff) under `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/`. The tool result carries the `evidence` reference. Failed, stale or restarted evidence cannot authorize integration. |
 | `pi_evidence` | `action: list\|get\|verify` (default `list`): inspect the durable bundle written by `pi_verify`; `verify` recomputes every file sha256 and reports mismatches. Read-only. |
 | `pi_review` | Record one evidence verdict per requirement and one approval reason per modified existing validation file, bound to the exact verification ID. Incomplete or stale reviews cannot authorize integration. |
-| `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. A changed source or target requires reverification. |
+| `pi_merge` | Merge only with current passing candidate evidence, valid scope/digests, and clean settled worker and target checkouts. `mode=merge-queue` instead queues the PR with the GitHub merge queue (requires `pi_pr` and `PI_COFFEE_ALLOW_PUSH=1`). A changed source or target requires reverification. |
+| `pi_pr` | Push the verified worker branch and create (or reuse) a GitHub PR whose body carries the verification id, candidate SHAs and evidence manifest hash. Requires `PI_COFFEE_ALLOW_PUSH=1` and current successful `pi_verify` evidence. Idempotent per branch. |
 | `pi_push` | Push the current branch (or an explicit one) to a remote. |
 | `pi_exec` | Run a non-login shell command in a worker worktree for diagnostics. This does not create merge evidence. |
 | `pi_answer` | Answer a worker's pending question with `confirmed`, `value`, or `cancelled`. |
@@ -660,6 +665,12 @@ Everything is configured through environment variables.
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI path (fake binary in tests). |
 | `PI_COFFEE_RUNNER` | `pi` | Default worker runner: `pi` (pinned CLI) or `acp` (Agent Client Protocol). |
 | `PI_COFFEE_ACP_COMMAND` | *(empty)* | ACP agent argv (JSON array or whitespace-separated); required when `PI_COFFEE_RUNNER=acp`. |
+| `PI_COFFEE_GH_BIN` | `gh` | GitHub CLI path for `pi_pr`. |
+| `PI_COFFEE_GH_REMOTE` | `origin` | Remote pushed by `pi_pr`. |
+| `PI_COFFEE_PR_LABEL` | `pi-coffee` | Label applied to created PRs. |
+| `PI_COFFEE_GH_TOKEN` | *(empty)* | Token passed to `gh` as `GH_TOKEN` (never argv). |
+| `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | Allow an ambient `GH_TOKEN` to reach `gh` when no explicit token is set. |
+| `PI_COFFEE_ALLOW_PUSH` | `0` | Explicit opt-in for `pi_pr` and merge-queue pushes. |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | File that `npm run start`, the Codex proxy, setup, and doctor read for daemon settings and credentials. |
 
 For unattended background installation, set `PI_COFFEE_SKIP_SETUP=1` and provide credentials through

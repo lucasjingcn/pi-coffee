@@ -447,7 +447,8 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_diff` | 某个 worker 分支的已提交、未提交和未跟踪改动。 |
 | `pi_commit` | 把 worker worktree 里的改动全部提交。 |
 | `pi_verify` | 对明确的 worker 与目标候选运行固定验收，或运行 `spec.validators` 验证器链（按顺序、可配单个超时、required/optional、artifact glob），保存每一步的退出码、超时、输出和提交/候选树证据，并在 `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/` 写可归档证据包（manifest + 哈希 + 每步日志 + artifacts + diff）。返回结果带 `evidence` 引用；失败、过时或重启前的证据不授权集成。 |
-| `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；来源或目标变化须重验。 |
+| `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；`mode=merge-queue` 改为交给 GitHub merge queue（需要先 `pi_pr` 且 `PI_COFFEE_ALLOW_PUSH=1`）。来源或目标变化须重验。 |
+| `pi_pr` | 推送已验证的 worker 分支并创建（或复用）GitHub PR，正文带 verification id、候选 SHA 和证据包 manifest 哈希；需要 `PI_COFFEE_ALLOW_PUSH=1` 和当前成功的 `pi_verify` 证据，按分支幂等。 |
 | `pi_push` | 把当前分支（或指定分支）推到远端。 |
 | `pi_exec` | 在 worker worktree 用非登录 shell 运行诊断命令；不会产生合并验收证据。 |
 | `pi_answer` | 回答 worker 的待处理问题，用 `confirmed`、`value` 或 `cancelled`。 |
@@ -570,6 +571,12 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_DOCKER_BIN` | `docker` | Docker CLI 路径（测试里用 fake binary）。 |
 | `PI_COFFEE_RUNNER` | `pi` | 默认 worker runner：`pi`（固定 CLI）或 `acp`（Agent Client Protocol）。 |
 | `PI_COFFEE_ACP_COMMAND` | *(空)* | ACP agent argv（JSON 数组或空格分隔）；`PI_COFFEE_RUNNER=acp` 时必填。 |
+| `PI_COFFEE_GH_BIN` | `gh` | `pi_pr` 用的 GitHub CLI 路径。 |
+| `PI_COFFEE_GH_REMOTE` | `origin` | `pi_pr` 推送的远端。 |
+| `PI_COFFEE_PR_LABEL` | `pi-coffee` | 新建 PR 的标签。 |
+| `PI_COFFEE_GH_TOKEN` | *(空)* | 以 `GH_TOKEN` 传给 gh（不走 argv）。 |
+| `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | 没有显式 token 时是否允许环境里的 `GH_TOKEN` 传给 gh。 |
+| `PI_COFFEE_ALLOW_PUSH` | `0` | `pi_pr` 与 merge-queue 推送的显式开关。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。

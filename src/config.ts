@@ -69,6 +69,18 @@ export interface Config {
   runner: "pi" | "acp";
   /** ACP agent argv used when runner=acp (or when a spec selects ACP without a command). */
   acpCommand: string[];
+  /** GitHub CLI path used by pi_pr / merge-queue mode. */
+  ghBin: string;
+  /** Remote pushed by pi_pr. */
+  ghRemote: string;
+  /** Label applied to created PRs. */
+  prLabel: string;
+  /** Optional token passed to gh as GH_TOKEN (never argv). */
+  ghToken: string;
+  /** Allow an ambient GH_TOKEN to reach the gh child when no explicit token is set. */
+  ghAllowEnvToken: boolean;
+  /** Explicit opt-in for pi_pr / merge-queue push operations. */
+  allowPush: boolean;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -148,7 +160,7 @@ function resolveNumber(
 /** Boolean env vars accept only "0"/"1"; overrides must be real booleans. */
 function resolveBoolean(
   overrides: Partial<Config>,
-  field: "autoClean" | "deleteBranches" | "recoverOnStartup",
+  field: "autoClean" | "deleteBranches" | "recoverOnStartup" | "ghAllowEnvToken" | "allowPush",
   key: string,
   fallback: boolean,
 ): boolean {
@@ -391,6 +403,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     dockerBin: overrides.dockerBin ?? env("PI_COFFEE_DOCKER_BIN") ?? "docker",
     runner: resolveRunner(overrides),
     acpCommand: resolveAcpCommand(overrides),
+    ghBin: overrides.ghBin ?? env("PI_COFFEE_GH_BIN") ?? "gh",
+    ghRemote: overrides.ghRemote ?? env("PI_COFFEE_GH_REMOTE") ?? "origin",
+    prLabel: overrides.prLabel ?? env("PI_COFFEE_PR_LABEL") ?? "pi-coffee",
+    ghToken: overrides.ghToken ?? env("PI_COFFEE_GH_TOKEN") ?? "",
+    ghAllowEnvToken: resolveBoolean(overrides, "ghAllowEnvToken", "PI_COFFEE_GH_ALLOW_ENV_TOKEN", false),
+    allowPush: resolveBoolean(overrides, "allowPush", "PI_COFFEE_ALLOW_PUSH", false),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),
     workerPlugins: resolvePlugins(overrides, "workerPlugins", "PI_COFFEE_WORKER_PLUGINS", []),

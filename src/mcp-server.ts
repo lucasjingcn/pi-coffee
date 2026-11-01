@@ -723,11 +723,34 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
         control_key: z.string().optional(),
         into: z.string().optional().describe("Target branch in the main repo (default: current)"),
         no_ff: z.boolean().optional(),
+        mode: z.enum(["local", "merge-queue"]).optional().describe("local (default) merges locally; merge-queue queues the PR with the GitHub merge queue"),
       },
     },
-    async ({ session_id, control_key, into, no_ff }) => {
+    async ({ session_id, control_key, into, no_ff, mode }) => {
       coord.assertControl(session_id, control_key);
+      if (mode === "merge-queue") return json(await coord.mergeViaQueue(session_id, into));
       return json(await coord.merge(session_id, into, no_ff ?? true));
+    },
+  );
+
+  server.registerTool(
+    "pi_pr",
+    {
+      title: "Create a pull request",
+      description: "Push the verified worker branch and create (or reuse) a GitHub PR whose body carries the verification id, candidate SHAs and evidence manifest hash. Requires PI_COFFEE_ALLOW_PUSH=1 and current successful pi_verify evidence.",
+      annotations: { readOnlyHint: false, idempotentHint: true },
+      inputSchema: {
+        session_id: z.string(),
+        control_key: z.string().optional(),
+        base: z.string().optional().describe("Target branch (default: the verification target)"),
+        title: z.string().optional(),
+        body: z.string().optional().describe("Override the generated evidence summary"),
+        label: z.string().optional(),
+      },
+    },
+    async ({ session_id, control_key, base, title, body, label }) => {
+      coord.assertControl(session_id, control_key);
+      return json(await coord.createPr(session_id, { base, title, body, label }));
     },
   );
 

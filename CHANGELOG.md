@@ -30,6 +30,10 @@ All notable changes to pi-coffee are recorded here. The format follows
   budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
   `acceptance_command` remains the single-validator default and cannot be combined with
   `spec.validators`; validator env values are checked for secrets before they are persisted.
+- GitHub integration: `pi_pr` pushes a verified branch and creates (or reuses) a PR whose body carries
+  the verification id, candidate SHAs and evidence manifest hash; `pi_merge mode=merge-queue` queues it
+  with the GitHub merge queue. Both require `PI_COFFEE_ALLOW_PUSH=1`; tokens travel only through the
+  child environment (`PI_COFFEE_GH_TOKEN` / explicit `PI_COFFEE_GH_ALLOW_ENV_TOKEN`).
 - Pluggable worker runners: `PI_COFFEE_RUNNER=acp` / `spec.runner` drives an ACP v1 agent over stdio
   with the same lifecycle surface as pi (prompt, events, permissions, stop), a raw
   `sessions/<id>/acp.jsonl` transcript, and explicit non-goals (no model overrides, no resume, no

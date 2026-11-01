@@ -137,10 +137,15 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(runner): pluggable runners with ACP support`.
 
 ### M10 — PR creation and merge-queue mode · M
-- `src/gh.ts` thin wrapper (argv capture, JSON parse, error mapping); `pi_pr` tool; `pi_merge`
-  `mode: "merge-queue"`; push authorization `PI_COFFEE_ALLOW_PUSH`; audit entries.
-- `tests/fake-gh` + `tests/pr.test.mjs` (create, idempotent existing PR, failure modes).
-- Acceptance: `node --test tests/pr.test.mjs`.
+- `src/gh.ts`: injected runner, JSON parsing, error mapping, `findPr`/`createPr`/`queueMerge`;
+  tokens only via child env (dynamic env resolver honours `PI_COFFEE_GH_TOKEN` /
+  `PI_COFFEE_GH_ALLOW_ENV_TOKEN`).
+- Manager `createPr` (`pi_pr`) requires `PI_COFFEE_ALLOW_PUSH=1` plus current verification/review
+  evidence, pushes the branch, reuses an existing PR, embeds verification id/SHAs/evidence manifest
+  hash, records `meta.pr` and an audit entry. `mergeViaQueue` queues the PR via the merge queue and
+  deliberately does not write an integration record.
+- Acceptance: `node --test tests/pr.test.mjs` (push+body, idempotency, merge-queue argv, allow-push
+  refusal, gh failure); full suite.
 - Commit: `feat(integration): PR creation and merge-queue mode`.
 
 ### M11 — Dashboard actions · M
@@ -301,3 +306,5 @@ Run each item against the final branch. Record evidence (command + output) in th
   stale-container cleanup, stop/startup-failure/recovery removal); 4 new tests; full suite 410/410.
 - **M9 complete** — 2026-11-01: pluggable runner interface + ACP v1 client (stdio JSON-RPC, events,
   permissions, transcript), spec/config selection, explicit non-goals; 4 new tests; full suite 414/414.
+- **M10 complete** — 2026-11-01: GitHub PR/merge-queue integration (`pi_pr`, `pi_merge mode`), push
+  authorization and token environment rules; 4 new tests; full suite 418/418.
