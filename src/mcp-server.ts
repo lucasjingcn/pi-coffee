@@ -208,6 +208,15 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
               .describe("Coordinator-authored hard requirements with unique IDs; each needs met=true and evidence in pi_review before merge."),
             validation_paths: z.array(z.string()).optional()
               .describe("Additional worktree-relative validation files/directories; edits to existing definitions need per-file pi_review approval."),
+            validators: z.array(z.object({
+              id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).describe("Unique id; also the evidence folder name"),
+              command: z.string().min(1).max(8192),
+              required: z.boolean().optional().describe("Default true: a failure blocks integration"),
+              timeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
+              artifacts: z.array(z.string()).max(32).optional().describe("Worktree-relative glob patterns copied into the evidence bundle"),
+              env: z.record(z.string(), z.string()).optional().describe("Non-secret environment values for this validator only"),
+            })).max(16).optional()
+              .describe("Ordered verification chain run in the merged candidate. When present, omit acceptance_command."),
           })
           .optional()
           .describe("Structured task contract. Required: goal, scope. Rendered into the worker prompt."),
@@ -222,7 +231,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
           .describe(
             "Coordinator-authored acceptance files written before startup. Advisory locks plus content hashes protect integration; this is not an OS sandbox.",
           ),
-        acceptance_command: z.string().optional().describe("Fixed acceptance command executed by pi_verify against the merged candidate; required for verification/integration"),
+        acceptance_command: z.string().optional().describe("Fixed acceptance command executed by pi_verify against the merged candidate; required for verification/integration unless spec.validators is provided"),
       },
     },
     async (args) => {
@@ -646,7 +655,7 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     "pi_verify",
     {
       title: "Verify the exact integration candidate",
-      description: "Execute the registered acceptance command in an isolated merged candidate. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
+      description: "Execute the registered acceptance command or validator chain in an isolated merged candidate, then write a durable evidence bundle (manifest + logs + diff) and return its reference. Requires settled worker, committed scoped changes, unchanged acceptance files and clean checked-out target. Worker/target changes or restart invalidate evidence; pi_exec is not verification.",
       annotations: { readOnlyHint: false, idempotentHint: false },
       inputSchema: { session_id: z.string(), control_key: z.string().optional(), into: z.string().optional(), timeout_ms: z.number().int().min(1000).max(1_800_000).optional() },
     },

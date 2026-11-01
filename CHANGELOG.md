@@ -25,6 +25,11 @@ All notable changes to pi-coffee are recorded here. The format follows
   `pi_verify` returns an `evidence` reference, and oversized logs keep a tail recorded in `truncated`.
   Retention is configured with `PI_COFFEE_EVIDENCE_TTL_DAYS`, `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION`,
   `PI_COFFEE_EVIDENCE_MAX_MB` and `PI_COFFEE_EVIDENCE_MAX_FILE_MB`.
+- Validator chains: `spec.validators` runs an ordered list of commands in the merged candidate with
+  per-validator timeouts (`PI_COFFEE_VALIDATOR_TIMEOUT_MS`), required/optional semantics, an overall
+  budget (`PI_COFFEE_VERIFY_TIMEOUT_MS`) and artifact globs captured into the evidence bundle.
+  `acceptance_command` remains the single-validator default and cannot be combined with
+  `spec.validators`; validator env values are checked for secrets before they are persisted.
 
 ### Security
 

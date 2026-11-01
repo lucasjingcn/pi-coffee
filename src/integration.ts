@@ -8,8 +8,9 @@ import { currentBranch, git, isWorktreeClean, resolveRef, worktreeDiff } from ".
 import { existingValidationChanges } from "./validation-changes.js";
 import { reviewContractHash, validateCandidateReview, validateReviewSpec, type CandidateReview } from "./candidate-review.js";
 import type { DelegationSpec } from "./types.js";
-import { writeEvidenceBundle, type EvidenceRef, type EvidenceValidatorResult } from "./evidence.js";
+import { collectArtifacts, matchesArtifactPatterns, writeEvidenceBundle, type EvidenceArtifact, type EvidenceRef, type EvidenceValidatorResult } from "./evidence.js";
 import type { SecretPolicy } from "./secrets.js";
+import type { ValidatorSpec } from "./types.js";
 
 export interface Verification {
   id: string;
@@ -21,6 +22,8 @@ export interface Verification {
   targetBranch: string;
   candidateTree: string;
   command: string;
+  /** Per-validator records when a chain ran; omitted on legacy single-command records. */
+  validators?: ValidatorResult[];
   verifiedAt: number;
   passed: boolean;
   failure?: string;
@@ -49,7 +52,7 @@ export interface VerifiableSession {
   branch: string;
   baseRef: string;
   status: string;
-  spec?: Pick<DelegationSpec, "scope" | "requirements" | "validation_paths">;
+  spec?: Pick<DelegationSpec, "scope" | "requirements" | "validation_paths" | "validators">;
   acceptance?: { files: string[]; command?: string; hashes?: Record<string, string> };
   verification?: Verification;
   integration?: IntegrationRecord;
@@ -110,7 +113,47 @@ export interface IntegrationGateOptions {
   secretPolicy?: SecretPolicy;
   maxFileBytes?: number;
   maxTotalBytes?: number;
+  /** Default per-validator timeout when a validator does not set one. */
+  validatorTimeoutMs?: number;
+  /** Overall budget across the whole chain. */
+  verifyTimeoutMs?: number;
   now?: () => number;
+}
+
+export interface ValidatorResult {
+  id: string;
+  required: boolean;
+  command: string;
+  code: number | null;
+  timedOut: boolean;
+  passed: boolean;
+}
+
+interface ValidatorRun extends ValidatorResult {
+  stdout: string;
+  stderr: string;
+}
+
+export interface ResolvedValidator extends ValidatorSpec {
+  required: boolean;
+  artifacts: string[];
+}
+
+/** Effective chain: explicit spec.validators, else the single acceptance command. */
+export function resolveValidators(meta: VerifiableSession): ResolvedValidator[] {
+  const specs = meta.spec?.validators ?? [];
+  if (specs.length > 0) {
+    return specs.map((validator) => ({
+      ...validator,
+      required: validator.required !== false,
+      artifacts: validator.artifacts ?? [],
+    }));
+  }
+  return [{ id: "acceptance", command: meta.acceptance?.command ?? "", required: true, artifacts: [] }];
+}
+
+export function aggregateCommand(validators: ResolvedValidator[]): string {
+  return validators.map((validator) => validator.command).join("\n---\n");
 }
 
 export class IntegrationGate {
@@ -124,10 +167,14 @@ export class IntegrationGate {
   async verify(
     meta: VerifiableSession,
     branch: string,
-    execute: (cwd: string, command: string) => Promise<Verification["result"]>,
+    execute: (cwd: string, command: string, timeoutMs?: number, env?: Record<string, string>) => Promise<Verification["result"]>,
+    budgetMs?: number,
   ): Promise<Verification> {
     if (meta.status !== "idle" && meta.status !== "stopped") throw new Error("worker must be settled before verification");
-    if (!meta.acceptance?.command?.trim()) throw new Error("acceptance_command is required for verification and integration");
+    const validators = resolveValidators(meta);
+    if (validators.length === 0 || validators.some((validator) => !validator.command.trim())) {
+      throw new Error("acceptance_command or a non-empty validator chain is required for verification and integration");
+    }
     if (!meta.spec?.scope.length) throw new Error("declared scope is required for verification and integration");
     validateReviewSpec(meta.spec);
     const contractHash = reviewContractHash(meta);
@@ -150,32 +197,68 @@ export class IntegrationGate {
       if (existsSync(resolve(candidate, await git(candidate, ["rev-parse", "--git-path", "MERGE_HEAD"])))) {
         await git(candidate, ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-m", "pi-coffee verification candidate"]);
       }
-      const result = await execute(candidate, meta.acceptance.command);
-      const hashes = await acceptanceHashes(candidate, meta.acceptance.files);
-      const clean = await isWorktreeClean(candidate);
-      const intact = JSON.stringify(hashes) === JSON.stringify(meta.acceptance.hashes ?? {});
-      const failure = result.timedOut ? "acceptance command timed out" : result.code !== 0 ? "acceptance command failed"
-        : !clean ? "acceptance command modified the candidate worktree" : !intact ? "acceptance files changed in candidate" : undefined;
+      const verificationStartedAt = Date.now();
+      const configuredBudget = this.options.verifyTimeoutMs ?? 900_000;
+      const verifyBudgetMs = budgetMs !== undefined ? Math.min(configuredBudget, Math.max(1, budgetMs)) : configuredBudget;
+      const defaultValidatorTimeoutMs = this.options.validatorTimeoutMs ?? 600_000;
+      const runs: ValidatorRun[] = [];
+      for (const validator of validators) {
+        const remaining = verifyBudgetMs - (Date.now() - verificationStartedAt);
+        if (remaining <= 0) {
+          runs.push({ id: validator.id, required: validator.required, command: validator.command,
+            code: null, timedOut: true, passed: false, stdout: "", stderr: "" });
+          continue;
+        }
+        const timeout = Math.max(1, Math.min(validator.timeoutMs ?? defaultValidatorTimeoutMs, remaining));
+        const runResult = await execute(candidate, validator.command, timeout, validator.env);
+        runs.push({ id: validator.id, required: validator.required, command: validator.command,
+          ...runResult, passed: !runResult.timedOut && runResult.code === 0 });
+      }
+      const acceptanceFiles = meta.acceptance?.files ?? [];
+      const hashes = await acceptanceHashes(candidate, acceptanceFiles);
+      const clean = await isCandidateClean(candidate, validators);
+      const intact = JSON.stringify(hashes) === JSON.stringify(meta.acceptance?.hashes ?? {});
+      const requiredFailure = runs.find((run) => run.required && !run.passed);
+      const legacySingle = validators.length === 1 && validators[0].id === "acceptance";
+      const failure = requiredFailure
+        ? (legacySingle
+            ? `acceptance command ${requiredFailure.timedOut ? "timed out" : "failed"}`
+            : `validator ${requiredFailure.id} ${requiredFailure.timedOut ? "timed out" : "failed"}`)
+        : !clean ? (legacySingle ? "acceptance command modified the candidate worktree" : "verification modified the candidate worktree")
+        : !intact ? "acceptance files changed in candidate" : undefined;
       const passed = failure === undefined;
       if (workerSha !== await resolveRef(meta.worktree, "HEAD") || targetSha !== await assertTarget(meta.repo, branch)
         || !(await isWorktreeClean(meta.worktree))) throw new Error("worker or target changed during verification");
       await checkChanges(meta);
       if (contractHash !== reviewContractHash(meta)) throw new Error("task contract changed during verification");
       const id = randomUUID();
-      const validators: EvidenceValidatorResult[] = [{
-        id: "acceptance",
-        required: true,
-        command: meta.acceptance.command,
-        code: result.code,
-        timedOut: result.timedOut,
-        passed,
-      }];
+      const aggregate = requiredFailure ?? runs[runs.length - 1];
+      const aggregateResult: Verification["result"] = {
+        code: aggregate.code, stdout: aggregate.stdout, stderr: aggregate.stderr, timedOut: aggregate.timedOut,
+      };
+      const validatorResults: ValidatorResult[] = runs.map((run) => ({
+        id: run.id, required: run.required, command: run.command,
+        code: run.code, timedOut: run.timedOut, passed: run.passed,
+      }));
       let evidence: EvidenceRef | undefined;
       const dataDir = this.options.dataDir;
       if (dataDir && meta.id) {
         // One git call: the worktree is clean at this point, so a plain diff against
         // the spawn base captures the whole reviewed change set as a patch.
         const diff = await git(meta.worktree, ["diff", meta.baseRef]);
+        const artifacts: EvidenceArtifact[] = [];
+        for (const validator of validators) {
+          if (!validator.artifacts.length) continue;
+          artifacts.push(...await collectArtifacts(candidate, validator.id, validator.artifacts, {
+            maxFiles: 50,
+            maxFileBytes: Math.min(this.options.maxFileBytes ?? 8 * 1024 * 1024, 8 * 1024 * 1024),
+            maxTotalBytes: 16 * 1024 * 1024,
+          }));
+        }
+        const evidenceValidators: EvidenceValidatorResult[] = runs.map((run) => ({
+          id: run.id, required: run.required, command: run.command, code: run.code,
+          timedOut: run.timedOut, passed: run.passed, stdout: run.stdout, stderr: run.stderr,
+        }));
         evidence = await writeEvidenceBundle(dataDir, {
           sessionId: meta.id,
           verificationId: id,
@@ -185,12 +268,13 @@ export class IntegrationGate {
           targetBranch: branch,
           candidateTree,
           baseRef: meta.baseRef,
-          command: meta.acceptance.command,
-          validators,
+          command: aggregateCommand(validators),
+          validators: evidenceValidators,
+          artifacts,
           passed,
           ...(failure !== undefined ? { failure } : {}),
           changedFiles,
-          logs: { stdout: result.stdout, stderr: result.stderr, diff },
+          logs: { stdout: aggregateResult.stdout, stderr: aggregateResult.stderr, diff },
           secretPolicy: this.options.secretPolicy,
           ...(this.options.maxFileBytes !== undefined ? { maxFileBytes: this.options.maxFileBytes } : {}),
           ...(this.options.maxTotalBytes !== undefined ? { maxTotalBytes: this.options.maxTotalBytes } : {}),
@@ -198,10 +282,10 @@ export class IntegrationGate {
         });
       }
       return { id, epoch: this.epoch, workerSha, targetSha, targetBranch: branch, candidateTree,
-        command: meta.acceptance.command, verifiedAt: Date.now(), passed, failure, changedFiles,
-        existingValidationChanges: validationChanges, reviewContractHash: contractHash,
-        ...(evidence ? { evidence } : {}),
-        codeChanged: changedFiles.some((file) => !meta.acceptance!.files.includes(file)), result };
+        command: aggregateCommand(validators), validators: validatorResults, verifiedAt: Date.now(),
+        passed, failure, changedFiles, existingValidationChanges: validationChanges,
+        reviewContractHash: contractHash, ...(evidence ? { evidence } : {}),
+        codeChanged: changedFiles.some((file) => !acceptanceFiles.includes(file)), result: aggregateResult };
     } finally {
       if (added) await git(meta.repo, ["worktree", "remove", "--force", candidate]);
       await rm(temp, { recursive: true, force: true });
@@ -215,7 +299,7 @@ export class IntegrationGate {
     }
     if (meta.status !== "idle" && meta.status !== "stopped") throw new Error("worker is still working");
     if (proof.reviewContractHash !== reviewContractHash(meta)) throw new Error("task contract changed since verification; run pi_verify again");
-    if (proof.command !== meta.acceptance?.command || !(await isWorktreeClean(meta.worktree))
+    if (proof.command !== aggregateCommand(resolveValidators(meta)) || !(await isWorktreeClean(meta.worktree))
       || proof.workerSha !== await resolveRef(meta.worktree, "HEAD")
       || proof.workerSha !== await resolveRef(meta.repo, `refs/heads/${meta.branch}`)) {
       throw new Error("worker changed since verification; run pi_verify again");
@@ -233,4 +317,22 @@ export class IntegrationGate {
     }
     return proof;
   }
+}
+
+/**
+ * A candidate is clean for verification purposes when the only differences are
+ * files matched by the declared artifact globs (test reports, coverage output).
+ * Any tracked edit or unexplained untracked file still fails verification.
+ */
+async function isCandidateClean(dir: string, validators: ResolvedValidator[]): Promise<boolean> {
+  if (await isWorktreeClean(dir)) return true;
+  const patterns = validators.flatMap((validator) => validator.artifacts);
+  if (patterns.length === 0) return false;
+  const status = await git(dir, ["status", "--porcelain", "--untracked-files=all"]);
+  const paths = status.split("\n").filter(Boolean).map((line) => {
+    const raw = line.slice(3).trim();
+    const arrow = raw.lastIndexOf(" -> ");
+    return arrow >= 0 ? raw.slice(arrow + 4) : raw;
+  });
+  return paths.length > 0 && paths.every((path) => matchesArtifactPatterns(path, patterns));
 }

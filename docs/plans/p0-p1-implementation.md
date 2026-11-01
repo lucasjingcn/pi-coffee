@@ -75,12 +75,16 @@ is green. `Size` is a rough relative estimate (S ≤ half day, M ≤ 1 day, L 1�
 - Commit: `feat(verify): durable evidence bundles`.
 
 ### M5 — Validator chain · M
-- `DelegationSpec.validators`, spawn validation (unique ids, no ambiguity with `acceptance_command`,
-  cap 16), sequential execution with per-validator artifacts and timeout budget.
-- Verification result carries per-validator records; aggregate result backward compatible.
-- Evidence bundle stores `validators/<id>/...` + `artifacts/`.
-- Acceptance: `node --test tests/validators.test.mjs` incl. ordering, required/optional, timeout,
-  artifact capture, legacy single-command equivalence test.
+- `DelegationSpec.validators` (`id`, `command`, `required`, `timeoutMs`, `artifacts`, `env`) with
+  validation: unique ids, regex, 16-entry cap, timeout range, relative artifact globs, non-secret env.
+  `acceptance_command` is the single-validator default and may not be combined with validators.
+- `IntegrationGate` resolves the effective chain, runs it sequentially with per-step and overall
+  budgets (the `pi_verify` timeout argument bounds the chain), records every step, continues after a
+  failure, and keeps legacy failure text for the single `acceptance` validator.
+- Evidence stores `validators/<id>/{stdout,stderr,result.json}` and `artifacts/<id>/...`; declared
+  artifact outputs are tolerated by the candidate cleanliness check, other writes still fail it.
+- Acceptance: `node --test tests/validators.test.mjs` (ordering, optional failure, required failure,
+  timeout kill, artifact capture, spawn ambiguity, spec validation, contract invalidation).
 - Commit: `feat(verify): validator chain with per-validator evidence`.
 
 ### M6 — Evidence retention + `pi_evidence` tool + merge gate · S–M
@@ -266,3 +270,6 @@ Run each item against the final branch. Record evidence (command + output) in th
   bundle, config keys and README rows, 8 new tests; load-sensitive RPC/smoke test bounds hardened
   (baseline `main` also flakes under this host's load, verified separately); full suite 389/389
   three consecutive runs.
+- **M5 complete** — 2026-11-01: validator chain (`spec.validators`) with per-step/overall budgets,
+  artifact capture, legacy compatibility and spec validation; 8 new tests; test-file concurrency
+  lowered to 2 to keep host-loaded runs stable; full suite 397/397 three consecutive runs.

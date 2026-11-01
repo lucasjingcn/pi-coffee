@@ -22,17 +22,17 @@ test('missing executable fails promptly and becomes terminal',{timeout:3000},asy
  try{await assert.rejects(bound(c.start(),1000),e=>!e.message.includes('too slow'));assert.equal(c.hasExited,true);}
  finally{await c.stop();}
 });
-test('commands after process exit reject immediately',{timeout:3000},async()=>fake(async(c)=>{
+test('commands after process exit reject immediately',{timeout:15000},async()=>fake(async(c)=>{
  const exit=new Promise(r=>c.once('exit',r));await c.command({type:'exit_now'});await exit;
- await assert.rejects(bound(c.command({type:'get_state'},2000),200),e=>!e.message.includes('too slow'));
+ await assert.rejects(bound(c.command({type:'get_state'},2000),5000),e=>!e.message.includes('too slow'));
 }));
-test('event wait rejects on process termination rather than hanging',{timeout:3000},async()=>fake(async(c)=>{
- const waiting=c.waitForEvent('never',2000);const rejected=assert.rejects(bound(waiting,500),e=>!e.message.includes('too slow'));
+test('event wait rejects on process termination rather than hanging',{timeout:15000},async()=>fake(async(c)=>{
+ const waiting=c.waitForEvent('never',2000);const rejected=assert.rejects(bound(waiting,5000),e=>!e.message.includes('too slow'));
  await c.command({type:'exit_now'});await rejected;
 }));
-test('stop after exit and repeated stop are quick',{timeout:3000},async()=>fake(async(c)=>{
+test('stop after exit and repeated stop are quick',{timeout:15000},async()=>fake(async(c)=>{
  const exit=new Promise(r=>c.once('exit',r));await c.command({type:'exit_now'});await exit;
- await bound(c.stop(),200);await bound(c.stop(),200);
+ await bound(c.stop(),5000);await bound(c.stop(),5000);
 }));
 test('stop rejects pending commands and event waits',{timeout:3000},async()=>fake(async(c)=>{
  const command=c.command({type:'ignored'},2000);

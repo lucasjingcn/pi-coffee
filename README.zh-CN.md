@@ -437,7 +437,7 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 | `pi_tail` | 增量读会话记录，把上次的 `lastEntryId` 作为 `since` 传进去。 |
 | `pi_diff` | 某个 worker 分支的已提交、未提交和未跟踪改动。 |
 | `pi_commit` | 把 worker worktree 里的改动全部提交。 |
-| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，保存退出码、超时、输出和提交/候选树证据，并在 `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/` 写一份可归档的证据包（manifest + 哈希 + 日志 + diff）。返回结果带 `evidence` 引用（manifest sha256、文件数、字节数）；失败、过时或重启前的证据不授权集成。 |
+| `pi_verify` | 对明确的 worker 与目标候选运行固定验收，或运行 `spec.validators` 验证器链（按顺序、可配单个超时、required/optional、artifact glob），保存每一步的退出码、超时、输出和提交/候选树证据，并在 `<PI_COFFEE_DATA_DIR>/evidence/<session>/<verification>/` 写可归档证据包（manifest + 哈希 + 每步日志 + artifacts + diff）。返回结果带 `evidence` 引用；失败、过时或重启前的证据不授权集成。 |
 | `pi_merge` | 仅在当前候选验收通过、范围与摘要有效、worker 已停止工作且双方工作树干净时合并；来源或目标变化须重验。 |
 | `pi_push` | 把当前分支（或指定分支）推到远端。 |
 | `pi_exec` | 在 worker worktree 用非登录 shell 运行诊断命令；不会产生合并验收证据。 |
@@ -544,6 +544,8 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_EVIDENCE_KEEP_PER_SESSION` | `10` | 每个会话至少保留的最新证据包数量。 |
 | `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | 单个证据包总大小上限（MiB）。 |
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | 包内单文件上限（MiB）；超长日志保留尾部并记入 `truncated`。 |
+| `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | 验证器未写 `timeoutMs` 时的默认单步超时（毫秒）。 |
+| `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | 整条验证器链的总预算（毫秒）。 |
 | `PI_COFFEE_ENV_FILE` | `~/.pi-coffee/env` | `npm run start`、Codex 代理、setup 和 doctor 共用的配置及凭据文件。 |
 
 无人值守后台安装时设置 `PI_COFFEE_SKIP_SETUP=1`，并通过私有 env 文件或 pi auth.json 提供凭据。后台服务不会继承临时 shell 凭据；`doctor --background` 会检查持久化凭据，通过后才会安装后台启动。

@@ -76,6 +76,22 @@ export type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design
 export const WORKSTREAM_PURPOSES = ["implementation", "review", "investigation"] as const;
 export type WorkstreamPurpose = typeof WORKSTREAM_PURPOSES[number];
 
+/** One command in the verification chain, run sequentially in the merged candidate. */
+export interface ValidatorSpec {
+  /** Unique, stable id: lower-case letters/digits, `_` or `-`, max 64. Used for evidence folders. */
+  id: string;
+  /** Shell command executed in the candidate worktree. */
+  command: string;
+  /** A required failure blocks integration (default true). */
+  required?: boolean;
+  /** Per-validator timeout; defaults to PI_COFFEE_VALIDATOR_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** Worktree-relative glob patterns copied into the evidence bundle after the run. */
+  artifacts?: string[];
+  /** Extra environment variables for this validator only (non-secret values). */
+  env?: Record<string, string>;
+}
+
 /** Structured delegation contract the coordinator hands to a worker. */
 export interface DelegationSpec {
   /** One unambiguous sentence: what must be true when done. */
@@ -96,4 +112,6 @@ export interface DelegationSpec {
   requirements?: { id: string; text: string }[];
   /** Additional project validation definitions requiring review if existing bytes change. */
   validation_paths?: string[];
+  /** Ordered verification chain; when present, `acceptance_command` must be omitted. */
+  validators?: ValidatorSpec[];
 }

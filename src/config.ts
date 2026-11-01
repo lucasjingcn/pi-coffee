@@ -51,6 +51,10 @@ export interface Config {
   evidenceMaxMb: number;
   /** Per-file size budget inside an evidence bundle (MiB; oversized logs keep a tail). */
   evidenceMaxFileMb: number;
+  /** Default per-validator timeout (ms) when a validator does not set one. */
+  validatorTimeoutMs: number;
+  /** Overall verification budget (ms) across the whole validator chain. */
+  verifyTimeoutMs: number;
   /** Also delete the worker branch during cleanup (default false: keep branches so work is never lost). */
   deleteBranches: boolean;
   /**
@@ -108,7 +112,7 @@ function validateNumber(field: string, key: string, value: number, rules: Number
  */
 function resolveNumber(
   overrides: Partial<Config>,
-  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs" | "auditMaxMb" | "evidenceTtlDays" | "evidenceKeepPerSession" | "evidenceMaxMb" | "evidenceMaxFileMb",
+  field: "port" | "maxSessions" | "parallelWarnThreshold" | "worktreeTtlMin" | "worktreeFinalTtlMin" | "workerWarnMs" | "workerStallMs" | "workerIdleMs" | "auditMaxMb" | "evidenceTtlDays" | "evidenceKeepPerSession" | "evidenceMaxMb" | "evidenceMaxFileMb" | "validatorTimeoutMs" | "verifyTimeoutMs",
   key: string,
   fallback: number,
   rules: NumberRules,
@@ -278,6 +282,18 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       min: 1,
       max: 1024,
       description: "a positive integer up to 1024 MiB",
+    }),
+    validatorTimeoutMs: resolveNumber(overrides, "validatorTimeoutMs", "PI_COFFEE_VALIDATOR_TIMEOUT_MS", 600_000, {
+      integer: true,
+      min: 1000,
+      max: 1_800_000,
+      description: "an integer between 1000 and 1800000",
+    }),
+    verifyTimeoutMs: resolveNumber(overrides, "verifyTimeoutMs", "PI_COFFEE_VERIFY_TIMEOUT_MS", 900_000, {
+      integer: true,
+      min: 1000,
+      max: 3_600_000,
+      description: "an integer between 1000 and 3600000",
     }),
     deleteBranches: resolveBoolean(overrides, "deleteBranches", "PI_COFFEE_DELETE_BRANCHES", false),
     recoverOnStartup: resolveBoolean(overrides, "recoverOnStartup", "PI_COFFEE_RECOVER_ON_START", true),

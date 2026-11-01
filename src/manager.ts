@@ -310,6 +310,8 @@ export class Coordinator {
       secretPolicy: config.secretPolicy,
       maxFileBytes: config.evidenceMaxFileMb * 1024 * 1024,
       maxTotalBytes: config.evidenceMaxMb * 1024 * 1024,
+      validatorTimeoutMs: config.validatorTimeoutMs,
+      verifyTimeoutMs: config.verifyTimeoutMs,
     });
   }
 
@@ -1263,6 +1265,10 @@ export class Coordinator {
   }
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
+    validateReviewSpec(opts.spec);
+    if (opts.spec?.validators?.length && opts.acceptanceCommand?.trim()) {
+      throw new Error("pass spec.validators or acceptance_command, not both");
+    }
     // New work is refused while the daemon is draining for a restart. Checked
     // before the slot reservation so a rejected spawn leaves no reservation behind.
     this.assertNotDraining("spawn");
@@ -2204,7 +2210,8 @@ export class Coordinator {
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
       const proof = await this.integrationGate.verify(rt.meta, into ?? await currentBranch(rt.meta.repo),
-        (cwd, command) => runCommand(command, cwd, timeoutMs));
+        (cwd, command, validatorTimeout, env) => runCommand(command, cwd, validatorTimeout ?? timeoutMs, false, env),
+        timeoutMs);
       rt.meta.verification = proof;
       this.scheduleSave();
       await this.auditStrict("orchestrator", "verify", id, { verificationId: proof.id, passed: proof.passed,
@@ -2788,10 +2795,12 @@ function runCommand(
   cwd: string,
   timeoutMs: number,
   login = false,
+  extraEnv?: Record<string, string>,
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
-    const proc = spawn(process.env.PI_COFFEE_BASH_BIN || "bash", [login ? "-lc" : "-c", command], { cwd, env: process.env, detached: grouped });
+    const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+    const proc = spawn(process.env.PI_COFFEE_BASH_BIN || "bash", [login ? "-lc" : "-c", command], { cwd, env, detached: grouped });
 
     let stdout = "";
     let stderr = "";

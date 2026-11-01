@@ -10,8 +10,8 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { redactSecrets, SecretDetectedError, type SecretKind, type SecretPolicy } from "./secrets.js";
 
 export const EVIDENCE_SCHEMA_VERSION = 1 as const;
@@ -31,6 +31,19 @@ export interface EvidenceValidatorResult {
   code: number | null;
   timedOut: boolean;
   passed: boolean;
+  /** Combined output for this validator; persisted as validators/<id>/stdout.log. */
+  stdout?: string;
+  /** Combined error output for this validator; persisted as validators/<id>/stderr.log. */
+  stderr?: string;
+}
+
+/** One captured artifact file (already read from the candidate). */
+export interface EvidenceArtifact {
+  validatorId: string;
+  /** Candidate-relative path with POSIX separators. */
+  path: string;
+  content: Buffer;
+  truncated?: boolean;
 }
 
 export interface EvidenceFile {
@@ -86,6 +99,8 @@ export interface EvidenceBundleInput {
   sandbox?: EvidenceSandboxRecord;
   changedFiles: string[];
   logs: { stdout: string; stderr: string; diff: string };
+  /** Files copied out of the candidate after the validator run. */
+  artifacts?: EvidenceArtifact[];
   createdAt?: number;
   /** Clock override for deterministic tests. */
   now?: () => number;
@@ -153,7 +168,7 @@ function sanitize(text: string, context: string, policy: SecretPolicy): { text: 
 
 interface PendingFile {
   path: string;
-  text: string;
+  bytes: Buffer;
   truncated: boolean;
 }
 
@@ -171,35 +186,63 @@ export async function writeEvidenceBundle(dataDir: string, input: EvidenceBundle
 
   let redactions = 0;
   const truncated: string[] = [];
-  const addFile = (path: string, text: string): PendingFile => {
+  const addText = (path: string, text: string): PendingFile => {
     const sanitized = sanitize(text, `evidence ${path}`, policy);
     redactions += sanitized.redactions;
     const capped = capText(sanitized.text, maxFileBytes);
     if (capped.truncated) truncated.push(path);
-    return { path, ...capped };
+    return { path, bytes: Buffer.from(capped.text), truncated: capped.truncated };
+  };
+  const addBuffer = (path: string, content: Buffer): PendingFile => {
+    if (content.length <= maxFileBytes) return { path, bytes: content, truncated: false };
+    truncated.push(path);
+    return {
+      path,
+      bytes: Buffer.concat([Buffer.from(`[truncated ${content.length - maxFileBytes} bytes, keeping the last ${maxFileBytes}]\n`),
+        content.subarray(content.length - maxFileBytes)]),
+      truncated: true,
+    };
   };
 
   const files: PendingFile[] = [];
-  files.push(addFile("stdout.log", input.logs.stdout));
-  files.push(addFile("stderr.log", input.logs.stderr));
-  files.push(addFile("diff.patch", input.logs.diff));
-  files.push(addFile("changed-files.json", JSON.stringify(input.changedFiles, null, 2) + "\n"));
-  files.push(addFile("command.txt", input.command + "\n"));
-  files.push(addFile("validators.json", JSON.stringify(input.validators, null, 2) + "\n"));
-  if (input.sandbox) files.push(addFile("sandbox.json", JSON.stringify(input.sandbox, null, 2) + "\n"));
+  files.push(addText("stdout.log", input.logs.stdout));
+  files.push(addText("stderr.log", input.logs.stderr));
+  files.push(addText("diff.patch", input.logs.diff));
+  files.push(addText("changed-files.json", JSON.stringify(input.changedFiles, null, 2) + "\n"));
+  files.push(addText("command.txt", input.command + "\n"));
+  files.push(addText("validators.json", JSON.stringify(input.validators.map(({ stdout: _stdout, stderr: _stderr, ...rest }) => rest), null, 2) + "\n"));
+  if (input.sandbox) files.push(addText("sandbox.json", JSON.stringify(input.sandbox, null, 2) + "\n"));
+  for (const validator of input.validators) {
+    files.push(addText(`validators/${validator.id}/stdout.log`, validator.stdout ?? ""));
+    files.push(addText(`validators/${validator.id}/stderr.log`, validator.stderr ?? ""));
+    files.push(addText(`validators/${validator.id}/result.json`, JSON.stringify({
+      id: validator.id, required: validator.required, command: validator.command,
+      code: validator.code, timedOut: validator.timedOut, passed: validator.passed,
+    }, null, 2) + "\n"));
+  }
+  for (const artifact of input.artifacts ?? []) {
+    const rel = artifact.path.split("\\").join("/");
+    const segments = rel.split("/");
+    if (rel.startsWith("/") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+      throw new Error(`evidence: artifact path escapes the candidate: ${artifact.path}`);
+    }
+    if (!ID_RE.test(artifact.validatorId)) throw new Error(`evidence: invalid artifact validator id: ${artifact.validatorId}`);
+    files.push(addBuffer(`artifacts/${artifact.validatorId}/${rel}`, artifact.content));
+  }
 
   // Keep the whole bundle under the total budget by shrinking every file evenly.
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const total = files.reduce((sum, file) => sum + Buffer.byteLength(file.text), 0);
+    const total = files.reduce((sum, file) => sum + file.bytes.length, 0);
     if (total <= maxTotalBytes) break;
     const perFile = Math.max(1024, Math.floor(maxTotalBytes / files.length));
     for (const file of files) {
-      const capped = capText(file.text, perFile);
-      if (capped.truncated && !file.truncated) {
+      if (file.bytes.length <= perFile) continue;
+      const tail = file.bytes.subarray(file.bytes.length - perFile);
+      file.bytes = Buffer.concat([Buffer.from(`[truncated ${file.bytes.length - perFile} bytes, keeping the last ${perFile}]\n`), tail]);
+      if (!file.truncated) {
         file.truncated = true;
         truncated.push(file.path);
       }
-      file.text = capped.text;
     }
   }
 
@@ -216,9 +259,10 @@ export async function writeEvidenceBundle(dataDir: string, input: EvidenceBundle
   try {
     for (const file of files) {
       const target = join(tempDir, file.path);
-      const bytes = Buffer.from(file.text);
-      await writeFile(target, bytes, { mode: 0o600 });
-      manifestFiles.push({ path: file.path, bytes: bytes.length, sha256: sha256(bytes) });
+      const slash = file.path.lastIndexOf("/");
+      if (slash > 0) await mkdir(join(tempDir, file.path.slice(0, slash)), { recursive: true, mode: 0o700 });
+      await writeFile(target, file.bytes, { mode: 0o600 });
+      manifestFiles.push({ path: file.path, bytes: file.bytes.length, sha256: sha256(file.bytes) });
     }
     const manifest: EvidenceManifest = {
       version: EVIDENCE_SCHEMA_VERSION,
@@ -311,4 +355,109 @@ export async function listEvidenceBundles(dataDir: string, sessionId: string): P
     }
   }
   return bundles.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export interface ArtifactLimits {
+  maxFiles: number;
+  maxFileBytes: number;
+  maxTotalBytes: number;
+}
+
+interface CompiledPattern {
+  source: string;
+  regex: RegExp;
+}
+
+/** Compile a worktree-relative glob (supports *, **, ?) into a path regex. */
+function compilePattern(pattern: string): CompiledPattern {
+  const normalized = pattern.split("\\").join("/").replace(/^\.\//, "");
+  let out = "^";
+  for (let i = 0; i < normalized.length; i += 1) {
+    const char = normalized[i];
+    if (char === "*") {
+      if (normalized[i + 1] === "*") {
+        i += 1;
+        if (normalized[i + 1] === "/") {
+          i += 1;
+          out += "(?:.*/)?";
+        } else {
+          out += ".*";
+        }
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    if (char === "?") { out += "[^/]"; continue; }
+    out += char.replace(/[\\^$+.()|[\]{}]/g, "\\$&");
+  }
+  out += "$";
+  return { source: normalized, regex: new RegExp(out) };
+}
+
+/** True when a candidate-relative path matches one of the artifact globs. */
+export function matchesArtifactPatterns(path: string, patterns: string[]): boolean {
+  const rel = path.split("\\").join("/");
+  return patterns.map(compilePattern).some((pattern) => pattern.regex.test(rel));
+}
+
+/**
+ * Copy the files matching `patterns` out of the candidate. Symlinks are skipped,
+ * `.git` is excluded, and all limits are hard caps; oversized files keep a tail.
+ */
+export async function collectArtifacts(
+  root: string,
+  validatorId: string,
+  patterns: string[],
+  limits: ArtifactLimits,
+): Promise<EvidenceArtifact[]> {
+  if (!ID_RE.test(validatorId)) throw new Error(`evidence: invalid artifact validator id: ${validatorId}`);
+  const compiled = patterns.map(compilePattern);
+  const files: EvidenceArtifact[] = [];
+  let totalBytes = 0;
+  let visited = 0;
+  const canonicalRoot = resolve(root);
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (files.length >= limits.maxFiles || depth > 12 || visited > 5000) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= limits.maxFiles || visited > 5000) return;
+      if (entry.name === ".git") continue;
+      const absolute = join(dir, entry.name);
+      let info;
+      try {
+        info = await lstat(absolute);
+      } catch {
+        continue;
+      }
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) {
+        await walk(absolute, depth + 1);
+        continue;
+      }
+      if (!info.isFile()) continue;
+      visited += 1;
+      const rel = relative(canonicalRoot, absolute).split("\\").join("/");
+      if (!compiled.some((pattern) => pattern.regex.test(rel))) continue;
+      if (info.size > limits.maxFileBytes * 4) continue; // never load a runaway artifact
+      const content = await readFile(absolute);
+      const capped = content.length > limits.maxFileBytes
+        ? Buffer.concat([Buffer.from(`[truncated ${content.length - limits.maxFileBytes} bytes, keeping the last ${limits.maxFileBytes}]\n`),
+            content.subarray(content.length - limits.maxFileBytes)])
+        : content;
+      if (totalBytes + capped.length > limits.maxTotalBytes) return;
+      totalBytes += capped.length;
+      files.push({ validatorId, path: rel, content: capped, ...(capped.length !== content.length ? { truncated: true } : {}) });
+      if (files.length >= limits.maxFiles) return;
+    }
+  };
+
+  await walk(canonicalRoot, 0);
+  return files;
 }
