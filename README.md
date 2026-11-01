@@ -591,7 +591,12 @@ host-run command already has — so a command inside a container can rewrite ref
 one `git worktree prune` there deregisters worktrees whose checkout it cannot see (it sees only
 `/workspace`), exactly as the same command would on the host. The repository's hook directory is the
 one exception: it is mounted read-only, because hooks planted there would execute on the host through
-`pi_commit`/`pi_merge`, and verification itself never runs repository hooks for the candidate. Give the sandbox its own provider credential (or
+`pi_commit`/`pi_merge`, and verification itself never runs repository hooks for the candidate — while
+`pi_commit` and `pi_merge` still do, on every backend, so repository policy keeps applying to what the
+daemon commits. If the docker daemon cannot see the system temp directory (colima shares only `$HOME`,
+Docker Desktop shares `$TMPDIR` too), point `PI_COFFEE_VERIFY_TMPDIR` at a shared path: the
+verification candidate is bind-mounted, so an invisible temp dir would mount as an empty
+`/workspace`. Give the sandbox its own provider credential (or
 snapshot), and remember that `--network none` means no provider access.
 
 Digest
@@ -688,6 +693,7 @@ Everything is configured through environment variables.
 | `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | Total size budget for one evidence bundle (MiB). |
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | Per-file budget inside a bundle; oversized logs keep a tail and are listed in `truncated`. |
 | `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | Default per-validator timeout (ms) when a validator does not set `timeoutMs`, for chains of two or more validators. A single validator (including the legacy `acceptance_command`) uses the whole `PI_COFFEE_VERIFY_TIMEOUT_MS`/`timeout_ms` budget instead. |
+| `PI_COFFEE_VERIFY_TMPDIR` | *(system temp)* | Parent directory for verification candidates. Point it at a path the docker daemon can bind-mount when the system temp dir is not shared (colima shares only `$HOME`). Must be absolute. |
 | `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | Overall budget (ms) for the whole validator chain. |
 | `PI_COFFEE_SANDBOX` | `worktree` | Execution backend: `worktree` (today's host behavior) or `docker`. |
 | `PI_COFFEE_SANDBOX_IMAGE` | *(empty)* | Required for `docker`: image containing bash and the project toolchain. |

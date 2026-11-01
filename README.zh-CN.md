@@ -508,7 +508,10 @@ provider/model/thinking 和控制密钥；显式停止或已收尾的会话不�
 删除容器；docker 或镜像不可用时直接失败，不会回退到宿主执行。它隔离的是命令和 worker 进程，不是 daemon：git 元数据是读写挂载（等同于宿主执行已有的权限），
 因此容器里的命令可以改 refs、改 `.git/config`，一条 `git worktree prune` 还会注销它在容器里看不到的 worktree
 （容器只看到 `/workspace`）——与宿主机上执行同一条命令的后果一致。唯一例外是仓库的 hooks 目录：它以只读方式
-挂载，因为写进那里的 hook 会在宿主上被 `pi_commit`/`pi_merge` 执行；验证本身也不会为候选目录执行仓库 hook。请给沙箱准备独立的 provider 凭据（或快照），并注意
+挂载，因为写进那里的 hook 会在宿主上被 `pi_commit`/`pi_merge` 执行；验证本身不会为候选目录执行仓库 hook，而
+`pi_commit`/`pi_merge` 在任何后端上仍会执行仓库 hook，让仓库自己的规约继续作用于 daemon 提交的内容。
+如果 docker 守护进程看不到系统临时目录（colima 只共享 `$HOME`，Docker Desktop 还共享 `$TMPDIR`），
+请把 `PI_COFFEE_VERIFY_TMPDIR` 指向共享路径：验收候选目录是要被 bind mount 的，看不见就会挂成空的 `/workspace`。请给沙箱准备独立的 provider 凭据（或快照），并注意
 `--network none` 时没有 provider 访问。
 
 ## 清理已完成的工作
@@ -585,6 +588,7 @@ outcome、purpose、cost 与 token 计数全部保留，所以 `pi_report` 和 `
 | `PI_COFFEE_EVIDENCE_MAX_MB` | `64` | 单个证据包总大小上限（MiB）。 |
 | `PI_COFFEE_EVIDENCE_MAX_FILE_MB` | `8` | 包内单文件上限（MiB）；超长日志保留尾部并记入 `truncated`。 |
 | `PI_COFFEE_VALIDATOR_TIMEOUT_MS` | `600000` | 验证器未写 `timeoutMs` 时的默认单步超时（毫秒）。 |
+| `PI_COFFEE_VERIFY_TMPDIR` | *(系统临时目录)* | 验收候选目录的父目录。系统临时目录没被 docker 共享时（colima 只共享 `$HOME`），指向一个能被 bind mount 的路径。必须为绝对路径。 |
 | `PI_COFFEE_VERIFY_TIMEOUT_MS` | `900000` | 整条验证器链的总预算（毫秒）。 |
 | `PI_COFFEE_SANDBOX` | `worktree` | 执行后端：`worktree`（当前宿主行为）或 `docker`。 |
 | `PI_COFFEE_SANDBOX_IMAGE` | *(空)* | `docker` 必填：包含 bash 和项目工具链的镜像。 |
