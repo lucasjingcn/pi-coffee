@@ -19,6 +19,8 @@ export interface PiRpcClientOptions {
   extensionPath?: string;
   extraArgs?: string[];
   env?: Record<string, string>;
+  /** Optional wrapper (for example `docker run ... image pi`) prepended to the pi argv. */
+  spawnPrefix?: { bin: string; args: string[] };
 }
 
 interface PendingCommand {
@@ -161,7 +163,12 @@ export class PiRpcClient extends EventEmitter {
 
     const piBin = this.opts.piBin ?? "pi";
     const isNodeScript = piBin.toLowerCase().endsWith(".js");
-    const proc = spawn(isNodeScript ? process.execPath : piBin, isNodeScript ? [piBin, ...args] : args, {
+    const prefix = this.opts.spawnPrefix;
+    const spawnBin = prefix ? prefix.bin : (isNodeScript ? process.execPath : piBin);
+    const spawnArgs = prefix
+      ? [...prefix.args, ...(isNodeScript ? [piBin, ...args] : args)]
+      : (isNodeScript ? [piBin, ...args] : args);
+    const proc = spawn(spawnBin, spawnArgs, {
       cwd: this.opts.cwd,
       env: { ...process.env, ...(this.opts.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],

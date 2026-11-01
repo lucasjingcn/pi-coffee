@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, createReadStream, readdirSync, statSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { acceptancePath, writeAcceptanceFile } from "./acceptance.js";
 import type { Config } from "./config.js";
-import { Board, Mailbox, type MessageKind } from "./mailbox.js";
+import { Board, Mailbox, boardSha256, mailboxSha256, type BoardEntry, type MailMessage, type MessageKind } from "./mailbox.js";
 import { LockManager, type ClaimResult, type LockMode, type Lock } from "./locks.js";
 import { resolveRepoIdentity } from "./lock-repo.js";
 import { captureWorkerProcess, stopOwnedWorker, type WorkerProcessIdentity } from "./worker-process.js";
@@ -20,6 +20,13 @@ import type { DelegationSpec, PiEvent, UiRequest, UiResponse } from "./types.js"
 import { WORKSTREAM_PURPOSES, type WorkstreamPurpose } from "./types.js";
 import { validateReviewSpec, validateCandidateReview, type CandidateReview, type CandidateReviewInput } from "./candidate-review.js";
 import { appendWorkerEvent, logLine, type WorkerEventKind } from "./log.js";
+import { AuditLog } from "./audit.js";
+import { applySecretPolicy } from "./secrets.js";
+import { evidenceDir, listEvidenceBundles, pruneEvidence, readEvidenceManifest, verifyEvidenceBundle } from "./evidence.js";
+import { DockerSandbox, WORKER_EXTENSION, WORKER_SESSION_DIR, buildWorkerDockerPrefix } from "./sandbox.js";
+import { AcpClient } from "./runner-acp.js";
+import { GhClient, createGhRunner } from "./gh.js";
+import type { WorkerTransport } from "./runner.js";
 import {
   commitAll,
   createWorktree,
@@ -154,6 +161,14 @@ export interface SessionMeta {
   candidateReview?: CandidateReview;
   /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
+  /** Effective execution backend recorded at spawn (docker when the daemon sandbox is on). */
+  sandbox?: { kind: "worktree" | "docker"; image?: string; imageDigest?: string; network?: "bridge" | "none" };
+  /** Effective worker runner recorded at spawn. */
+  runner?: { kind: "pi" | "acp"; command?: string[] };
+  /** Pull request created by pi_pr (idempotently reused by later calls). */
+  pr?: { number: number; url: string; state?: string };
+  /** Session ids this workstream was declared dependent on at spawn. */
+  blockedBy?: string[];
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
   orchestratorChars?: number;
   /** Set once the worker-side coordinator extension checked in. */
@@ -177,7 +192,7 @@ interface Runtime {
   providerFailed?: boolean;
   stopping?: Promise<void>;
   meta: SessionMeta;
-  client: PiRpcClient;
+  client: WorkerTransport;
   lastNotifiedQuestionIds: Set<string>;
   /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
   acceptanceReserved?: boolean;
@@ -203,6 +218,8 @@ export interface SpawnOptions {
   acceptanceCommand?: string;
   /** Structured task spec (goal/scope/contracts/...). Rendered into the worker prompt. */
   spec?: DelegationSpec;
+  /** Session ids that must be integrated before this spawn is accepted. */
+  blocked_by?: string[];
   controlKeyHash?: string;
   scopeKeyHash?: string;
   controlKey?: string;
@@ -257,6 +274,12 @@ interface RecoveryCheck {
 
 export class Coordinator {
   readonly config: Config;
+  /** Append-only, hash-chained record of coordinator actions. */
+  readonly audit: AuditLog;
+  /** Docker sandbox backend when PI_COFFEE_SANDBOX=docker. */
+  private readonly sandbox?: DockerSandbox;
+  /** GitHub CLI wrapper for PR/merge-queue operations. */
+  private readonly gh: GhClient;
 
   private runtimes = new Map<string, Runtime>();
   private locks = new LockManager();
@@ -277,7 +300,7 @@ export class Coordinator {
   private saveChain: Promise<void> = Promise.resolve();
   /** Validated primary/backup store: atomic writes, corruption recovery, contextual errors. */
   private store: StateStore;
-  private integrationGate = new IntegrationGate();
+  private integrationGate: IntegrationGate;
   private busyRepos = new Set<string>();
   private dispatchingRepos = new Map<string, number>();
   private orchestratorCosts: OrchestratorCostRecord[] = [];
@@ -302,6 +325,49 @@ export class Coordinator {
     this.config = config;
     this.vault = new ControlVault(config.dataDir);
     this.store = new StateStore(join(config.dataDir, "state.json"));
+    this.audit = new AuditLog({ dir: join(config.dataDir, "audit"), maxBytes: config.auditMaxMb * 1024 * 1024 });
+    this.gh = new GhClient(createGhRunner(config.ghBin), () => {
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      if (!config.ghAllowEnvToken) delete env.GH_TOKEN;
+      if (config.ghToken) env.GH_TOKEN = config.ghToken;
+      return env;
+    });
+    if (config.sandbox === "docker") {
+      this.sandbox = new DockerSandbox(
+        { kind: "docker", image: config.sandboxImage, network: config.sandboxNetwork,
+          envAllow: config.sandboxEnvAllow, dockerBin: config.dockerBin },
+        (command, cwd, timeoutMs) => runCommand(command, cwd, timeoutMs),
+      );
+    }
+    this.integrationGate = new IntegrationGate({
+      dataDir: config.dataDir,
+      secretPolicy: config.secretPolicy,
+      maxFileBytes: config.evidenceMaxFileMb * 1024 * 1024,
+      maxTotalBytes: config.evidenceMaxMb * 1024 * 1024,
+      validatorTimeoutMs: config.validatorTimeoutMs,
+      verifyTimeoutMs: config.verifyTimeoutMs,
+      sandbox: () => this.sandbox?.record(),
+    });
+  }
+
+  /**
+   * Audit a guarded action. The append is part of the action: when the log cannot
+   * be written the action fails instead of proceeding unrecorded.
+   */
+  private async auditStrict(actor: string, action: string, target: string, detail?: Record<string, unknown>): Promise<void> {
+    await this.audit.append(actor, action, target, detail);
+  }
+
+  /** Cleanup/operator actions stay available even when audit persistence fails. */
+  private auditBestEffort(actor: string, action: string, target: string, detail?: Record<string, unknown>): void {
+    void this.audit.append(actor, action, target, detail).catch((error) => {
+      logLine("pi-coffee", "audit append failed", action, error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  /** Enforce the configured secret policy on a durable coordination value. */
+  private scrubSecrets(text: string, context: string): string {
+    return applySecretPolicy(text, this.config.secretPolicy, context).text;
   }
 
   async init(): Promise<void> {
@@ -376,6 +442,16 @@ export class Coordinator {
     await this.sweepFinalRetention(now).catch(() => {});
     await this.reclaimStale().catch(() => {});
     await this.sweepSessionDirs(now).catch(() => {});
+    await this.sweepEvidence().catch(() => {});
+  }
+
+  /** Evidence retention follows the same autoClean lifecycle as worktree cleanup. */
+  private async sweepEvidence(): Promise<void> {
+    if (!this.config.autoClean) return;
+    await pruneEvidence(this.config.dataDir, {
+      ttlDays: this.config.evidenceTtlDays,
+      keepPerSession: this.config.evidenceKeepPerSession,
+    });
   }
 
   /** An abandoned branch with no commit beyond its dispatch base has no worker code to retain. */
@@ -807,7 +883,12 @@ export class Coordinator {
     this.notifyWaiters();
     this.scheduleSave();
 
-    return {
+    const evidencePruned = await pruneEvidence(this.config.dataDir, {
+      ttlDays: this.config.evidenceTtlDays,
+      keepPerSession: this.config.evidenceKeepPerSession,
+      ...(selected ? { sessionIds: [...selected] } : {}),
+    }).catch(() => ({ removed: 0, bytes: 0, temp_removed: 0, sessions: [] }));
+    const summary = {
       worktrees_cleaned: cleaned,
       branches_deleted: branches.deleted.length,
       branches_retained: branches.retained,
@@ -817,8 +898,51 @@ export class Coordinator {
       credentials_reclaimed: reclaimed.credentials,
       transcripts_reclaimed: reclaimed.transcripts,
       history_compacted: reclaimed.compacted,
+      evidence_removed: evidencePruned.removed,
+      evidence_bytes: evidencePruned.bytes,
       remaining_live: this.runtimes.size,
     };
+    this.auditBestEffort("orchestrator", "gc", sessionIds?.join(",") ?? "*", {
+      worktrees_cleaned: cleaned, sessions_evicted: evicted,
+    });
+    return summary;
+  }
+
+  /** List evidence bundles for a session, newest first. */
+  async evidenceList(sessionId: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId); // unknown session fails before touching the filesystem
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    return { session_id: sessionId, bundles };
+  }
+
+  /** Read one bundle manifest (default: newest) for a session. */
+  async evidenceGet(sessionId: string, verificationId?: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId);
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    const chosen = verificationId
+      ? bundles.find((bundle) => bundle.verificationId === verificationId)
+      : bundles[0];
+    if (!chosen) throw new Error(verificationId
+      ? `no evidence bundle ${verificationId} for session ${sessionId}`
+      : `no evidence bundles for session ${sessionId}`);
+    const dir = evidenceDir(this.config.dataDir, chosen);
+    const manifest = await readEvidenceManifest(dir);
+    return { session_id: sessionId, verification_id: chosen.verificationId, dir: chosen.dir, manifest };
+  }
+
+  /** Recompute every file hash in a bundle (default: newest) and report mismatches. */
+  async evidenceVerify(sessionId: string, verificationId?: string): Promise<Record<string, unknown>> {
+    this.snapshot(sessionId);
+    const bundles = await listEvidenceBundles(this.config.dataDir, sessionId);
+    const chosen = verificationId
+      ? bundles.find((bundle) => bundle.verificationId === verificationId)
+      : bundles[0];
+    if (!chosen) throw new Error(verificationId
+      ? `no evidence bundle ${verificationId} for session ${sessionId}`
+      : `no evidence bundles for session ${sessionId}`);
+    const result = await verifyEvidenceBundle(evidenceDir(this.config.dataDir, chosen));
+    return { session_id: sessionId, verification_id: chosen.verificationId, dir: chosen.dir,
+      ok: result.ok, entries: result.manifest.files.length, mismatches: result.mismatches };
   }
 
   private async gcBranches(selected?: Set<string>): Promise<{
@@ -1025,6 +1149,9 @@ export class Coordinator {
       // Explicit shutdown/persistence requests must surface the failure, not swallow it.
       this.reportSaveError("save", error);
       throw error;
+    } finally {
+      // Await best-effort audit appends so shutdown/cleanup does not race them.
+      await this.audit.drain();
     }
   }
 
@@ -1236,6 +1363,29 @@ export class Coordinator {
   }
 
   async spawn(opts: SpawnOptions = {}): Promise<SessionMeta> {
+    validateReviewSpec(opts.spec);
+    if (opts.spec?.validators?.length && opts.acceptanceCommand?.trim()) {
+      throw new Error("pass spec.validators or acceptance_command, not both");
+    }
+    const requestedIsolation = opts.spec?.isolation;
+    if (requestedIsolation === "docker" && this.config.sandbox !== "docker") {
+      throw new Error("sandbox isolation was requested but PI_COFFEE_SANDBOX=worktree; enable the docker sandbox or omit spec.isolation");
+    }
+    if (requestedIsolation === "worktree" && this.config.sandbox === "docker") {
+      throw new Error("daemon policy requires the docker sandbox; spec.isolation=worktree is not allowed");
+    }
+    const runnerKind = opts.spec?.runner?.kind ?? this.config.runner;
+    const acpCommand = opts.spec?.runner?.command ?? this.config.acpCommand;
+    if (runnerKind === "acp" && this.sandbox) {
+      throw new Error("ACP workers are not supported with the docker sandbox; run the ACP command on the host or disable the sandbox");
+    }
+    if (runnerKind === "acp" && acpCommand.length === 0) {
+      throw new Error("ACP runner selected but no command is configured (spec.runner.command or PI_COFFEE_ACP_COMMAND)");
+    }
+    if (this.sandbox) {
+      const probe = await this.sandbox.probe();
+      if (!probe.ok) throw new Error(`sandbox requested but docker is unavailable: ${probe.error ?? "unknown error"}`);
+    }
     // New work is refused while the daemon is draining for a restart. Checked
     // before the slot reservation so a rejected spawn leaves no reservation behind.
     this.assertNotDraining("spawn");
@@ -1266,6 +1416,10 @@ export class Coordinator {
 
   private async spawnSession(opts: SpawnOptions, slot: { transferred: boolean }): Promise<SessionMeta> {
     validateReviewSpec(opts.spec);
+    const runnerKind = opts.spec?.runner?.kind ?? this.config.runner;
+    const acpCommand = opts.spec?.runner?.command ?? this.config.acpCommand;
+    const blockedBy = [...new Set(opts.blocked_by ?? [])].filter((value) => value.trim() !== "");
+    if (blockedBy.length) this.assertDependenciesSatisfied(blockedBy);
     const repo = opts.repo ?? this.config.defaultRepo;
     if (!repo) {
       throw new Error("repo is required: pass repo to pi_spawn, or set PI_COFFEE_DEFAULT_REPO for the daemon");
@@ -1353,6 +1507,9 @@ export class Coordinator {
         hashes: originalAcceptanceHashes,
       } : undefined,
       spec: opts.spec ? structuredClone(opts.spec) : undefined,
+      ...(this.sandbox ? { sandbox: this.sandbox.record() } : {}),
+      runner: { kind: runnerKind, ...(runnerKind === "acp" ? { command: acpCommand } : {}) },
+      ...(blockedBy.length ? { blockedBy } : {}),
       provider: opts.provider ?? this.config.provider,
       model: opts.model ?? this.config.model,
       thinking: opts.thinking ?? this.config.thinking,
@@ -1364,22 +1521,45 @@ export class Coordinator {
 
     const workerToken = randomBytes(32).toString("base64url");
     const workerAgentDir = join(this.config.dataDir, "sessions", id, "agent");
-    const client = new PiRpcClient({
-      cwd: wt.dir,
-      piBin: this.config.piBin,
-      provider: opts.provider ?? this.config.provider,
-      model: opts.model ?? this.config.model,
-      thinking: opts.thinking ?? this.config.thinking,
-      name,
-      sessionDir: join(this.config.dataDir, "sessions", id),
+    const sessionDirHost = join(this.config.dataDir, "sessions", id);
+    const sandboxPrefix = this.sandbox ? buildWorkerDockerPrefix({
+      sessionId: id,
+      worktree: wt.dir,
+      sessionDir: sessionDirHost,
       extensionPath: this.config.extensionPath,
-      env: {
-        PI_CODING_AGENT_DIR: workerAgentDir,
-        PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
-        PI_COORD_SESSION_ID: id,
-        PI_COORD_TOKEN: workerToken,
-      },
-    });
+      image: this.config.sandboxImage,
+      network: this.config.sandboxNetwork,
+      envAllow: this.config.sandboxEnvAllow,
+      port: this.config.port,
+      dockerBin: this.config.dockerBin,
+    }) : undefined;
+    const client: WorkerTransport = runnerKind === "acp"
+      ? new AcpClient({
+          command: acpCommand,
+          cwd: wt.dir,
+          transcriptPath: join(sessionDirHost, "acp.jsonl"),
+          env: opts.spec?.runner?.env,
+          name,
+        })
+      : new PiRpcClient({
+          cwd: wt.dir,
+          piBin: this.config.piBin,
+          provider: opts.provider ?? this.config.provider,
+          model: opts.model ?? this.config.model,
+          thinking: opts.thinking ?? this.config.thinking,
+          name,
+          sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDirHost,
+          extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
+          ...(sandboxPrefix ? { spawnPrefix: sandboxPrefix } : {}),
+          env: {
+            PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : workerAgentDir,
+            PI_COORD_URL: this.sandbox
+              ? `http://host.docker.internal:${this.config.port}`
+              : `http://${this.config.host}:${this.config.port}`,
+            PI_COORD_SESSION_ID: id,
+            PI_COORD_TOKEN: workerToken,
+          },
+        });
 
     const rt: Runtime = { meta, client, lastNotifiedQuestionIds: new Set(), acceptanceReserved, repoIdentity };
     // Persist before the first prompt; never return a live worker whose control credential was lost.
@@ -1413,8 +1593,10 @@ export class Coordinator {
         meta.error = String(e);
       }
       // A failed startup must not leak the child process or any reservations.
-      try { await client.stop(); }
-      catch { this.publishHandoff(rt, "shutdown_failed", false); throw new Error("worker startup failed and shutdown is unconfirmed; locks retained"); }
+      try {
+        await client.stop();
+        if (this.sandbox) await this.sandbox.removeWorker(id);
+      } catch { this.publishHandoff(rt, "shutdown_failed", false); throw new Error("worker startup failed and shutdown is unconfirmed; locks retained"); }
       meta.shutdownUnconfirmed = false;
       this.workerTokens.delete(workerToken);
       this.releaseRuntimeReservations(rt);
@@ -1454,6 +1636,15 @@ export class Coordinator {
       try { await this.send(id, first, "prompt"); }
       catch (error) { await this.failWorker(rt, "provider_error"); throw error; }
     }
+    try {
+      await this.auditStrict("orchestrator", "spawn", meta.id, { repo: meta.repo, branch: meta.branch,
+        provider: meta.provider, model: meta.model, purpose: meta.spec?.purpose });
+    } catch (error) {
+      // Never hand back a failed spawn while its worker is still running: stop it
+      // first so a broken audit sink cannot orphan a live session.
+      await this.failWorker(rt, "provider_error");
+      throw error;
+    }
     return meta;
   }
 
@@ -1475,6 +1666,10 @@ export class Coordinator {
    */
   async resume(id: string, opts: ResumeOptions = {}): Promise<SessionMeta> {
     this.assertNotDraining("resume");
+    const resumeEntry = this.runtimes.get(id)?.meta ?? this.history.find((entry) => entry.id === id);
+    if (resumeEntry?.runner?.kind === "acp") {
+      throw new Error("ACP worker sessions cannot be resumed; spawn a new session");
+    }
     const running = this.runtimes.get(id);
     if (running && running.meta.status !== "stopped") {
       throw new Error(`session ${id} is ${running.meta.status}; stop it before resuming`);
@@ -1504,7 +1699,9 @@ export class Coordinator {
       this.assertRepoAvailable(repoIdentity);
       this.dispatchingRepos.set(repoIdentity, (this.dispatchingRepos.get(repoIdentity) ?? 0) + 1);
       dispatchIdentity = repoIdentity;
-      return await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
+      const resumed = await this.resumeSession(entry, transcript, repoIdentity, opts, slot);
+      await this.auditStrict("orchestrator", "resume", resumed.id, { provider: resumed.provider, model: resumed.model });
+      return resumed;
     } finally {
       if (dispatchIdentity) {
         const remaining = (this.dispatchingRepos.get(dispatchIdentity) ?? 0) - 1;
@@ -1583,6 +1780,20 @@ export class Coordinator {
     meta.provider = provider;
     meta.model = model;
     meta.thinking = thinking;
+    // A crash may have left the previous container behind: clear it before the
+    // deterministic --name can be reused. Missing containers are ignored.
+    if (this.sandbox) await this.sandbox.removeWorker(id);
+    const resumeSandboxPrefix = this.sandbox ? buildWorkerDockerPrefix({
+      sessionId: id,
+      worktree: meta.worktree,
+      sessionDir,
+      extensionPath: this.config.extensionPath,
+      image: this.config.sandboxImage,
+      network: this.config.sandboxNetwork,
+      envAllow: this.config.sandboxEnvAllow,
+      port: this.config.port,
+      dockerBin: this.config.dockerBin,
+    }) : undefined;
     const client = new PiRpcClient({
       cwd: meta.worktree,
       piBin: this.config.piBin,
@@ -1590,12 +1801,15 @@ export class Coordinator {
       model,
       thinking,
       name: meta.name,
-      sessionDir,
-      resumeSession: transcript,
-      extensionPath: this.config.extensionPath,
+      sessionDir: this.sandbox ? WORKER_SESSION_DIR : sessionDir,
+      resumeSession: this.sandbox ? `${WORKER_SESSION_DIR}/${transcript.split("/").pop()}` : transcript,
+      extensionPath: this.sandbox ? WORKER_EXTENSION : this.config.extensionPath,
+      ...(resumeSandboxPrefix ? { spawnPrefix: resumeSandboxPrefix } : {}),
       env: {
-        PI_CODING_AGENT_DIR: join(sessionDir, "agent"),
-        PI_COORD_URL: `http://${this.config.host}:${this.config.port}`,
+        PI_CODING_AGENT_DIR: this.sandbox ? "/session/agent" : join(sessionDir, "agent"),
+        PI_COORD_URL: this.sandbox
+          ? `http://host.docker.internal:${this.config.port}`
+          : `http://${this.config.host}:${this.config.port}`,
         PI_COORD_SESSION_ID: id,
         PI_COORD_TOKEN: workerToken,
       },
@@ -1628,8 +1842,10 @@ export class Coordinator {
         meta.status = "error";
         meta.error = String(e);
       }
-      try { await client.stop(); }
-      catch {
+      try {
+        await client.stop();
+        if (this.sandbox) await this.sandbox.removeWorker(id);
+      } catch {
         this.publishHandoff(rt, "shutdown_failed", false);
         this.archive(meta);
         throw new Error("worker resume failed and shutdown is unconfirmed; locks retained");
@@ -2013,6 +2229,58 @@ export class Coordinator {
     return { ...rt.meta, pendingQuestions: [...rt.meta.pendingQuestions] };
   }
 
+  private knownSessions(): SessionMeta[] {
+    return [...this.runtimes.values()].map((rt) => rt.meta).concat(this.history);
+  }
+
+  /** Reject dependency graphs with cycles (including cycles already recorded in history). */
+  private assertDependencyGraphAcyclic(): void {
+    const graph = new Map<string, string[]>();
+    for (const meta of this.knownSessions()) graph.set(meta.id, meta.blockedBy ?? []);
+    const visiting = new Set<string>();
+    const done = new Set<string>();
+    const visit = (id: string, path: string[]): void => {
+      if (done.has(id)) return;
+      if (visiting.has(id)) throw new Error(`dependency cycle detected: ${[...path, id].join(" -> ")}`);
+      visiting.add(id);
+      for (const dep of graph.get(id) ?? []) {
+        if (!graph.has(dep)) continue;
+        visit(dep, [...path, id]);
+      }
+      visiting.delete(id);
+      done.add(id);
+    };
+    for (const id of graph.keys()) visit(id, []);
+  }
+
+  private dependencySatisfied(meta: SessionMeta): { satisfied: boolean; failed: boolean; label: string } {
+    const label = `${meta.id} (${meta.outcome ?? meta.status})`;
+    if (meta.integration) return { satisfied: true, failed: false, label };
+    if (meta.outcome === "abandoned" || meta.status === "error") return { satisfied: false, failed: true, label };
+    if (meta.outcome !== undefined && meta.verification?.passed && !meta.verification.codeChanged) {
+      return { satisfied: true, failed: false, label };
+    }
+    return { satisfied: false, failed: false, label };
+  }
+
+  /**
+   * `blocked_by` is a hard spawn gate: dependencies must already be integrated.
+   * Cycles, unknown ids and failed dependencies fail closed instead of queuing a
+   * session nobody will start.
+   */
+  private assertDependenciesSatisfied(ids: string[]): void {
+    if (ids.length > 32) throw new Error("blocked_by accepts at most 32 session ids");
+    this.assertDependencyGraphAcyclic();
+    const known = new Map(this.knownSessions().map((meta) => [meta.id, meta] as const));
+    const unknown = ids.filter((id) => !known.has(id));
+    if (unknown.length) throw new Error(`unknown dependency: ${unknown.join(", ")}`);
+    const results = ids.map((id) => ({ ...this.dependencySatisfied(known.get(id)!), id }));
+    const failed = results.filter((result) => result.failed);
+    if (failed.length) throw new Error(`deps_failed: ${failed.map((result) => result.label).join(", ")}`);
+    const blocked = results.filter((result) => !result.satisfied);
+    if (blocked.length) throw new Error(`blocked_by sessions are not integrated yet: ${blocked.map((result) => result.label).join(", ")}`);
+  }
+
   private assertUnfinished(rt: Runtime): void {
     if (rt.meta.outcome !== undefined) throw new Error(`session ${rt.meta.id} is finished`);
     if (rt.meta.status === "stopping") throw new Error("session is stopping; worker is not writable");
@@ -2029,6 +2297,9 @@ export class Coordinator {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
     this.assertUnfinished(rt);
+    // Delivery stays synchronous up to the RPC await: the audit entry is queued
+    // before dispatch without adding a hop to the instruction path.
+    this.auditBestEffort("orchestrator", "send", id, { mode, chars: message.length });
     rt.meta.verification = undefined;
     rt.meta.integration = undefined;
     rt.meta.candidateReview = undefined;
@@ -2128,7 +2399,9 @@ export class Coordinator {
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
-      return commitAll(rt.meta.worktree, message);
+      const sha = await commitAll(rt.meta.worktree, message);
+      await this.auditStrict("orchestrator", "commit", id, { sha });
+      return sha;
     });
   }
 
@@ -2145,6 +2418,8 @@ export class Coordinator {
       const record = { ...structuredClone(input), verificationId, reviewedAt: Date.now() };
       rt.meta.candidateReview = record;
       this.scheduleSave();
+      await this.auditStrict("orchestrator", "review", id, { verificationId,
+        requirements: input.requirements.length, testChanges: input.test_changes.length });
       return structuredClone(record);
     });
   }
@@ -2180,9 +2455,18 @@ export class Coordinator {
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
       const proof = await this.integrationGate.verify(rt.meta, into ?? await currentBranch(rt.meta.repo),
-        (cwd, command) => runCommand(command, cwd, timeoutMs));
+        (cwd, command, validatorTimeout, env) => {
+          const effectiveTimeout = validatorTimeout ?? timeoutMs;
+          return this.sandbox
+            ? this.sandbox.run(cwd, command, effectiveTimeout, env)
+            : runCommand(command, cwd, effectiveTimeout, false, env);
+        },
+        timeoutMs);
       rt.meta.verification = proof;
       this.scheduleSave();
+      await this.auditStrict("orchestrator", "verify", id, { verificationId: proof.id, passed: proof.passed,
+        targetBranch: proof.targetBranch, evidence: proof.evidence?.dir ?? null,
+        evidenceManifestSha256: proof.evidence?.manifestSha256 ?? null });
       return proof;
     });
   }
@@ -2203,8 +2487,83 @@ export class Coordinator {
           mergedSha, candidateTree: tree, integratedAt: Date.now() };
         this.scheduleSave();
       }
+      if (result.ok) await this.auditStrict("orchestrator", "merge", id, { target,
+        mergedSha: rt.meta.integration?.mergedSha, candidateTree: proof.candidateTree });
       return { ...result, branch: rt.meta.branch };
     });
+  }
+
+  /** Create (or reuse) a pull request for a verified worker branch. */
+  async createPr(
+    id: string,
+    opts: { base?: string; title?: string; body?: string; label?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const rt = this.get(id);
+    this.assertUnfinished(rt);
+    if (!this.config.allowPush) throw new Error("pushing and PR creation are disabled (PI_COFFEE_ALLOW_PUSH=0)");
+    const proof = rt.meta.verification;
+    if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
+      throw new Error("current successful pi_verify evidence is required before creating a PR");
+    }
+    const base = opts.base ?? proof.targetBranch;
+    await this.integrationGate.assertCurrent(rt.meta, base);
+    await pushBranch(rt.meta.repo, this.config.ghRemote, rt.meta.branch);
+    const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
+    if (existing) {
+      rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
+      this.scheduleSave();
+      await this.auditStrict("orchestrator", "pr", id, { number: existing.number, reused: true });
+      return { created: false, pr: rt.meta.pr };
+    }
+    const title = (opts.title ?? `pi-coffee: ${rt.meta.spec?.goal ?? rt.meta.name}`).slice(0, 200);
+    const body = opts.body ?? this.renderPrBody(rt, proof);
+    const pr = await this.gh.createPr(rt.meta.repo, {
+      base, head: rt.meta.branch, title, body,
+      ...(opts.label ?? this.config.prLabel ? { label: opts.label ?? this.config.prLabel } : {}),
+    });
+    rt.meta.pr = { number: pr.number, url: pr.url };
+    this.scheduleSave();
+    await this.auditStrict("orchestrator", "pr", id, { number: pr.number, created: true, base });
+    return { created: true, pr: rt.meta.pr };
+  }
+
+  private renderPrBody(rt: Runtime, proof: Verification): string {
+    const lines = [
+      "## pi-coffee verification evidence",
+      `- Session: ${rt.meta.id} (${rt.meta.spec?.goal ?? rt.meta.name})`,
+      `- Verification: ${proof.id}`,
+      `- Worker: ${proof.workerSha}`,
+      `- Target: ${proof.targetBranch} @ ${proof.targetSha}`,
+      `- Candidate tree: ${proof.candidateTree}`,
+      `- Validators: ${(proof.validators ?? []).map((run) => `${run.id}:${run.passed ? "pass" : "fail"}`).join(", ") || "acceptance"}`,
+      ...(proof.evidence ? [`- Evidence: ${proof.evidence.dir} (manifest ${proof.evidence.manifestSha256})`] : []),
+      `- Changed files: ${proof.changedFiles.length}`,
+      "",
+      "Generated by pi-coffee; merge only through the review/verification gate.",
+    ];
+    return lines.join("\n");
+  }
+
+  /** Queue a PR merge via the GitHub merge queue; the local integration record is not written. */
+  async mergeViaQueue(id: string, into?: string): Promise<Record<string, unknown>> {
+    const rt = this.get(id);
+    this.assertUnfinished(rt);
+    if (!this.config.allowPush) throw new Error("merge-queue mode is disabled (PI_COFFEE_ALLOW_PUSH=0)");
+    const proof = rt.meta.verification;
+    if (!proof?.passed || proof.epoch !== this.integrationGate.epoch) {
+      throw new Error("current successful pi_verify evidence is required before queuing a merge");
+    }
+    const base = into ?? proof.targetBranch;
+    await this.integrationGate.assertCurrent(rt.meta, base);
+    if (!rt.meta.pr) {
+      const existing = await this.gh.findPr(rt.meta.repo, rt.meta.branch);
+      if (!existing) throw new Error("create a pull request first with pi_pr");
+      rt.meta.pr = { number: existing.number, url: existing.url, ...(existing.state ? { state: existing.state } : {}) };
+    }
+    await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number);
+    this.scheduleSave();
+    await this.auditStrict("orchestrator", "merge_queue", id, { number: rt.meta.pr.number, base });
+    return { ok: true, queued: true, pr: rt.meta.pr, note: "merge queue accepted the PR; verify the merged commit before recording success" };
   }
 
   async push(id: string, remote = "origin", branch?: string): Promise<string> {
@@ -2251,6 +2610,7 @@ export class Coordinator {
     }
     rt.client.respondUi(payload);
     rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + (payload.value?.length ?? 0);
+    await this.auditStrict("orchestrator", "answer", sessionId, { requestId, method: request.method });
     this.notifyWaiters();
   }
 
@@ -2261,6 +2621,7 @@ export class Coordinator {
       if (meta.shutdownUnconfirmed) {
         if (!meta.workerProcess) throw new Error("orphan worker lacks process ownership proof; locks retained");
         await stopOwnedWorker(meta.workerProcess);
+        if (this.sandbox) await this.sandbox.removeWorker(id);
         meta.shutdownUnconfirmed = false;
         this.locks.releaseAll(id, meta.lockRepoIdentity);
         for (const lock of meta.heldLocks ?? []) this.locks.release(lock.sessionId, [lock.path], lock.repo);
@@ -2270,6 +2631,7 @@ export class Coordinator {
           safeToTakeOver: true, locksReleased: true, action: "take_over" };
         this.scheduleSave();
         this.notifyWaiters();
+        this.auditBestEffort("orchestrator", "stop", id, { reason: "archived recovery" });
       }
       return;
     }
@@ -2282,6 +2644,7 @@ export class Coordinator {
     rt.meta.pendingQuestions = [];
     const stopping = Promise.resolve().then(async () => {
       await rt.client.stop();
+      if (this.sandbox) await this.sandbox.removeWorker(id);
       rt.meta.shutdownUnconfirmed = false;
       for (const [token, sid] of this.workerTokens) if (sid === id) this.workerTokens.delete(token);
       rt.meta.status = "stopped";
@@ -2314,6 +2677,8 @@ export class Coordinator {
       throw error;
     }
     finally { rt.stopping = undefined; }
+    this.auditBestEffort("orchestrator", "stop", id, { removeWorktree: opts.removeWorktree ?? false,
+      deleteBranch: opts.deleteBranch ?? false });
   }
 
   async stopAll(): Promise<void> {
@@ -2329,6 +2694,7 @@ export class Coordinator {
       try { await this.stop(id); } catch { shutdownFailed = true; }
     }
     await this.flush();
+    await this.audit.close();
     if (shutdownFailed) throw new Error("worker shutdown unconfirmed; persisted reservations retained");
   }
 
@@ -2425,9 +2791,12 @@ export class Coordinator {
   // Mailbox and board
   // -------------------------------------------------------------------------
 
-  async postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): Promise<{ id: string; delivered: boolean }> {
-    const message = this.mailbox.post(from, to, text, kind);
+  async postMessage(from: string, to: string, text: string, kind: MessageKind, deliver = true): Promise<{ id: string; delivered: boolean; sha256?: string }> {
+    const safeText = this.scrubSecrets(text, "mailbox text");
+    const message = this.mailbox.post(from, to, safeText, kind);
     this.scheduleSave();
+    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "mailbox", `${from}->${to}`,
+      { kind, chars: safeText.length, sha256: message.sha256 });
 
     let delivered = false;
     if (deliver) {
@@ -2439,8 +2808,8 @@ export class Coordinator {
         // explicitly addressed messages, including when old callers still broadcast.
         if (to === "*" && rt.meta.controlKeyHash) continue;
 
-        const body = `[coordinator] message from ${from} (${kind}):\n${text}\n\n(Reply with coord_send / coord_board_post if needed.)`;
-        if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + text.length;
+        const body = `[coordinator] message from ${from} (${kind}):\n${safeText}\n\n(Reply with coord_send / coord_board_post if needed.)`;
+        if (from === "codex") rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + safeText.length;
 
         // Deliver before reporting, and ack only on success so a failed injection
         // is retried by polling instead of being reported as delivered.
@@ -2453,7 +2822,55 @@ export class Coordinator {
         }
       }
     }
-    return { id: message.id, delivered };
+    return { id: message.id, delivered, ...(message.sha256 ? { sha256: message.sha256 } : {}) };
+  }
+
+  /** Read persisted state for receipt verification. */
+  private async readPersistedState(): Promise<{ mailbox?: MailMessage[]; board?: BoardEntry[] }> {
+    const file = join(this.config.dataDir, "state.json");
+    return JSON.parse(await readFile(file, "utf8")) as { mailbox?: MailMessage[]; board?: BoardEntry[] };
+  }
+
+  /**
+   * Read a mailbox message back from durable state and compare its canonical hash.
+   * A missing or mismatched entry means the write is not durably recorded; the
+   * caller (pi_message / internal send) treats that as a failed coordination write.
+   */
+  async messageReceipt(messageId: string): Promise<{ id: string; sha256: string; readBack: true }> {
+    await this.flush();
+    let entry = (await this.readPersistedState()).mailbox?.find((message) => message.id === messageId);
+    if (!entry) {
+      // A concurrent older save can land after ours; one retry closes that window.
+      await this.flush();
+      entry = (await this.readPersistedState()).mailbox?.find((message) => message.id === messageId);
+    }
+    if (!entry) throw new Error("coordination write was not read back: message missing from persisted state");
+    const sha256 = mailboxSha256(entry);
+    if (entry.sha256 !== undefined && entry.sha256 !== sha256) {
+      throw new Error("coordination write was not read back: persisted message hash mismatch");
+    }
+    return { id: messageId, sha256, readBack: true };
+  }
+
+  /**
+   * Read the newest board entry for (board, key) back from durable state and compare
+   * its canonical hash. Used by the pi_board_post tool as delivery evidence.
+   */
+  async boardReceipt(board: string, key: string): Promise<{ sha256: string; readBack: true }> {
+    await this.flush();
+    let entries = (await this.readPersistedState()).board ?? [];
+    let entry = [...entries].reverse().find((candidate) => candidate.board === board && candidate.key === key);
+    if (!entry) {
+      await this.flush();
+      entries = (await this.readPersistedState()).board ?? [];
+      entry = [...entries].reverse().find((candidate) => candidate.board === board && candidate.key === key);
+    }
+    if (!entry) throw new Error("coordination write was not read back: board entry missing from persisted state");
+    const sha256 = boardSha256(entry);
+    if (entry.sha256 !== undefined && entry.sha256 !== sha256) {
+      throw new Error("coordination write was not read back: persisted board entry hash mismatch");
+    }
+    return { sha256, readBack: true };
   }
 
   inbox(sessionId: string, unreadOnly = false) {
@@ -2467,8 +2884,10 @@ export class Coordinator {
   }
 
   boardPost(board: string, key: string, value: string, from: string) {
-    const entry = this.board.post(board, key, value, from);
+    const safeValue = this.scrubSecrets(value, "board value");
+    const entry = this.board.post(board, key, safeValue, from);
     this.scheduleSave();
+    this.auditBestEffort(from === "codex" ? "orchestrator" : `worker:${from}`, "board", `${board}/${key}`, { chars: safeValue.length });
     return entry;
   }
 
@@ -2484,6 +2903,7 @@ export class Coordinator {
     if (outcome === "taken_over" && !note?.trim()) {
       throw new Error("taken_over requires a nonempty note explaining the takeover reason");
     }
+    if (note !== undefined) note = this.scrubSecrets(note, "outcome note");
     const rt = this.runtimes.get(id);
     if (!rt) {
       const historic = this.history.find((entry) => entry.id === id);
@@ -2496,6 +2916,7 @@ export class Coordinator {
       historic.outcome = outcome;
       if (note !== undefined) historic.outcomeNote = note;
       await this.emitFinishEvent(historic, outcome);
+      await this.auditStrict("orchestrator", "finish", id, { outcome });
       this.scheduleSave();
       this.notifyWaiters();
       return;
@@ -2535,6 +2956,7 @@ export class Coordinator {
       this.notifyWaiters();
     });
     await this.emitFinishEvent(rt.meta, outcome);
+    await this.auditStrict("orchestrator", "finish", id, { outcome });
     if (rt.meta.status === "stopped") {
       this.archive(rt.meta);
       this.scheduleSave();
@@ -2720,10 +3142,12 @@ function runCommand(
   cwd: string,
   timeoutMs: number,
   login = false,
+  extraEnv?: Record<string, string>,
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
-    const proc = spawn(process.env.PI_COFFEE_BASH_BIN || "bash", [login ? "-lc" : "-c", command], { cwd, env: process.env, detached: grouped });
+    const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+    const proc = spawn(process.env.PI_COFFEE_BASH_BIN || "bash", [login ? "-lc" : "-c", command], { cwd, env, detached: grouped });
 
     let stdout = "";
     let stderr = "";

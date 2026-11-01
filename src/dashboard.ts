@@ -43,6 +43,8 @@ export interface DashboardDeps {
   coord: Coordinator;
   /** When set, every dashboard request must present this token. */
   token?: string;
+  /** Opt-in write actions (finish/send/merge/stop). Requires a token. */
+  actions?: boolean;
 }
 
 /** Verification fields a console row needs; the raw command output stays out. */
@@ -246,6 +248,44 @@ function proofLabel(session: SessionSummary): string {
 }
 
 /** Client script: rebuilt rows use textContent, so refreshed data stays inert. */
+const ACTION_SCRIPT = `
+(function () {
+  const kind = document.getElementById("act-kind");
+  const run = document.getElementById("act-run");
+  if (!kind || !run) return;
+  function token() {
+    let value = sessionStorage.getItem("pi-coffee-token");
+    if (!value) {
+      value = prompt("PI_COFFEE_TOKEN") || "";
+      if (value) sessionStorage.setItem("pi-coffee-token", value);
+    }
+    return value;
+  }
+  run.addEventListener("click", async () => {
+    const session = document.getElementById("act-session").value.trim();
+    const action = kind.value;
+    const text = document.getElementById("act-text").value;
+    const out = document.getElementById("act-result");
+    if (!session) { out.textContent = "session is required"; return; }
+    if ((action === "finish" || action === "merge" || action === "stop") && !confirm(action + " " + session + "?")) return;
+    const headers = {
+      "content-type": "application/json",
+      "x-pi-coffee-action": "1",
+      "x-pi-coffee-confirm": session,
+      "authorization": "Bearer " + token(),
+    };
+    const body = action === "send" ? { message: text } : action === "finish" ? { note: text } : {};
+    try {
+      const response = await fetch("/dashboard/api/actions/sessions/" + encodeURIComponent(session) + "/" + action, {
+        method: "POST", headers, body: JSON.stringify(body),
+      });
+      out.textContent = (response.status + " " + await response.text()).slice(0, 4000);
+    } catch (error) {
+      out.textContent = String(error);
+    }
+  });
+})();
+`;
 const CLIENT_SCRIPT = `
 (function () {
   "use strict";
@@ -352,7 +392,7 @@ const CLIENT_SCRIPT = `
 })();
 `;
 
-function renderPage(sessions: SessionSummary[], nonce: string): string {
+function renderPage(sessions: SessionSummary[], nonce: string, actions: boolean): string {
   const body = sessions.length === 0
     ? `        <tr><td class="empty" colspan="9">No sessions.</td></tr>`
     : sessions.map((session) => `        <tr data-session="${escapeHtml(session.id)}">
@@ -397,8 +437,22 @@ function renderPage(sessions: SessionSummary[], nonce: string): string {
 <body>
 <header>
   <h1>pi-coffee orchestrator console</h1>
-  <span class="muted">read-only</span>
+  <span class="muted">${actions ? "actions enabled" : "read-only"}</span>
 </header>
+${actions ? `<section id="actions">
+  <h2>Actions</h2>
+  <p class="muted">Token stays in this tab's sessionStorage. Every action is audited.</p>
+  <label>session <input id="act-session" placeholder="s1"></label>
+  <label>action <select id="act-kind">
+    <option value="send">send</option>
+    <option value="finish">finish (read-only acceptance)</option>
+    <option value="merge">merge</option>
+    <option value="stop">stop (keep worktree)</option>
+  </select></label>
+  <label>message / note <input id="act-text" placeholder="message or acceptance note"></label>
+  <button id="act-run">Run</button>
+  <pre id="act-result"></pre>
+</section>` : ""}
 <table>
   <thead>
     <tr>
@@ -415,9 +469,9 @@ ${body}
   <pre id="detail-body"></pre>
 </section>
 <footer>
-  <span id="status">starting</span> - auto refresh every 5s. This console never mutates sessions.
+  <span id="status">starting</span> - auto refresh every 5s.${actions ? " Write actions are opt-in and audited." : " This console never mutates sessions."}
 </footer>
-<script nonce="${escapeHtml(nonce)}">${CLIENT_SCRIPT}</script>
+<script nonce="${escapeHtml(nonce)}">${CLIENT_SCRIPT}${actions ? ACTION_SCRIPT : ""}</script>
 </body>
 </html>
 `;
@@ -483,14 +537,108 @@ function tailLimit(url: URL): { ok: true; max?: number } | { ok: false } {
   return { ok: true, max };
 }
 
-async function serve(coord: Coordinator, url: URL, res: ServerResponse): Promise<void> {
+/** Write actions exposed only when the dashboard is started with `actions: true`. */
+const DASHBOARD_ACTIONS = new Set(["send", "finish", "merge", "stop"]);
+const ACTION_HEADER = "x-pi-coffee-action";
+const CONFIRM_HEADER = "x-pi-coffee-confirm";
+const MAX_ACTION_BODY = 64 * 1024;
+
+async function readActionBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_ACTION_BODY) {
+      req.destroy();
+      return undefined;
+    }
+    chunks.push(buffer);
+  }
+  if (size === 0) return {};
+  try {
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function auditDashboardDenial(coord: Coordinator, url: URL, reason: string): void {
+  const id = pathSegments(url.pathname)?.[3] ?? "";
+  try {
+    const audit = (coord as unknown as { audit?: { append?: (...args: any[]) => Promise<unknown> } }).audit;
+    void audit?.append?.("dashboard", "dashboard_denied", id, { reason, path: url.pathname }).catch(() => undefined);
+  } catch {
+    /* denial audit is diagnostic; never turn it into an action */
+  }
+}
+
+async function handleAction(coord: Coordinator, req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const segments = pathSegments(url.pathname);
+  if (!segments || segments.length !== 5 || segments[0] !== "api" || segments[1] !== "actions" || segments[2] !== "sessions") {
+    return sendJson(res, 404, { error: "not found", path: url.pathname });
+  }
+  const id = segments[3] as string;
+  const action = segments[4] as string;
+  if (!DASHBOARD_ACTIONS.has(action)) return sendJson(res, 404, { error: "not found", path: url.pathname });
+  if (req.headers[ACTION_HEADER] !== "1") {
+    auditDashboardDenial(coord, url, "missing action header");
+    return sendJson(res, 403, { error: "missing x-pi-coffee-action header" });
+  }
+  const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+  if (!contentType.startsWith("application/json")) {
+    auditDashboardDenial(coord, url, "invalid content type");
+    return sendJson(res, 415, { error: "content-type must be application/json" });
+  }
+  const origin = req.headers.origin;
+  if (origin) {
+    let host: string | undefined;
+    try { host = new URL(String(origin)).host; } catch { host = undefined; }
+    if (!host || host !== req.headers.host) {
+      auditDashboardDenial(coord, url, "cross-origin");
+      return sendJson(res, 403, { error: "cross-origin action rejected" });
+    }
+  }
+  if (action !== "send" && String(req.headers[CONFIRM_HEADER] ?? "") !== id) {
+    auditDashboardDenial(coord, url, "missing confirmation");
+    return sendJson(res, 400, { error: "confirmation required: set x-pi-coffee-confirm to the session id" });
+  }
+  const body = await readActionBody(req);
+  if (body === undefined) {
+    auditDashboardDenial(coord, url, "invalid body");
+    return sendJson(res, 400, { error: "invalid or oversized JSON body" });
+  }
+  try {
+    if (action === "send") {
+      const message = typeof body.message === "string" ? body.message.trim() : "";
+      if (!message) return sendJson(res, 400, { error: "message is required" });
+      await coord.send(id, message, "prompt");
+    } else if (action === "finish") {
+      const note = typeof body.note === "string" ? body.note : undefined;
+      await coord.setOutcome(id, "success_first", note);
+    } else if (action === "merge") {
+      await coord.merge(id);
+    } else {
+      await coord.stop(id, { preserveWorktree: true });
+    }
+    return sendJson(res, 200, { ok: true, action, session: id });
+  } catch (error) {
+    const message = errorText(error);
+    const status = /unknown session/i.test(message) ? 404 : 400;
+    return sendJson(res, status, { error: message });
+  }
+}
+
+async function serve(coord: Coordinator, url: URL, res: ServerResponse, actions = false): Promise<void> {
   const segments = pathSegments(url.pathname);
   if (!segments) return sendJson(res, 400, { error: "malformed path", path: url.pathname });
 
   if (segments.length === 0) {
     // Fresh CSP nonce per response; the shell carries no other dynamic value.
     const nonce = randomBytes(16).toString("hex");
-    return sendHtml(res, renderPage(coord.list().map(summarize), nonce), nonce);
+    return sendHtml(res, renderPage(coord.list().map(summarize), nonce, actions), nonce);
   }
 
   if (segments[0] !== "api" || segments.length < 2) {
@@ -581,6 +729,26 @@ export function createDashboardHandler(
     const path = url.pathname;
     if (path !== "/dashboard" && !path.startsWith("/dashboard/")) return false;
 
+    if (deps.actions && req.method === "POST" && path.startsWith("/dashboard/api/actions/")) {
+      if (!token) {
+        auditDashboardDenial(coord, url, "no token configured");
+        sendJson(res, 403, { error: "dashboard actions require PI_COFFEE_TOKEN" });
+        return true;
+      }
+      if (!authorized(req, token)) {
+        auditDashboardDenial(coord, url, "unauthorized");
+        sendJson(res, 401, { error: "unauthorized" });
+        return true;
+      }
+      try {
+        await handleAction(coord, req, res, url);
+      } catch (error) {
+        if (!res.headersSent) sendJson(res, 500, { error: errorText(error) });
+        else res.end();
+      }
+      return true;
+    }
+
     // Authenticate before reading any state or parsing the path shape.
     if (!authorized(req, token)) {
       sendJson(res, 401, { error: "unauthorized" });
@@ -599,7 +767,7 @@ export function createDashboardHandler(
     }
 
     try {
-      await serve(coord, url, res);
+      await serve(coord, url, res, deps.actions === true);
     } catch (error) {
       if (!res.headersSent) sendJson(res, 500, { error: errorText(error) });
       else res.end();
