@@ -12,6 +12,12 @@ export interface GhRunResult {
   code: number | null;
   stdout: string;
   stderr: string;
+  /**
+   * Spawn/execution failure text when `code` is null (ENOENT, timeout, signal).
+   * Without it, "gh is not installed" and "gh timed out after the merge was
+   * accepted" both rendered as `exit null`, which an operator cannot act on.
+   */
+  error?: string;
 }
 
 export type GhRunner = (args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<GhRunResult>;
@@ -21,7 +27,8 @@ export function createGhRunner(bin: string): GhRunner {
     new Promise((resolve) => {
       execFile(bin, args, { cwd, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
         const code = error ? (typeof (error as NodeJS.ErrnoException).code === "number" ? (error as unknown as { code: number }).code : null) : 0;
-        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
+        const failure = error instanceof Error ? error.message : undefined;
+        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "", ...(failure ? { error: failure.slice(0, 300) } : {}) });
       });
     });
 }
@@ -52,8 +59,14 @@ export class GhClient {
   private async run(repo: string, args: string[]): Promise<GhRunResult> {
     const result = await this.runner(args, { cwd: repo, env: this.env() });
     if (result.code !== 0) {
-      const detail = (result.stderr || result.stdout || "").trim().slice(0, 500) || `exit ${String(result.code)}`;
-      throw new Error(`gh ${args.slice(0, 2).join(" ")} failed: ${detail}`);
+      const detail = (result.stderr || result.stdout || result.error || "").trim().slice(0, 500)
+        || `exit ${String(result.code)}`;
+      // A null code means the process never produced an exit status (spawn
+      // failure or timeout): the effect may or may not have been applied.
+      const hint = result.code === null && !result.stderr.trim()
+        ? " (the command did not report a status; its effect may already be applied — verify before retrying)"
+        : "";
+      throw new Error(`gh ${args.slice(0, 2).join(" ")} failed: ${detail}${hint}`);
     }
     return result;
   }
@@ -100,18 +113,22 @@ export class GhClient {
     }
   }
 
-  /** Read the PR head and state so merge-queue cannot queue an older commit. */
-  async viewPr(repo: string, number: number): Promise<PullRequest & { headRefOid?: string }> {
-    const result = await this.run(repo, ["pr", "view", String(number), "--json", "number,url,state,headRefOid"]);
+  /** Read the PR head/state/merge commit so merge-queue cannot queue an older commit. */
+  async viewPr(repo: string, number: number): Promise<PullRequest & { headRefOid?: string; mergeCommit?: string }> {
+    const result = await this.run(repo, ["pr", "view", String(number), "--json", "number,url,state,headRefOid,mergeCommit"]);
     let parsed: unknown;
     try { parsed = JSON.parse(result.stdout); } catch { throw new Error("gh pr view returned invalid JSON"); }
-    const record = parsed as Partial<PullRequest> & { headRefOid?: unknown };
+    const record = parsed as Partial<PullRequest> & { headRefOid?: unknown; mergeCommit?: unknown };
     if (typeof record.number !== "number" || typeof record.url !== "string") throw new Error("gh pr view returned an invalid PR record");
+    const mergeCommit = typeof record.mergeCommit === "object" && record.mergeCommit !== null
+      ? (record.mergeCommit as { oid?: unknown }).oid
+      : record.mergeCommit;
     return {
       number: record.number,
       url: record.url,
       ...(typeof record.state === "string" ? { state: record.state } : {}),
       ...(typeof record.headRefOid === "string" ? { headRefOid: record.headRefOid } : {}),
+      ...(typeof mergeCommit === "string" && mergeCommit ? { mergeCommit } : {}),
     };
   }
 
@@ -120,7 +137,8 @@ export class GhClient {
     await this.run(repo, ["pr", "edit", String(number), "--add-label", label]).catch(() => undefined);
   }
 
-  async queueMerge(repo: string, number: number, method: "squash" | "merge" = "squash"): Promise<GhRunResult> {
+  /** Queue a PR for the repository's merge queue with the configured method. */
+  async queueMerge(repo: string, number: number, method: "squash" | "merge" | "rebase" = "squash"): Promise<GhRunResult> {
     return this.run(repo, ["pr", "merge", String(number), `--${method}`, "--auto"]);
   }
 }

@@ -145,7 +145,7 @@ export function renderMetrics(snapshot: MetricsSnapshot): string {
     },
     {
       name: `${METRICS_PREFIX}active_workers`,
-      help: "Workers currently occupying a concurrency slot.",
+      help: "Workers (including in-flight spawns) currently occupying a concurrency slot.",
       type: "gauge",
       samples: [{ value: gauge(snapshot?.activeWorkers) }],
     },
@@ -177,13 +177,16 @@ export function renderMetrics(snapshot: MetricsSnapshot): string {
     },
     {
       name: `${METRICS_PREFIX}verifications_total`,
-      help: "Sessions that reached a verification candidate.",
+      // A counter must not decrease; this used to be "sessions that currently
+      // hold a verification record", and any later pi_verify/pi_commit reset it.
+      help: "Successful verifications since the coordinator started.",
       type: "counter",
       samples: [{ value: counter(snapshot?.verificationsTotal) }],
     },
     {
       name: `${METRICS_PREFIX}merges_total`,
-      help: "Sessions whose branch was merged into its target branch.",
+      // Same monotonicity fix as verifications_total: a re-verify used to lower it.
+      help: "Successful branch integrations since the coordinator started.",
       type: "counter",
       samples: [{ value: counter(snapshot?.mergesTotal) }],
     },
@@ -284,13 +287,19 @@ export async function buildMetricsSnapshot(
 
   return {
     uptimeSeconds: elapsedSeconds > 0 ? elapsedSeconds : 0,
-    activeWorkers: gauge(coord.activeWorkers()),
+    // In-flight spawns already occupy a slot (reserveSlot counts them), so the
+    // capacity denominator must include them or the gauge reports free capacity
+    // right when the next spawn is refused with "max sessions reached".
+    activeWorkers: gauge(coord.activeWorkers()
+      + (typeof coord.pendingSpawns === "function" ? coord.pendingSpawns() : 0)),
     maxSessions: gauge(coord.config.maxSessions),
     draining: draining === true,
     sessionsTotal,
     spawnsTotal: counter(typeof coord.spawnsSinceStart === "function" ? coord.spawnsSinceStart() : sessions.length),
-    verificationsTotal: counter(verificationsTotal),
-    mergesTotal: counter(mergesTotal),
+    verificationsTotal: counter(typeof coord.verificationsSinceStart === "function"
+      ? coord.verificationsSinceStart()
+      : verificationsTotal),
+    mergesTotal: counter(typeof coord.mergesSinceStart === "function" ? coord.mergesSinceStart() : mergesTotal),
     costUsdTotal,
   };
 }

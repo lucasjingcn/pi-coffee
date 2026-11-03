@@ -140,12 +140,20 @@ async function post(body: unknown): Promise<unknown> {
 let buf = "";
 let pending = 0;
 let ended = false;
+let exiting = false;
 // Lines are answered in arrival order: concurrency would let a fast retried
 // request overtake an earlier one during a daemon restart window.
 let chain: Promise<void> = Promise.resolve();
 
 function maybeExit(): void {
-  if (ended && pending === 0) process.exit(0);
+  if (!ended || pending > 0 || exiting) return;
+  exiting = true;
+  // `process.exit()` truncates a response still buffered in the stdout pipe: a
+  // large JSON reply was cut mid-object and the caller could not parse it. Wait
+  // for the queued writes to flush, then exit with the normal status. The timer
+  // is only a fallback for a broken/closed stdout and does not keep us alive.
+  process.stdout.write("", () => process.exit(0));
+  setTimeout(() => process.exit(0), 1000).unref?.();
 }
 
 function enqueueLine(line: string): void {

@@ -83,13 +83,34 @@ export function normalizedScope(paths: string[]): string[] {
   return paths.map((path) => acceptancePath(path.replace(/\/$/, "")).split("\\").join("/"));
 }
 
-export async function checkChanges(meta: VerifiableSession): Promise<string[]> {
+/**
+ * Base a worker's change set is measured against.
+ *
+ * `meta.baseRef` is the SHA the worktree was created from. A worker that merges
+ * or rebases the target branch into its own branch (a normal conflict resolution)
+ * keeps that SHA as an ancestor, so `${base}...HEAD` starts pulling in everyone
+ * else's commits: the reviewer saw "changes outside declared scope" for files the
+ * worker never touched, and review was demanded for other people's test edits.
+ * Measuring against `merge-base(HEAD, target)` keeps only the worker's own work.
+ */
+export async function reviewDiffBase(worktree: string, base: string, targetRef: string): Promise<string> {
+  try {
+    const mergeBase = (await git(worktree, ["merge-base", "HEAD", targetRef])).trim();
+    if (mergeBase) return mergeBase;
+  } catch {
+    // Target ref not resolvable from this worktree (for example a remote-only
+    // branch): fall back to the spawn base rather than failing the whole review.
+  }
+  return base;
+}
+
+export async function checkChanges(meta: VerifiableSession, baseOverride?: string): Promise<string[]> {
   const scopes = normalizedScope(meta.spec?.scope ?? []);
   const hashes = await acceptanceHashes(meta.worktree, meta.acceptance?.files ?? []);
   if (Object.keys(hashes).length && JSON.stringify(hashes) !== JSON.stringify(meta.acceptance?.hashes)) {
     throw new Error("coordinator acceptance files changed or lack original hashes");
   }
-  const { files } = await worktreeDiff(meta.worktree, meta.baseRef);
+  const { files } = await worktreeDiff(meta.worktree, baseOverride ?? meta.baseRef);
   const outOfScope = files.filter((file) => !Object.hasOwn(hashes, file) && !scopes.some((p) => file === p || file.startsWith(`${p}/`)));
   if (outOfScope.length) throw new Error(`changes outside declared scope: ${outOfScope.join(", ")}`);
   return files;
@@ -189,8 +210,10 @@ export class IntegrationGate {
     const workerSha = await resolveRef(meta.worktree, "HEAD");
     if (workerSha !== await resolveRef(meta.repo, `refs/heads/${meta.branch}`)) throw new Error("worker HEAD does not match its branch");
     const targetSha = await assertTarget(meta.repo, branch);
-    const changedFiles = await checkChanges(meta);
-    const validationChanges = await existingValidationChanges(meta.repo, meta.baseRef, workerSha, meta.spec.validation_paths);
+    // Attribution base: the worker's own commits, not the target's (see reviewDiffBase).
+    const diffBase = await reviewDiffBase(meta.worktree, meta.baseRef, targetSha);
+    const changedFiles = await checkChanges(meta, diffBase);
+    const validationChanges = await existingValidationChanges(meta.repo, diffBase, workerSha, meta.spec.validation_paths);
     const tmpRoot = this.options.tmpDir ?? tmpdir();
     await mkdir(tmpRoot, { recursive: true });
     const temp = await mkdtemp(join(tmpRoot, "pi-coffee-verify-"));
@@ -264,7 +287,7 @@ export class IntegrationGate {
       const passed = failure === undefined;
       if (workerSha !== await resolveRef(meta.worktree, "HEAD") || targetSha !== await assertTarget(meta.repo, branch)
         || !(await isWorktreeClean(meta.worktree))) throw new Error("worker or target changed during verification");
-      await checkChanges(meta);
+      await checkChanges(meta, diffBase);
       if (contractHash !== reviewContractHash(meta)) throw new Error("task contract changed during verification");
       const id = randomUUID();
       const aggregate = requiredFailure ?? runs[runs.length - 1];
@@ -279,8 +302,8 @@ export class IntegrationGate {
       const dataDir = this.options.dataDir;
       if (dataDir && meta.id) {
         // One git call: the worktree is clean at this point, so a plain diff against
-        // the spawn base captures the whole reviewed change set as a patch.
-        const diff = await git(meta.worktree, ["diff", meta.baseRef]);
+        // the attribution base captures the reviewed change set as a patch.
+        const diff = await git(meta.worktree, ["diff", diffBase]);
         const artifacts: EvidenceArtifact[] = [];
         for (const validator of validators) {
           if (!validator.artifacts.length) continue;
@@ -340,10 +363,28 @@ export class IntegrationGate {
       || proof.workerSha !== await resolveRef(meta.repo, `refs/heads/${meta.branch}`)) {
       throw new Error("worker changed since verification; run pi_verify again");
     }
-    await checkChanges(meta);
+    const currentTarget = await assertTarget(meta.repo, branch);
+    // Same attribution base as verification: a worker branch that merged the
+    // target must not be re-judged against the target's own commits.
+    await checkChanges(meta, await reviewDiffBase(meta.worktree, meta.baseRef, currentTarget));
     if (proof.evidence && this.options.dataDir) await assertEvidenceIntact(this.options.dataDir, proof.evidence);
-    const expected = integrated ? meta.integration?.mergedSha : proof.targetSha;
-    if (!expected || await assertTarget(meta.repo, branch) !== expected) throw new Error("target changed since verification; run pi_verify again");
+    if (integrated) {
+      const mergedSha = meta.integration?.mergedSha;
+      if (!mergedSha) throw new Error("integration record is missing; merge the worker branch first");
+      // Later merges into the same target move HEAD, so requiring an exact match
+      // would permanently block finishing an earlier session (merge A, merge B,
+      // then finish A). The recorded merge commit must still be in the target's
+      // history, which is what "integrated" means.
+      if (currentTarget !== mergedSha) {
+        try {
+          await git(meta.repo, ["merge-base", "--is-ancestor", mergedSha, currentTarget]);
+        } catch {
+          throw new Error("target changed since verification; run pi_verify again");
+        }
+      }
+    } else if (currentTarget !== proof.targetSha) {
+      throw new Error("target changed since verification; run pi_verify again");
+    }
     if (integrated && (meta.integration?.workerSha !== proof.workerSha
       || meta.integration.candidateTree !== proof.candidateTree)) throw new Error("integration does not match verification");
     if (requireReview && ((meta.spec?.requirements?.length ?? 0) > 0 || proof.existingValidationChanges.length > 0)) {
@@ -385,14 +426,11 @@ async function isCandidateClean(dir: string, validators: ResolvedValidator[]): P
   if (await isWorktreeClean(dir)) return true;
   const patterns = validators.flatMap((validator) => validator.artifacts);
   if (patterns.length === 0) return false;
-  // `gitRaw`: a modified tracked file starts with a space (` M path`), and a
-  // trimmed first line loses that column, so `slice(3)` would eat two path
-  // characters and no artifact glob could ever match a tracked report file.
-  const status = await gitRaw(dir, ["status", "--porcelain", "--untracked-files=all"]);
-  const paths = status.split("\n").filter(Boolean).map((line) => {
-    const raw = line.slice(3).trim();
-    const arrow = raw.lastIndexOf(" -> ");
-    return arrow >= 0 ? raw.slice(arrow + 4) : raw;
-  });
+  // `-z` gives literal, unquoted, NUL-delimited paths: porcelain v1 quotes paths
+  // containing spaces/quotes/backslashes, and the quoted literal never matched an
+  // artifact glob, so a declared report file was reported as an unexplained edit.
+  // `--no-renames` removes the two-field rename record form.
+  const status = await gitRaw(dir, ["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"]);
+  const paths = status.split("\0").filter(Boolean).map((record) => record.slice(3));
   return paths.length > 0 && paths.every((path) => matchesArtifactPatterns(path, patterns));
 }

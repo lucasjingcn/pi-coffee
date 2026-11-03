@@ -253,3 +253,20 @@ test("the generated YAML row is a patch list DSH can load", () => {
     cleanup();
   }
 });
+
+test("--write refuses a hand-registered pi-coffee row instead of exiting 0", () => {
+  const { dir, cleanup } = tempDir();
+  try {
+    const target = join(dir, "cordis.patch.yml");
+    const original = "- id: hand-written\n  serverName: pi-coffee\n  url: http://127.0.0.1:9999/mcp\n";
+    writeFileSync(target, original);
+    const result = run(["--write", "--config", target]);
+    // Exit 0 here told every script/automation the config was ready while the row
+    // still pointed at the old port.
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /outside this script's managed block/);
+    assert.equal(readFileSync(target, "utf8"), original, "the file is left untouched");
+  } finally {
+    cleanup();
+  }
+});

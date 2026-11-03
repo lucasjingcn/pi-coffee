@@ -43,7 +43,12 @@ test('malformed Host cannot crash daemon and bad internal JSON returns 400', { t
     req.on('error', reject); req.end();
   });
   assert.equal(status, 200);
-  assert.equal((await fetch(base + '/internal/read', { method: 'POST', body: '{bad' })).status, 400);
+  // A non-JSON body is refused before parsing: browsers can send text/plain
+  // cross-site without a preflight, and that is the CSRF vector below.
+  assert.equal((await fetch(base + '/internal/read', { method: 'POST', body: '{bad' })).status, 415);
+  assert.equal((await fetch(base + '/internal/read', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad',
+  })).status, 400);
   assert.equal((await fetch(base + '/internal/health')).status, 200);
 }));
 
@@ -152,4 +157,37 @@ test('HEAD works for health probes on /metrics and /dashboard', {timeout: 10000}
     assert.ok(response.headers.get('content-type'), `${path} keeps its content type`);
     assert.equal(await response.text(), '', `${path} must not return a body`);
   }
+}));
+
+test('a cross-site page cannot drive mutating internal endpoints', { timeout: 15000 }, async () => daemon(async (base, port) => {
+  // A "simple request" needs no preflight, so POST-only does not stop a page:
+  // text/plain and form posts are the realistic attack shapes.
+  const plain = await fetch(base + '/internal/drain?action=start', {
+    method: 'POST', headers: { 'content-type': 'text/plain', origin: 'http://evil.example' }, body: '{}',
+  });
+  assert.equal(plain.status, 415, 'text/plain bodies are refused');
+  const form = await fetch(base + '/internal/drain?action=start', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://evil.example' },
+    body: 'action=start',
+  });
+  assert.equal(form.status, 415, 'form posts are refused');
+  const crossOrigin = await fetch(base + '/internal/drain?action=start', {
+    method: 'POST', headers: { 'content-type': 'application/json', origin: 'http://evil.example' }, body: '{}',
+  });
+  assert.equal(crossOrigin.status, 403, 'a foreign Origin is rejected even with a JSON body');
+  const crossSite = await fetch(base + '/internal/drain?action=start', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' }, body: '{}',
+  });
+  assert.equal(crossSite.status, 403, 'an explicit cross-site fetch is rejected');
+  // A same-origin page and non-browser clients (no Origin/Sec-Fetch-*) still work.
+  const sameOrigin = await fetch(base + '/internal/drain?action=start', {
+    method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: '{}',
+  });
+  assert.equal(sameOrigin.status, 200);
+  const status = await (await fetch(base + '/internal/drain?action=status')).json();
+  assert.equal(status.draining, true, 'the accepted request ran');
+  const cancelled = await fetch(base + '/internal/drain?action=cancel', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(cancelled.status, 200);
 }));

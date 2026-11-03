@@ -75,9 +75,10 @@ export interface GitMount {
   /** Absolute path the container must see it at: the one git itself recorded. */
   container: string;
   /**
-   * Mounted `:ro`. Used for the repository's hook directory: a container needs to
-   * read git's metadata, but planting a hook there would let it run code on the
-   * host, because `pi_commit`, `pi_merge` and friends execute repository hooks.
+   * Mounted `:ro`. Used for the repository's hook directory and its config file:
+   * a container needs to read git's metadata, but writing either lets it run code
+   * on the host (`core.hooksPath`, `filter.*.clean` + `.gitattributes`) because
+   * `pi_commit`, `pi_merge` and friends execute git on the host.
    */
   readOnly?: boolean;
 }
@@ -125,8 +126,19 @@ function realpathOrUndefined(path: string): string | undefined {
  *
  * A plain checkout (`.git` is a directory inside the mounted tree) needs nothing
  * extra and returns no mounts.
+ *
+ * `allowedRepoRoot` is the repository the caller knows it is sandboxing. The
+ * `.git` pointer and `commondir` are read from the mounted tree, which a
+ * sandboxed process can rewrite, so without this check a worker could point the
+ * next container at an arbitrary host path (for example the daemon user's HOME).
+ * When it is set, metadata outside that root yields no mounts (git then fails
+ * loudly inside the container instead of exposing the host).
  */
-export function resolveGitMounts(hostCwd: string, containerCwd: string): GitMount[] {
+export function resolveGitMounts(
+  hostCwd: string,
+  containerCwd: string,
+  opts: { allowedRepoRoot?: string } = {},
+): GitMount[] {
   const dotGit = join(hostCwd, ".git");
   let linkTarget: string | undefined;
   let stat: Stats;
@@ -170,6 +182,12 @@ export function resolveGitMounts(hostCwd: string, containerCwd: string): GitMoun
   const commonContainer = commonPointer
     ? (isAbsolute(commonPointer) ? commonPointer : resolve(gitDirContainer, commonPointer))
     : gitDirContainer;
+  // Never mount git metadata that a sandboxed process redirected outside the
+  // repository the caller believes it is sandboxing.
+  if (opts.allowedRepoRoot !== undefined) {
+    const allowed = realpathOrUndefined(opts.allowedRepoRoot);
+    if (!allowed || !isInside(allowed, gitDirHost) || !isInside(allowed, commonHost)) return [];
+  }
 
   const wanted: GitMount[] = commonHost === gitDirHost
     ? [{ host: commonHost, container: commonContainer }]
@@ -192,6 +210,22 @@ export function resolveGitMounts(hostCwd: string, containerCwd: string): GitMoun
   const hooksHost = join(commonHost, "hooks");
   if (commonMount && isDirectory(hooksHost)) {
     mounts.push({ host: hooksHost, container: join(commonMount.container, "hooks"), readOnly: true });
+  }
+  // The repository config is the other way to make host git run container code
+  // (`core.hooksPath` points anywhere; `filter.<name>.clean` runs during
+  // `git add`). Mount it back read-only over the writable metadata mount, after
+  // the hooks entry so both nest correctly. Git only reads it for a commit, so
+  // `git add`/`git commit` inside the container keep working.
+  if (commonMount) {
+    for (const name of ["config", "config.worktree"]) {
+      const host = join(commonHost, name);
+      try {
+        if (!statSync(host).isFile()) continue;
+      } catch {
+        continue;
+      }
+      mounts.push({ host, container: join(commonMount.container, name), readOnly: true });
+    }
   }
   return mounts;
 }
@@ -294,6 +328,8 @@ export class DockerSandbox {
     command: string,
     timeoutMs: number,
     extraEnv?: Record<string, string>,
+    /** Repository this checkout belongs to; bounds the git metadata mounts. */
+    allowedRepoRoot?: string,
   ): Promise<SandboxExecResult> {
     const probe = await this.probe();
     if (!probe.ok) throw new Error(`sandbox requested but docker is unavailable: ${probe.error ?? "unknown error"}`);
@@ -322,7 +358,7 @@ export class DockerSandbox {
       "--network", shellQuote(this.config.network),
       ...userArgs.map((part, index) => (index % 2 === 0 ? part : shellQuote(part))),
       "-v", shellQuote(`${resolve(hostCwd)}:${WORKER_WORKSPACE}`),
-      ...resolveGitMounts(hostCwd, WORKER_WORKSPACE)
+      ...resolveGitMounts(hostCwd, WORKER_WORKSPACE, allowedRepoRoot !== undefined ? { allowedRepoRoot } : {})
         .flatMap((mount) => ["-v", shellQuote(`${mount.host}:${mount.container}${mount.readOnly ? ":ro" : ""}`)]),
       "-w", WORKER_WORKSPACE,
       ...envArgs.map((part, index) => (index % 2 === 0 ? part : shellQuote(part))),
@@ -331,8 +367,14 @@ export class DockerSandbox {
     ];
     const result = await this.runner(argv.join(" "), process.cwd(), timeoutMs);
     if (result.timedOut) {
-      await this.runner(`${shellQuote(this.config.dockerBin)} rm -f ${shellQuote(name)}`, process.cwd(), 15_000)
-        .catch(() => undefined);
+      // `docker run` keeps running after its CLI is killed; only `rm -f` stops
+      // it. A timeout whose container cannot be removed is not a clean failure:
+      // it can keep writing the candidate and `<repo>/.git`, so surface it.
+      const removal = await this.runner(`${shellQuote(this.config.dockerBin)} rm -f ${shellQuote(name)}`,
+        process.cwd(), 15_000).catch((error: unknown) => ({ code: null, stdout: "", stderr: String(error), timedOut: false }));
+      if (removal.timedOut || removal.code !== 0) {
+        throw new Error(`sandbox command timed out and its container could not be removed: ${(removal.stderr || removal.stdout).trim().slice(0, 200)}`);
+      }
     }
     return result;
   }
@@ -376,10 +418,12 @@ export interface WorkerContainerOptions {
   envAllow: string[];
   port: number;
   dockerBin: string;
-  /** Host name the container uses to reach the daemon (`host.docker.internal` by default). */
+  /** Host name the container uses to reach this daemon (`host.docker.internal` by default). */
   coordHost: string;
   /** `auto` (host user on Linux), `root`, or an explicit `uid:gid`. */
   user?: string;
+  /** Repository the worktree belongs to; bounds the git metadata mounts. */
+  repo?: string;
 }
 
 /**
@@ -391,7 +435,8 @@ export interface WorkerContainerOptions {
  */
 export function buildWorkerDockerPrefix(opts: WorkerContainerOptions): { bin: string; args: string[] } {
   const userArgs = sandboxUserArgs(opts.user ?? "auto");
-  const gitMounts = resolveGitMounts(opts.worktree, WORKER_WORKSPACE);
+  const gitMounts = resolveGitMounts(opts.worktree, WORKER_WORKSPACE,
+    opts.repo !== undefined ? { allowedRepoRoot: opts.repo } : {});
   return {
     bin: opts.dockerBin,
     args: [

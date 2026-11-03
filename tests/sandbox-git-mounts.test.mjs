@@ -38,6 +38,10 @@ test("a linked worktree mounts the common git dir at the path git recorded", asy
       // Hooks stay read-only: a hook written by a container would execute on the
       // host, because pi_commit/pi_merge do run repository hooks.
       { host: join(common, "hooks"), container: join(common, "hooks"), readOnly: true },
+      // The config is what redirects those hooks (`core.hooksPath`) and defines
+      // clean filters (`filter.*.clean` runs during `git add`), so it is read-only
+      // too, layered after the writable metadata mount.
+      { host: join(common, "config"), container: join(common, "config"), readOnly: true },
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -73,6 +77,7 @@ test("a separate git dir outside the checkout is mounted at its recorded path", 
     assert.deepEqual(resolveGitMounts(worktree, "/workspace"), [
       { host: real, container: real },
       { host: join(real, "hooks"), container: join(real, "hooks"), readOnly: true },
+      { host: join(real, "config"), container: join(real, "config"), readOnly: true },
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });

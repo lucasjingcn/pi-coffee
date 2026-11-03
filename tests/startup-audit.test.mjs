@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp, readFile, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {writeEnvFile} from '../scripts/lib/env.mjs';
@@ -115,3 +115,18 @@ test('every launcher and client script uses the daemon env precedence', async ()
     assert.doesNotMatch(text, /override: true/, `${script} must not let the file override the environment`);
   }
 });
+
+test('doctor honours PI_CODING_AGENT_DIR instead of hardcoding ~/.pi/agent', async () => fixture(async (dir) => {
+  // pi itself resolves its agent directory from PI_CODING_AGENT_DIR first; a
+  // relocated store made the doctor report a false FAIL and exit 1.
+  const agentDir = join(dir, 'relocated-agent');
+  await mkdir(agentDir, {recursive: true});
+  await writeFile(join(agentDir, 'auth.json'), '{"openai":{"type":"api_key","key":"fixture"}}\n');
+  const file = join(dir, 'env');
+  const home = join(dir, 'home');
+  writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-relocated-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir, PI_COFFEE_ENV_FILE: file};
+  const result = await run('scripts/doctor.mjs', env);
+  assert.match(result.stdout, /ok\s+credentials for pi-audit-relocated-provider/, result.stdout + result.stderr);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+}));

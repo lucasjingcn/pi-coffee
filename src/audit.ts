@@ -273,8 +273,18 @@ export class AuditLog {
     });
   }
 
-  /** Parse every entry in file order. Unreadable files are reported, not skipped. */
+  /**
+   * Parse every entry in file order. Unreadable files are reported, not skipped.
+   *
+   * Reads share the append queue: an append writes the entry file before it
+   * rewrites the head sidecar, so an unserialized read could observe that window
+   * (log at seq N, sidecar at N-1) and report a healthy chain as BROKEN.
+   */
   async entries(): Promise<{ entries: AuditEntry[]; files: string[]; error?: string }> {
+    return this.enqueue(() => this.readEntries());
+  }
+
+  private async readEntries(): Promise<{ entries: AuditEntry[]; files: string[]; error?: string }> {
     const indexes = await this.fileIndexes();
     const files = indexes.map((index) => AuditLog.fileName(index));
     const entries: AuditEntry[] = [];
@@ -299,7 +309,12 @@ export class AuditLog {
 
   /** Recompute the whole chain and compare the tail against the head sidecar. */
   async verify(): Promise<AuditVerifyResult> {
-    const parsed = await this.entries();
+    return this.enqueue(async () => this.verifyLocked());
+  }
+
+  /** Verify body; callers must already hold the append queue. */
+  private async verifyLocked(): Promise<AuditVerifyResult> {
+    const parsed = await this.readEntries();
     if (parsed.error) {
       return { ok: false, entries: parsed.entries.length, files: parsed.files, reason: parsed.error };
     }
@@ -336,6 +351,28 @@ export class AuditLog {
         firstBrokenSeq: sidecar.seq,
         reason: "audit head hash does not match the chained entry",
       };
+    }
+    // The head sidecar is the only anchor: anything appended past it was not
+    // written by this log, so a hash-consistent forged tail used to be accepted.
+    // The one legitimate lag is our own append whose sidecar write failed (the
+    // durable entry keeps its seq and the next append repairs the sidecar); that
+    // state is visible in memory as a cached head pointing at the newest entry.
+    if (sidecar.seq !== last.seq) {
+      const ownSidecarWritePending = this.cachedHead !== undefined
+        && this.cachedHead.seq === last.seq
+        && this.cachedHead.hash === last.hash;
+      if (!ownSidecarWritePending) {
+        const extra = last.seq - sidecar.seq;
+        return {
+          ok: false,
+          entries: entries.length,
+          files: parsed.files,
+          head: sidecar,
+          firstBrokenSeq: sidecar.seq + 1,
+          reason: `audit log has ${extra} entr${extra === 1 ? "y" : "ies"} past the head sidecar `
+            + `(last anchored seq ${sidecar.seq}); the tail was appended without updating the chain head`,
+        };
+      }
     }
     return { ok: true, entries: entries.length, files: parsed.files, head: sidecar };
   }

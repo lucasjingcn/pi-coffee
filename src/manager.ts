@@ -12,7 +12,7 @@ import { resolveRepoIdentity } from "./lock-repo.js";
 import { captureWorkerProcess, stopOwnedWorker, type WorkerProcessIdentity } from "./worker-process.js";
 import { ControlVault } from "./control-vault.js";
 import { StateStore } from "./state-store.js";
-import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, type Verification, type IntegrationRecord } from "./integration.js";
+import { acceptanceHashes, checkChanges, IntegrationGate, normalizedScope, reviewDiffBase, type Verification, type IntegrationRecord } from "./integration.js";
 import { summarizeCostEvidence, validateCostRecord, type OrchestratorCostRecord } from "./cost-evidence.js";
 import { PiRpcClient } from "./rpc-client.js";
 import { prepareWorkerAgentDir } from "./worker-agent-dir.js";
@@ -318,6 +318,10 @@ export class Coordinator {
   private draining = false;
   /** Successful worker creations since this daemon started (Prometheus counter). */
   private spawnCount = 0;
+  /** Successful verifications since this daemon started (monotonic Prometheus counter). */
+  private verificationCount = 0;
+  /** Successful merges since this daemon started (monotonic Prometheus counter). */
+  private mergeCount = 0;
   private drainStartedAt: number | undefined;
   private drainReason: string | undefined;
 
@@ -951,8 +955,27 @@ export class Coordinator {
       ? `no evidence bundle ${verificationId} for session ${sessionId}`
       : `no evidence bundles for session ${sessionId}`);
     const result = await verifyEvidenceBundle(evidenceDir(this.config.dataDir, chosen));
+    // Internal consistency is not enough: the merge gate trusts the manifest hash
+    // recorded in the verification, so a bundle that was replaced by a different
+    // (self-consistent) one must not be reported as ok here while pi_merge refuses
+    // it. When the bundle is the one this session's current verification cites,
+    // compare its recorded manifest hash too.
+    const meta = this.snapshot(sessionId);
+    const recorded = meta.verification?.evidence;
+    let manifestMatches: boolean | undefined;
+    if (recorded && recorded.dir === chosen.dir) {
+      try {
+        const raw = await readFile(join(this.config.dataDir, chosen.dir, "manifest.json"));
+        manifestMatches = createHash("sha256").update(raw).digest("hex") === recorded.manifestSha256;
+      } catch {
+        manifestMatches = false;
+      }
+    }
     return { session_id: sessionId, verification_id: chosen.verificationId, dir: chosen.dir,
-      ok: result.ok, entries: result.manifest.files.length, mismatches: result.mismatches };
+      ok: result.ok && manifestMatches !== false, entries: result.manifest.files.length,
+      mismatches: result.mismatches,
+      ...(manifestMatches !== undefined ? { currentVerification: true, manifestMatches,
+        recordedManifestSha256: recorded?.manifestSha256 } : { currentVerification: false }) };
   }
 
   private async gcBranches(selected?: Set<string>): Promise<{
@@ -1486,7 +1509,10 @@ export class Coordinator {
     let wt!: WorktreeInfo;
     try {
       baseSha = await resolveRef(repo, requestedBase);
-      wt = await createWorktree({ repo, dir, branch, baseRef: baseSha });
+      wt = await createWorktree({ repo, dir, branch, baseRef: baseSha,
+        // A docker-sandboxed worker can rewrite the repository config; never let
+        // a hook it redirected run during `git worktree add` in the daemon.
+        disableHooks: this.config.sandbox === "docker" });
     } catch (e) {
       this.releaseSpawnReservations(id, acceptancePaths, acceptanceReserved, repoIdentity);
       throw e;
@@ -1547,6 +1573,7 @@ export class Coordinator {
       dockerBin: this.config.dockerBin,
       coordHost: this.config.sandboxCoordHost,
       user: this.config.sandboxUser,
+      repo: meta.repo,
     }) : undefined;
     const client: WorkerTransport = runnerKind === "acp"
       ? new AcpClient({
@@ -1821,6 +1848,7 @@ export class Coordinator {
       dockerBin: this.config.dockerBin,
       coordHost: this.config.sandboxCoordHost,
       user: this.config.sandboxUser,
+      repo: meta.repo,
     }) : undefined;
     const client = new PiRpcClient({
       cwd: meta.worktree,
@@ -2117,6 +2145,16 @@ export class Coordinator {
     return this.spawnCount;
   }
 
+  /** Public: successful verifications since this daemon started (Prometheus counter). */
+  verificationsSinceStart(): number {
+    return this.verificationCount;
+  }
+
+  /** Public: successful merges since this daemon started (Prometheus counter). */
+  mergesSinceStart(): number {
+    return this.mergeCount;
+  }
+
   /** Public: spawns/resumes that reserved a slot but have not registered yet. */
   pendingSpawns(): number {
     return this.reserved;
@@ -2344,7 +2382,7 @@ export class Coordinator {
     message: string,
     mode: "prompt" | "steer" | "followup" = "prompt",
     countInstruction = true,
-    opts: { provider?: string; model?: string } = {},
+    opts: { provider?: string; model?: string; maxInstructions?: number } = {},
   ): Promise<void> {
     const rt = this.get(id);
     this.assertRepoAvailable(rt.repoIdentity);
@@ -2357,6 +2395,19 @@ export class Coordinator {
     rt.meta.candidateReview = undefined;
     if (rt.meta.status === "error" || rt.meta.status === "stopped") {
       throw new Error(`session ${id} is ${rt.meta.status}`);
+    }
+
+    // Reserve the instruction slot synchronously, before the first await: a
+    // read-then-act gate in a caller (the dashboard's Send button) let two
+    // concurrent requests both pass and deliver the same instruction twice.
+    let reservedInstruction = false;
+    if (countInstruction && opts.maxInstructions !== undefined) {
+      const sent = rt.meta.instructionsSent ?? 0;
+      if (sent >= opts.maxInstructions) {
+        throw new Error(`two-strikes gate: this session already has ${sent} instruction(s); take the work over instead`);
+      }
+      rt.meta.instructionsSent = sent + 1;
+      reservedInstruction = true;
     }
 
     const previousStatus = rt.meta.status;
@@ -2377,12 +2428,17 @@ export class Coordinator {
       else await rt.client.prompt(message);
     } catch (error) {
       if (rt.meta.status === "working" && !rt.client.isStreaming) rt.meta.status = previousStatus;
+      // The instruction was not delivered: give the reserved slot back so a
+      // retry is not charged twice.
+      if (reservedInstruction) {
+        rt.meta.instructionsSent = Math.max(0, (rt.meta.instructionsSent ?? 1) - 1);
+      }
       throw error;
     }
 
     if (countInstruction) {
       rt.meta.orchestratorChars = (rt.meta.orchestratorChars ?? 0) + message.length;
-      rt.meta.instructionsSent = (rt.meta.instructionsSent ?? 0) + 1;
+      if (!reservedInstruction) rt.meta.instructionsSent = (rt.meta.instructionsSent ?? 0) + 1;
     }
     rt.meta.lastActivity = Date.now();
     this.notifyWaiters();
@@ -2447,11 +2503,17 @@ export class Coordinator {
     this.assertUnfinished(rt);
     return this.withRepoGuard(rt, async () => {
       if (rt.meta.status !== "idle" && rt.meta.status !== "stopped") throw new Error("settle the worker before committing");
-      await checkChanges(rt.meta);
+      // Same attribution base as verification: after the worker merges the target
+      // into its branch, the target's own commits must not read as its changes.
+      let commitBase = rt.meta.baseRef;
+      try {
+        commitBase = await reviewDiffBase(rt.meta.worktree, rt.meta.baseRef, await currentBranch(rt.meta.repo));
+      } catch { /* keep the spawn base when the target branch is not resolvable */ }
+      await checkChanges(rt.meta, commitBase);
       rt.meta.verification = undefined;
       rt.meta.integration = undefined;
       rt.meta.candidateReview = undefined;
-      const sha = await commitAll(rt.meta.worktree, message);
+      const sha = await commitAll(rt.meta.worktree, message, { disableHooks: rt.meta.sandbox?.kind === "docker" });
       await this.auditStrict("orchestrator", "commit", id, { sha });
       return sha;
     });
@@ -2511,7 +2573,7 @@ export class Coordinator {
         (cwd, command, validatorTimeout, env) => {
           const effectiveTimeout = validatorTimeout ?? timeoutMs;
           return this.sandbox
-            ? this.sandbox.run(cwd, command, effectiveTimeout, env)
+            ? this.sandbox.run(cwd, command, effectiveTimeout, env, rt.meta.repo)
             : runCommand(command, cwd, effectiveTimeout, false, env);
         },
         timeoutMs);
@@ -2522,6 +2584,7 @@ export class Coordinator {
         targetBranch: proof.targetBranch, evidence: proof.evidence?.dir ?? null,
         evidenceManifestSha256: proof.evidence?.manifestSha256 ?? null });
       rt.meta.verification = proof;
+      if (proof.passed) this.verificationCount += 1;
       this.scheduleSave();
       return proof;
     });
@@ -2535,13 +2598,19 @@ export class Coordinator {
       const target = into ?? await currentBranch(rt.meta.repo);
       const proof = await this.integrationGate.assertCurrent(rt.meta, target);
       await this.auditStrict("orchestrator", "merge", id, { target, workerSha: proof.workerSha, phase: "starting" });
-      const result = await mergeBranch(rt.meta.repo, proof.workerSha, target, { noFf });
+      const result = await mergeBranch(rt.meta.repo, proof.workerSha, target, {
+        noFf,
+        // A sandboxed worker can write the repository config; never let its
+        // `core.hooksPath` run code in the daemon's process tree.
+        disableHooks: rt.meta.sandbox?.kind === "docker",
+      });
       if (result.ok) {
         const mergedSha = await resolveRef(rt.meta.repo, "HEAD");
         const tree = await resolveRef(rt.meta.repo, "HEAD^{tree}");
         if (tree !== proof.candidateTree) throw new Error("integrated tree differs from tested candidate; no success recorded");
         rt.meta.integration = { workerSha: proof.workerSha, targetBranch: target, previousTargetSha: proof.targetSha,
           mergedSha, candidateTree: tree, integratedAt: Date.now() };
+        this.mergeCount += 1;
         this.scheduleSave();
       }
       if (result.ok) await this.auditBestEffort("orchestrator", "merge_complete", id, { target,
@@ -2604,6 +2673,34 @@ export class Coordinator {
     return lines.join("\n");
   }
 
+  /**
+   * Adopt a merged merge-queue PR as this session's integration record.
+   *
+   * `pi_merge mode=merge-queue` deliberately writes nothing local (the merge has
+   * not happened yet), but finishing a code-changing session requires an
+   * integration record. Without this reconciliation a merge-queue session could
+   * never be finished, and the README's "re-verify and finish" advice failed.
+   * This only records what GitHub reports: the PR must be MERGED and expose a
+   * merge commit, and `assertCurrent` then still proves that commit is in the
+   * target branch's history.
+   */
+  private async reconcileMergeQueueIntegration(rt: Runtime): Promise<void> {
+    if (rt.meta.integration || !rt.meta.pr || !rt.meta.verification) return;
+    const proof = rt.meta.verification;
+    const viewed = await this.gh.viewPr(rt.meta.repo, rt.meta.pr.number).catch(() => undefined);
+    if (!viewed || String(viewed.state ?? "").toUpperCase() !== "MERGED" || !viewed.mergeCommit) return;
+    rt.meta.integration = {
+      workerSha: proof.workerSha,
+      targetBranch: proof.targetBranch,
+      previousTargetSha: proof.targetSha,
+      mergedSha: viewed.mergeCommit,
+      candidateTree: proof.candidateTree,
+      integratedAt: Date.now(),
+    };
+    rt.meta.pr = { ...rt.meta.pr, state: viewed.state };
+    this.scheduleSave();
+  }
+
   /** Queue a PR merge via the GitHub merge queue; the local integration record is not written. */
   async mergeViaQueue(id: string, into?: string): Promise<Record<string, unknown>> {
     const rt = this.get(id);
@@ -2630,7 +2727,10 @@ export class Coordinator {
         throw new Error(`pull request head ${viewed.headRefOid ?? "unknown"} does not match verified worker ${proof.workerSha}; push and re-verify first`);
       }
       await this.auditStrict("orchestrator", "merge_queue", id, { number: rt.meta.pr.number, base, phase: "starting" });
-      await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number);
+      // The method is repository policy (merge queue rules), not a guess: `gh pr
+      // merge` used to hardcode --squash, which the merge queue rejects in a
+      // repo that only allows merge commits.
+      await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number, this.config.prMergeMethod);
       this.scheduleSave();
       await this.auditBestEffort("orchestrator", "merge_queue_complete", id, { number: rt.meta.pr.number, base });
       return { ok: true, queued: true, pr: rt.meta.pr, note: "merge queue accepted the PR; verify the merged commit before recording success" };
@@ -2858,6 +2958,37 @@ export class Coordinator {
     return this.locks.list();
   }
 
+  /**
+   * Lock table a viewer may see. The operator (no viewer) sees everything; a
+   * worker token is limited to its own session and scope, so another chat's
+   * paths and repositories never cross that boundary.
+   */
+  locksVisibleTo(viewerId?: string) {
+    const all = this.locks.list();
+    if (!viewerId) return all;
+    const viewer = this.snapshot(viewerId);
+    const scope = viewer.scopeKeyHash;
+    const visibleSessions = new Set<string>([viewerId]);
+    if (scope) {
+      for (const meta of this.knownSessions()) {
+        if (meta.scopeKeyHash === scope) visibleSessions.add(meta.id);
+      }
+    }
+    // Acceptance reservations are held by the shared "codex" owner, so match them
+    // by this session's own declared acceptance files instead of exposing every
+    // orchestrator-held lock.
+    const acceptancePaths = new Set((viewer.acceptance?.files ?? []).map((path) => path.replace(/^\.\//, "").replace(/\/+$/, "")));
+    const ownsAcceptanceLock = (path: string): boolean => {
+      const normalized = path.replace(/^\/+/, "").replace(/\/+$/, "");
+      for (const declared of acceptancePaths) {
+        if (normalized === declared || normalized.startsWith(`${declared}/`) || declared.startsWith(`${normalized}/`)) return true;
+      }
+      return false;
+    };
+    return all.filter((lock) => visibleSessions.has(lock.sessionId)
+      || (lock.sessionId === "codex" && ownsAcceptanceLock(lock.path)));
+  }
+
   // -------------------------------------------------------------------------
   // Mailbox and board
   // -------------------------------------------------------------------------
@@ -2970,7 +3101,12 @@ export class Coordinator {
     return this.board.latest(board);
   }
 
-  async setOutcome(id: string, outcome: Outcome, note?: string): Promise<void> {
+  async setOutcome(
+    id: string,
+    outcome: Outcome,
+    note?: string,
+    stopOpts: { removeWorktree?: boolean; deleteBranch?: boolean; preserveWorktree?: boolean } = {},
+  ): Promise<void> {
     if (outcome === "taken_over" && !note?.trim()) {
       throw new Error("taken_over requires a nonempty note explaining the takeover reason");
     }
@@ -3023,6 +3159,11 @@ export class Coordinator {
       } else if (FINISHED_OUTCOMES.has(outcome)) {
         const proof = rt.meta.verification;
         if (!proof) throw new Error("successful outcome requires current pi_verify evidence");
+        // merge-queue sessions have no local integration record until the PR is
+        // actually merged. Fill it from GitHub (read-only) so a verified session
+        // can be finished once its queued PR landed; still fails closed when the
+        // PR is missing, open, or not merged.
+        if (proof.codeChanged) await this.reconcileMergeQueueIntegration(rt);
         await this.integrationGate.assertCurrent(rt.meta, proof.targetBranch, proof.codeChanged);
       }
       rt.meta.outcome = outcome;
@@ -3052,7 +3193,10 @@ export class Coordinator {
       this.archive(rt.meta);
       this.scheduleSave();
     } else {
-      await this.stop(id);
+      // The caller's stop options must survive the finish: `pi_stop` with an
+      // outcome used to drop `preserve_worktree`/`delete_branch` here, and the
+      // default autoClean then removed the worktree anyway.
+      await this.stop(id, stopOpts);
     }
   }
 

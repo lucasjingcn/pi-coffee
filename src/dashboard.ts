@@ -152,6 +152,11 @@ function isUnknownSession(error: unknown): boolean {
 // Session projection (allowlist: nothing secret is ever copied)
 // ---------------------------------------------------------------------------
 
+/** File lists a single session may contribute to the console payload. */
+const MAX_LISTED_FILES = 50;
+/** Characters of patch text the diff route returns before truncating. */
+const MAX_DIFF_CHARS = 2 * 1024 * 1024;
+
 function verificationView(meta: SessionMeta): VerificationView | null {
   const verification = meta.verification;
   if (!verification) return null;
@@ -160,8 +165,10 @@ function verificationView(meta: SessionMeta): VerificationView | null {
     verifiedAt: verification.verifiedAt,
     command: verification.command,
     codeChanged: verification.codeChanged,
-    changedFiles: [...verification.changedFiles],
-    existingValidationChanges: [...verification.existingValidationChanges],
+    // The list is polled every 5 s for up to 200 sessions and the table only
+    // shows counts; a thousand-entry file list per session was pure bandwidth.
+    changedFiles: verification.changedFiles.slice(0, MAX_LISTED_FILES),
+    existingValidationChanges: verification.existingValidationChanges.slice(0, MAX_LISTED_FILES),
   };
 }
 
@@ -626,11 +633,10 @@ async function handleAction(coord: Coordinator, req: IncomingMessage, res: Serve
     if (action === "send") {
       const message = typeof body.message === "string" ? body.message.trim() : "";
       if (!message) return sendJson(res, 400, { error: "message is required" });
-      const meta = coord.snapshot(id);
-      if ((meta.instructionsSent ?? 0) >= 2) {
-        return sendJson(res, 400, { error: "two-strikes gate: this session already has its initial task and one correction; take the work over instead" });
-      }
-      await coord.send(id, message, "prompt");
+      // The gate is enforced (and reserved) inside the coordinator: checking
+      // `instructionsSent` here and sending afterwards let a double-click pass
+      // twice and deliver the same instruction two times.
+      await coord.send(id, message, "prompt", true, { maxInstructions: 2 });
     } else if (action === "finish") {
       const note = typeof body.note === "string" ? body.note : undefined;
       // A retried or taken-over session is not a first-try success; without this
@@ -641,7 +647,13 @@ async function handleAction(coord: Coordinator, req: IncomingMessage, res: Serve
       if (!outcome) return sendJson(res, 400, { error: `outcome must be one of ${[...DASHBOARD_OUTCOMES.keys()].join(", ")}` });
       await coord.setOutcome(id, outcome, note);
     } else if (action === "merge") {
-      await coord.merge(id);
+      const result = await coord.merge(id);
+      // A git-level merge failure is not a malformed request, but answering
+      // 200 {"ok":true} told the operator the merge landed when it did not (and
+      // skipped the merge_complete audit). Surface the real result.
+      if (result && result.ok === false) {
+        return sendJson(res, 409, { ...result, action, session: id });
+      }
     } else {
       await coord.stop(id, { preserveWorktree: true });
     }
@@ -704,7 +716,25 @@ async function serve(coord: Coordinator, url: URL, res: ServerResponse, actions 
 
   if (action === "diff") {
     try {
-      return sendJson(res, 200, { session: id, diff: await coord.diff(id) });
+      const diff = await coord.diff(id);
+      // A whole-repo patch can be tens of megabytes and this route is rendered in
+      // a browser; keep a bounded head and say so instead of streaming it all.
+      let truncated = false;
+      const bound = (text: string): string => {
+        if (text.length <= MAX_DIFF_CHARS) return text;
+        truncated = true;
+        return `${text.slice(0, MAX_DIFF_CHARS)}\n… diff truncated at ${MAX_DIFF_CHARS} characters`;
+      };
+      const payload = typeof diff === "string"
+        ? bound(diff)
+        : {
+            ...diff,
+            stat: bound(diff.stat ?? ""),
+            committed: bound(diff.committed ?? ""),
+            uncommitted: bound(diff.uncommitted ?? ""),
+            untracked: (diff.untracked ?? []).slice(0, MAX_LISTED_FILES),
+          };
+      return sendJson(res, 200, { session: id, diff: payload, ...(truncated ? { diffTruncated: true } : {}) });
     } catch (error) {
       if (isUnknownSession(error)) return sendJson(res, 404, { error: "unknown session", session: id });
       throw error;

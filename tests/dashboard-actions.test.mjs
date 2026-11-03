@@ -115,7 +115,9 @@ test("valid actions call the coordinator with explicit arguments", async () => {
   });
   assert.deepEqual(coord.calls, [
     ["merge", "s1"],
-    ["send", "s1", "continue with fixes", "prompt"],
+    // The two-strikes limit travels with the send so the coordinator can enforce
+    // it atomically (see the dedicated gate test below).
+    ["send", "s1", "continue with fixes", "prompt", true, { maxInstructions: 2 }],
     ["finish", "s1", "success_first", "read-only accepted"],
     ["stop", "s1", { preserveWorktree: true }],
   ]);
@@ -178,9 +180,15 @@ test("enabling dashboard actions without a token is a startup error", async () =
 });
 
 
-test("dashboard send respects the two-strikes gate", async () => {
+test("dashboard send delegates the two-strikes gate to the coordinator", async () => {
+  // Checking `instructionsSent` in the dashboard and sending afterwards was a
+  // read-then-act window: two concurrent clicks both passed the gate. The gate
+  // now lives (and reserves the slot) inside Coordinator.send.
   const coord = fakeCoord();
-  coord.snapshot = () => ({ instructionsSent: 2 });
+  coord.send = async (...args) => {
+    coord.calls.push(["send", ...args]);
+    throw new Error("two-strikes gate: this session already has 2 instruction(s); take the work over instead");
+  };
   await withServer({ coord, token: TOKEN, actions: true }, async (base) => {
     const response = await fetch(`${base}/dashboard/api/actions/sessions/s1/send`, {
       method: "POST", headers: actionHeaders(TOKEN), body: JSON.stringify({ message: "one more fix" }),
@@ -188,5 +196,8 @@ test("dashboard send respects the two-strikes gate", async () => {
     assert.equal(response.status, 400);
     assert.match(await response.text(), /two-strikes gate/);
   });
-  assert.deepEqual(coord.calls.filter((call) => call[0] === "send"), []);
+  // The dashboard passes its limit so the coordinator can enforce it atomically.
+  const sends = coord.calls.filter((call) => call[0] === "send");
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][5].maxInstructions, 2);
 });

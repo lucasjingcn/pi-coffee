@@ -1,10 +1,15 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { PiEvent, PiSessionState, PiSessionStats, RpcResponse, UiRequest, UiResponse } from "./types.js";
-import { parseDescendantPids, parseSurvivingPids } from "./process-tree.js";
+import { descendantPids, survivingDescendants } from "./process-tree.js";
 
-/** Longest single JSONL line accepted from pi before the stream is considered corrupt. */
-const MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
+/**
+ * Longest *unterminated* JSONL frame accepted from pi before the stream is
+ * considered corrupt. A complete frame is not capped by this: `get_entries` on a
+ * long transcript legitimately returns one line of tens of megabytes, and killing
+ * the worker for a valid answer was worse than the memory bound it protected.
+ */
+const MAX_RPC_LINE_BYTES = 64 * 1024 * 1024;
 
 export interface PiRpcClientOptions {
   cwd: string;
@@ -30,45 +35,6 @@ interface PendingCommand {
   reject: (e: Error) => void;
 }
 
-/** Descendant PIDs of `rootPid` from the process table; null when it is unreadable. */
-function descendantPids(rootPid: number): Promise<number[] | null> {
-  return new Promise((resolve) => {
-    try {
-      execFile("ps", ["-Ao", "pid=,ppid="], { timeout: 3000, windowsHide: true }, (err, stdout) => {
-        if (err) return resolve(null);
-        resolve(parseDescendantPids(stdout, rootPid));
-      });
-    } catch {
-      // A denied or missing `ps` throws synchronously; no claim is possible.
-      resolve(null);
-    }
-  });
-}
-
-/**
- * Tracked PIDs that still run (zombies are already dead) within `waitMs`.
- * Null means the process table could not be read, so no claim is possible.
- */
-function survivingDescendants(tracked: number[], waitMs: number): Promise<number[] | null> {
-  const deadline = Date.now() + waitMs;
-  return new Promise((resolve) => {
-    const tick = (): void => {
-      try {
-        execFile("ps", ["-Ao", "pid=,stat="], { timeout: 3000, windowsHide: true }, (err, stdout) => {
-          if (err) return resolve(null);
-          const survivors = parseSurvivingPids(stdout, tracked);
-          if (survivors.length === 0) return resolve([]);
-          if (Date.now() >= deadline) return resolve(survivors);
-          setTimeout(tick, 50);
-        });
-      } catch {
-        resolve(null);
-      }
-    };
-    tick();
-  });
-}
-
 /**
  * Long-lived `pi --mode rpc` child controlled via JSONL on stdin/stdout.
  *
@@ -80,7 +46,10 @@ export class PiRpcClient extends EventEmitter {
   readonly opts: PiRpcClientOptions;
 
   private proc: ChildProcessWithoutNullStreams | null = null;
-  private stdoutBuf = Buffer.alloc(0);
+  private stdoutBuf: Buffer = Buffer.alloc(0);
+  /** Fragments of a line whose terminating LF has not arrived yet. */
+  private stdoutFragments: Buffer[] = [];
+  private stdoutFragmentBytes = 0;
   private seq = 0;
   private pending = new Map<string, PendingCommand>();
   /** Every id ever issued, so a settled/timed-out id can never be reused. */
@@ -369,14 +338,33 @@ export class PiRpcClient extends EventEmitter {
   // -------------------------------------------------------------------------
 
   private onStdout(chunk: Buffer): void {
-    this.stdoutBuf = Buffer.concat([this.stdoutBuf, chunk]);
-    // Without a cap, one unterminated line grows until the daemon runs out of
-    // memory. Treat it as a protocol failure and fail closed.
-    if (this.stdoutBuf.length > MAX_RPC_LINE_BYTES) {
-      this.stdoutBuf = Buffer.alloc(0);
-      this.terminate(new Error(`pi rpc output line exceeded ${MAX_RPC_LINE_BYTES} bytes; protocol desynchronized`));
+    // Buffer fragments without re-copying the whole line on every chunk: a large
+    // frame arrives as hundreds of 64 KiB chunks, and `Buffer.concat` per chunk
+    // made parsing quadratic exactly when the frame was big. Fragments are only
+    // joined once the newline that ends the line has arrived.
+    if (chunk.indexOf(0x0a) === -1) {
+      this.stdoutFragments.push(chunk);
+      this.stdoutFragmentBytes += chunk.length;
+      const pending = this.stdoutBuf.length + this.stdoutFragmentBytes;
+      // The cap applies to the *unterminated residue* only: a complete frame may
+      // legitimately be large (`get_entries` on a long transcript returns one
+      // multi-megabyte JSON line), and killing the worker for answering a valid
+      // request turned a successful call into a false protocol error. Only a line
+      // that never terminates can grow without bound, so that is what fails closed.
+      if (pending > MAX_RPC_LINE_BYTES) {
+        this.stdoutBuf = Buffer.alloc(0);
+        this.stdoutFragments = [];
+        this.stdoutFragmentBytes = 0;
+        this.terminate(new Error(`pi rpc output line exceeded ${MAX_RPC_LINE_BYTES} bytes; protocol desynchronized`));
+      }
       return;
     }
+    this.stdoutBuf = this.stdoutFragments.length === 0 && this.stdoutBuf.length === 0
+      ? chunk
+      : Buffer.concat([this.stdoutBuf, ...this.stdoutFragments, chunk]);
+    this.stdoutFragments = [];
+    this.stdoutFragmentBytes = 0;
+
     // Split strictly on LF; U+2028/U+2029 are valid inside JSON strings.
     for (;;) {
       const nl = this.stdoutBuf.indexOf(0x0a);

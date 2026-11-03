@@ -12,6 +12,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { EventEmitter } from "node:events";
 import type { PiSessionState, PiSessionStats, RpcResponse, UiResponse } from "./types.js";
+import { descendantPids, terminateSurvivingDescendants } from "./process-tree.js";
 import type { WorkerTransport } from "./runner.js";
 import { PI_COFFEE_VERSION } from "./version.js";
 
@@ -22,6 +23,8 @@ export interface AcpClientOptions {
   transcriptPath: string;
   env?: Record<string, string>;
   name?: string;
+  /** Per-turn prompt budget; defaults to 30 minutes. Lower it in tests. */
+  promptTimeoutMs?: number;
 }
 
 interface PendingRequest {
@@ -60,6 +63,12 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
   private exited = false;
+  /**
+   * Set when a prompt timed out. ACP v1 answers one prompt per turn, so queueing
+   * the next instruction would put two turns in flight; every later turn fails
+   * loudly instead of racing the agent.
+   */
+  private poisoned?: string;
   private stderr = "";
   private lastText = "";
 
@@ -206,16 +215,38 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
       await this.request("session/cancel", { sessionId: this.sessionId }, 2_000).catch(() => undefined);
     }
     const proc = this.proc;
+    const pid = proc.pid;
     this.proc = null;
-    if (process.platform !== "win32" && proc.pid) {
-      try { process.kill(-proc.pid, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
+    // Sample the tree while the root is still alive: an agent's tool children can
+    // live in their own process group, and once the root exits they are
+    // reparented and invisible to a later `ps`. Confirming a stop while such a
+    // child still writes the worktree would release its locks early.
+    const tracked = pid !== undefined ? await descendantPids(pid) : null;
+    if (process.platform !== "win32" && pid) {
+      try { process.kill(-pid, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
     } else {
       proc.kill("SIGTERM");
     }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* gone */ } resolve(); }, 2_000);
-      proc.once("exit", () => { clearTimeout(timer); resolve(); });
+    const exited = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* gone */ } resolve(false); }, 2_000);
+      proc.once("exit", () => { clearTimeout(timer); resolve(true); });
     });
+    // The root leaving is not proof that the rest of the tree is gone: escalate to
+    // the whole group, then verify every sampled descendant individually.
+    if (!exited && pid !== undefined) {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        try { process.kill(-pid, 0); } catch { break; }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      try { if (pid) process.kill(-pid, "SIGKILL"); } catch { /* gone */ }
+    }
+    if (tracked !== null && tracked.length > 0 && process.platform !== "win32") {
+      const survivors = await terminateSurvivingDescendants(tracked);
+      if (survivors.length > 0) {
+        throw new Error(`acp shutdown confirmed the agent group but left ${survivors.length} descendant process(es) alive; retain locks`);
+      }
+    }
     this.exited = true;
   }
 
@@ -247,18 +278,26 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
     // A stop, crash or exit between accepting and running an instruction must not
     // dispatch it: the daemon has already been told the worker is going away.
     this.assertLive();
+    if (this.poisoned) {
+      throw new Error(`acp runner cannot accept another turn: ${this.poisoned}`);
+    }
     this.lastText = "";
     try {
       const result = await this.request("session/prompt", {
         sessionId: this.sessionId,
         prompt: [{ type: "text", text: message }],
-      }, PROMPT_TIMEOUT_MS);
+      }, this.opts.promptTimeoutMs ?? PROMPT_TIMEOUT_MS);
       this.emit("event", {
         type: "message_end",
         message: { role: "assistant", content: [{ type: "text", text: this.lastText }] },
       });
       return { type: "response", command: "prompt", success: true, data: result };
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // A timed-out prompt leaves the agent still answering: the serialization
+      // invariant ("only after the previous one answered") can no longer be
+      // upheld, so refuse further turns instead of sending a second prompt.
+      if (/timed out/i.test(detail)) this.poisoned = `previous turn timed out (${detail})`;
       this.emit("event", { type: "message_end", message: { role: "assistant", content: [], stopReason: "error" } });
       throw error;
     }
@@ -372,6 +411,15 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
 
   private terminate(error?: Error, exited = false): void {
     if (exited) this.exited = true;
+    // An error that arrives while the agent is still running (a broken stdin
+    // pipe, a spawn failure) used to emit `exit` immediately: the daemon then
+    // released locks and deleted a worktree that the agent might still be
+    // writing. Kill it first and only report the exit once it is really gone.
+    if (error && !this.exited && this.proc) {
+      const proc = this.proc;
+      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+      this.exited = true;
+    }
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(error ?? new Error("ACP agent exited"));

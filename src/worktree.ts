@@ -180,8 +180,11 @@ export async function createWorktree(opts: {
   dir: string;
   branch: string;
   baseRef?: string;
+  /** Skip repository hooks: a sandboxed worker may have redirected them via config. */
+  disableHooks?: boolean;
 }): Promise<WorktreeInfo> {
   const baseRef = opts.baseRef ?? "HEAD";
+  const config = opts.disableHooks ? NO_HOOKS_ARGS : [];
   await mkdir(dirname(opts.dir), { recursive: true });
   // Prune stale registrations first; a prior crashed run can leave them behind.
   await git(opts.repo, ["worktree", "prune"]).catch(() => {});
@@ -189,14 +192,14 @@ export async function createWorktree(opts: {
   const existing = await git(opts.repo, ["branch", "--list", opts.branch]).catch(() => "");
   if (existing.trim()) {
     // Branch already exists: attach the new worktree to it.
-    await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]).catch(async () => {
+    await git(opts.repo, [...config, "worktree", "add", opts.dir, opts.branch]).catch(async () => {
       await git(opts.repo, ["worktree", "prune"]).catch(() => {});
-      await git(opts.repo, ["worktree", "add", opts.dir, opts.branch]);
+      await git(opts.repo, [...config, "worktree", "add", opts.dir, opts.branch]);
     });
   } else {
-    await git(opts.repo, ["worktree", "add", "-b", opts.branch, opts.dir, baseRef]).catch(async () => {
+    await git(opts.repo, [...config, "worktree", "add", "-b", opts.branch, opts.dir, baseRef]).catch(async () => {
       await git(opts.repo, ["worktree", "prune"]).catch(() => {});
-      await git(opts.repo, ["worktree", "add", "-f", "-b", opts.branch, opts.dir, baseRef]);
+      await git(opts.repo, [...config, "worktree", "add", "-f", "-b", opts.branch, opts.dir, baseRef]);
     });
   }
 
@@ -367,13 +370,30 @@ export async function worktreeDiff(dir: string, base = "HEAD"): Promise<DiffSumm
   return { base, stat, committed, uncommitted, untracked, status, files };
 }
 
-export async function commitAll(dir: string, message: string): Promise<string> {
-  await git(dir, ["add", "-A"]);
+/**
+ * Git `-c` overrides that stop repository-configured hooks from running.
+ *
+ * A sandboxed worker can write `<repo>/.git/config` (it needs read-write git
+ * metadata to commit inside its container), so it can set `core.hooksPath` and
+ * have the *host* daemon execute its scripts during `git commit`/`git merge`.
+ * Mounting `<repo>/.git/hooks` read-only does not help: the path comes from the
+ * writable config, and any path (including the worker's worktree) works. The
+ * daemon's own git calls on a sandboxed session therefore pass this override.
+ */
+const NO_HOOKS_ARGS = ["-c", "core.hooksPath=/dev/null"];
+
+export async function commitAll(
+  dir: string,
+  message: string,
+  opts: { disableHooks?: boolean } = {},
+): Promise<string> {
+  const config = opts.disableHooks ? NO_HOOKS_ARGS : [];
+  await git(dir, [...config, "add", "-A"]);
   // A genuinely clean tree is the only no-op; every other commit failure must surface.
   if ((await git(dir, ["status", "--porcelain"])) === "") {
     return "nothing to commit: working tree clean";
   }
-  await git(dir, ["commit", "-m", message]);
+  await git(dir, [...config, "commit", "-m", message]);
   return git(dir, ["rev-parse", "--short", "HEAD"]);
 }
 
@@ -395,14 +415,16 @@ export async function mergeBranch(
   repo: string,
   branch: string,
   into: string,
-  opts: { noFf?: boolean; message?: string } = {},
+  opts: { noFf?: boolean; message?: string; disableHooks?: boolean } = {},
 ): Promise<MergeResult> {
   await git(repo, ["rev-parse", "--verify", branch]); // throws if missing
 
+  const config = opts.disableHooks ? NO_HOOKS_ARGS : [];
   const current = await currentBranch(repo);
-  if (current !== into) await git(repo, ["checkout", into]);
+  if (current !== into) await git(repo, [...config, "checkout", into]);
 
   const args = [
+    ...config,
     "merge",
     ...(opts.noFf === false ? [] : ["--no-ff"]),
     branch,

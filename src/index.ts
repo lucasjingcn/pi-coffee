@@ -231,6 +231,32 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
     return;
   }
 
+  // A loopback daemon is reachable from any page the user visits. POST-only is
+  // not enough: a cross-site `no-cors` fetch or an auto-submitted HTML form is a
+  // "simple request" that needs no preflight, so it could drain or shut the
+  // daemon down. Require a JSON request (forms and no-cors fetches cannot send
+  // that content type) and reject a foreign Origin/Sec-Fetch-Site before any
+  // side effect runs. Non-browser clients (workers, scripts, curl) send neither
+  // header and keep working.
+  if (req.method === "POST" || req.method === "PATCH") {
+    const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      return sendJson(res, 415, { error: "content-type must be application/json" });
+    }
+    const origin = req.headers.origin;
+    if (origin !== undefined) {
+      let originHost: string | undefined;
+      try { originHost = new URL(String(origin)).host; } catch { originHost = undefined; }
+      if (!originHost || originHost !== req.headers.host) {
+        return sendJson(res, 403, { error: "cross-origin request rejected" });
+      }
+    }
+    const fetchSite = req.headers["sec-fetch-site"];
+    if (typeof fetchSite === "string" && fetchSite !== "same-origin" && fetchSite !== "none") {
+      return sendJson(res, 403, { error: "cross-site request rejected" });
+    }
+  }
+
   let body: any = {};
   try {
     if (req.method === "POST" || req.method === "PATCH") {
@@ -345,12 +371,16 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
       }
 
       case "/internal/locks":
-        return sendJson(res, 200, { locks: coord.locksList() });
+        // A worker token is limited to its own session and scope (README): the
+        // full lock table would expose other chats' paths and repositories.
+        return sendJson(res, 200, { locks: coord.locksVisibleTo(workerSid) });
 
       // Append-only chain, no production reader used to exist: `AuditLog.verify()`
       // was reachable from the test suite only, so a tampered log stayed invisible
       // to every deployed daemon. Recompute on demand here (and once at startup).
       case "/internal/audit/verify":
+        // The chain names every session's actions, so it is an operator surface.
+        if (workerSid) throw new Error("worker token cannot read the audit chain");
         return sendJson(res, 200, await coord.audit.verify());
 
       case "/internal/inbox": {
@@ -408,8 +438,11 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
     if (e instanceof PayloadTooLargeError) return sendJson(res, 413, { error: message });
     // Client errors keep their meaning; a server fault stays a 500 but does not
     // echo internal paths or stack text to the caller.
-    if (/worker token cannot|worker broadcast is unavailable/.test(message)) {
+    if (/worker token cannot|worker broadcast is unavailable|outside this session scope/.test(message)) {
       return sendJson(res, 403, { error: message });
+    }
+    if (/^unknown session:/.test(message)) {
+      return sendJson(res, 404, { error: message });
     }
     log("internal handler error:", e);
     return sendJson(res, 500, { error: "internal error" });

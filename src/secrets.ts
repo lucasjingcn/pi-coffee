@@ -17,6 +17,7 @@ export type SecretKind =
   | "jwt"
   | "private-key"
   | "credential-assignment"
+  | "credential-url"
   | "bearer-token";
 
 export interface SecretFinding {
@@ -35,7 +36,14 @@ interface Rule {
  * than bare entropy so ordinary prose, hashes and base64 blobs are not flagged.
  */
 const RULES: Rule[] = [
-  { kind: "private-key", pattern: /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----/g },
+  {
+    kind: "private-key",
+    // A pasted/shared key is usually truncated: requiring the matching END line
+    // let `-----BEGIN RSA PRIVATE KEY-----` plus a few body lines through, which
+    // is exactly the shape people paste into chat. A header alone is proof
+    // enough; without END the span runs to the end of the value.
+    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)/g,
+  },
   { kind: "openai-key", pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
   { kind: "aws-access-key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
   { kind: "github-token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g },
@@ -44,9 +52,18 @@ const RULES: Rule[] = [
   {
     kind: "credential-assignment",
     // Case-insensitive: `password:` and `api_key=` are the common spellings, and
-    // an uppercase-only rule matched the least likely of them.
+    // an uppercase-only rule matched the least likely of them. The value is a
+    // quoted string or an unquoted non-space run: restricting it to
+    // `[A-Za-z0-9_-./+=]` silently accepted passwords containing `!@#$%^&*` and
+    // DSNs, which are the ones a user actually pastes.
     pattern:
-      /\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS[_-]?KEY)[A-Za-z0-9_]*\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{12,}["']?/gi,
+      /\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS[_-]?KEY)[A-Za-z0-9_]*\s*[:=]\s*(?:"[^"\n]{6,}"|'[^'\n]{6,}'|[^\s"'`,;()\[\]{}<>]{8,})/gi,
+  },
+  {
+    kind: "credential-url",
+    // `scheme://user:password@host` (database DSNs, broker URLs). The host part
+    // must follow the `@`, so ordinary URLs and mail addresses stay clean.
+    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:[^\s/@]+@[^\s/@]+/gi,
   },
   {
     kind: "bearer-token",

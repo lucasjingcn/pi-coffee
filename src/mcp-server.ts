@@ -507,10 +507,16 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
     },
     async ({ session_id, control_key, remove_worktree, preserve_worktree, delete_branch, outcome, note }) => {
       coord.assertControl(session_id, control_key);
-      if (outcome) await coord.setOutcome(session_id, outcome, note);
-      if (!outcome || remove_worktree) {
-        await coord.stop(session_id, { removeWorktree: remove_worktree ?? false, deleteBranch: delete_branch, preserveWorktree: preserve_worktree });
-      }
+      const stopOpts = {
+        removeWorktree: remove_worktree ?? false,
+        deleteBranch: delete_branch,
+        preserveWorktree: preserve_worktree,
+      };
+      // The outcome path stops the worker itself: pass the caller's worktree
+      // options through it instead of dropping them (preserve_worktree used to be
+      // ignored, so autoClean deleted a worktree the caller asked to keep).
+      if (outcome) await coord.setOutcome(session_id, outcome, note, stopOpts);
+      else await coord.stop(session_id, stopOpts);
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });
     },
   );

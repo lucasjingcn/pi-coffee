@@ -94,6 +94,8 @@ export interface Config {
   ghRemote: string;
   /** Label applied to created PRs. */
   prLabel: string;
+  /** Merge method requested from the GitHub merge queue (default squash). */
+  prMergeMethod: "squash" | "merge" | "rebase";
   /** Optional token passed to gh as GH_TOKEN (never argv). */
   ghToken: string;
   /** Allow an ambient GH_TOKEN to reach the gh child when no explicit token is set. */
@@ -273,6 +275,19 @@ function resolveRunner(overrides: Partial<Config>): "pi" | "acp" {
   }
   const raw = env("PI_COFFEE_RUNNER") ?? "pi";
   if (raw !== "pi" && raw !== "acp") invalid("runner", "PI_COFFEE_RUNNER", 'expected "pi" or "acp"');
+  return override ?? raw;
+}
+
+/** Merge-queue method: only the three flags `gh pr merge` understands. */
+function resolvePrMergeMethod(overrides: Partial<Config>): "squash" | "merge" | "rebase" {
+  const override = overrides.prMergeMethod;
+  if (override !== undefined && override !== "squash" && override !== "merge" && override !== "rebase") {
+    invalid("prMergeMethod", "PI_COFFEE_PR_MERGE_METHOD", 'expected "squash", "merge" or "rebase"');
+  }
+  const raw = env("PI_COFFEE_PR_MERGE_METHOD") ?? "squash";
+  if (raw !== "squash" && raw !== "merge" && raw !== "rebase") {
+    invalid("prMergeMethod", "PI_COFFEE_PR_MERGE_METHOD", 'expected "squash", "merge" or "rebase"');
+  }
   return override ?? raw;
 }
 
@@ -480,6 +495,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     ghBin: overrides.ghBin ?? env("PI_COFFEE_GH_BIN") ?? "gh",
     ghRemote: overrides.ghRemote ?? env("PI_COFFEE_GH_REMOTE") ?? "origin",
     prLabel: overrides.prLabel ?? env("PI_COFFEE_PR_LABEL") ?? "pi-coffee",
+    prMergeMethod: resolvePrMergeMethod(overrides),
     ghToken: overrides.ghToken ?? env("PI_COFFEE_GH_TOKEN") ?? "",
     ghAllowEnvToken: resolveBoolean(overrides, "ghAllowEnvToken", "PI_COFFEE_GH_ALLOW_ENV_TOKEN", false),
     allowPush: resolveBoolean(overrides, "allowPush", "PI_COFFEE_ALLOW_PUSH", false),

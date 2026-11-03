@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,7 @@ export interface CodeVersionStatus {
 export interface CodeVersionRecord {
   dir: string;
   distMtimeMs: number | null;
-  /** sha256 of dist/manager.js at capture time; absent/null when dist was absent. */
+  /** sha256 of the whole dist directory at capture time; absent/null when dist was absent. */
   distSha256?: string | null;
 }
 
@@ -32,16 +32,44 @@ export function daemonCodeDir(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
-/** mtime + content hash of `<dir>/dist/manager.js`, or null when it is missing. */
+/**
+ * mtime + content hash of the whole `<dir>/dist`, or null when it is missing.
+ *
+ * Fingerprinting only `dist/manager.js` missed the common case: editing
+ * `src/mcp-server.ts` (or any other module) and rebuilding rewrites that file
+ * while manager.js keeps identical bytes, so `pi_status` kept reporting
+ * `stale: false` for a daemon that was running old logic. Hashing every emitted
+ * file is what the "restart daemon to load current code" hint actually promises;
+ * dist is a few hundred kilobytes, so the cost is negligible at status cadence.
+ */
 function distFingerprint(dir: string): { mtimeMs: number; sha256: string } | null {
+  const dist = join(dir, "dist");
+  let names: string[];
   try {
-    const path = join(dir, "dist", "manager.js");
-    const stat = statSync(path);
-    if (!stat.isFile()) return null;
-    return { mtimeMs: stat.mtimeMs, sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
+    names = readdirSync(dist).filter((name) => !name.startsWith(".")).sort();
   } catch {
     return null;
   }
+  const hash = createHash("sha256");
+  let mtimeMs = 0;
+  let files = 0;
+  for (const name of names) {
+    const path = join(dist, name);
+    let stat;
+    try {
+      stat = statSync(path);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    files += 1;
+    mtimeMs = Math.max(mtimeMs, stat.mtimeMs);
+    hash.update(`${name}\0${stat.size}\0`);
+    hash.update(readFileSync(path));
+    hash.update("\0");
+  }
+  if (files === 0) return null;
+  return { mtimeMs, sha256: hash.digest("hex") };
 }
 
 /** Copy the on-disk fingerprint of dist/manager.js into memory at daemon startup. */

@@ -46,3 +46,22 @@ test("the process environment overrides the settings file, which only fills gaps
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("an `export KEY=VALUE` line sets the real variable and junk keys are ignored", async () => {
+  const { parseEnvFile } = await import("../scripts/lib/env.mjs");
+  // The file is documented as shell-sourced, so what people paste from a .env or
+  // their shell history must work; before this the key became
+  // "export PI_COFFEE_PORT" and the daemon/client silently used the default.
+  const parsed = parseEnvFile([
+    "export PI_COFFEE_PORT=9000",
+    "export  PI_COFFEE_TOKEN='secret value'",
+    "PI_COFFEE_MODEL=deepseek-flash",
+    "not a key=1",
+    "# comment",
+  ].join("\n"));
+  assert.deepEqual(parsed, {
+    PI_COFFEE_PORT: "9000",
+    PI_COFFEE_TOKEN: "secret value",
+    PI_COFFEE_MODEL: "deepseek-flash",
+  });
+});
