@@ -39,16 +39,11 @@ function errorDetail(error: any): string {
 }
 
 /**
- * Canonical identity of a repository: the realpath of its absolute Git
- * `--git-common-dir`. Symlinks, subdirectories and linked worktrees of the same
- * repo all resolve to the same identity; separate repos never share one.
- *
- * Synchronous on purpose: scope/acceptance/manual claims must resolve the
- * namespace before reserving a lock, and `Coordinator.claim` is synchronous.
- *
- * Failure is fatal. If the common dir can't be resolved or canonicalized we throw
- * rather than fall back to a non-canonical path, so no lock is ever reserved under
- * an unreliable identity.
+ * Canonical identity of a repository: the realpath of its absolute
+ * `--git-common-dir`, so subdirectories and linked worktrees share one lock
+ * namespace and separate repos never do. Synchronous because
+ * `Coordinator.claim` is. Throws rather than falling back to an uncached,
+ * non-canonical path.
  */
 export function resolveRepoIdentity(repo: string): string {
   let commonDir: string;

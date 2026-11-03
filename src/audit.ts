@@ -1,11 +1,11 @@
 /**
  * Hash-chained audit log for coordinator actions.
  *
- * Every state-changing action appends one JSONL entry. Entries form a chain:
- * `hash = sha256(prevHash, seq, ts, payloadSha256)`. Files rotate by size, and a
- * sidecar (`audit.head.json`) records the newest seq/hash so tail truncation is
- * detectable. The chain is written by one process at a time and appended with
- * best-effort durability; a failed append fails the guarded action.
+ * One JSONL entry per state change, chained as
+ * `hash = sha256(prevHash, seq, ts, payloadSha256)`. Files rotate by size and a
+ * sidecar (`audit.head.json`) records the newest seq/hash, which is what makes a
+ * truncated tail detectable. One writer process at a time; a failed append fails
+ * the guarded action.
  */
 
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
@@ -348,11 +348,9 @@ export class AuditLog {
         reason: "audit head hash does not match the chained entry",
       };
     }
-    // The head sidecar is the only anchor: anything appended past it was not
-    // written by this log, so a hash-consistent forged tail used to be accepted.
-    // The one legitimate lag is our own append whose sidecar write failed (the
-    // durable entry keeps its seq and the next append repairs the sidecar); that
-    // state is visible in memory as a cached head pointing at the newest entry.
+    // The head sidecar is the only anchor: anything past it was not written by
+    // this log. The one legitimate lag is our own append whose sidecar write
+    // failed, which shows up in memory as a cached head at the newest entry.
     if (sidecar.seq !== last.seq) {
       const ownSidecarWritePending = this.cachedHead !== undefined
         && this.cachedHead.seq === last.seq

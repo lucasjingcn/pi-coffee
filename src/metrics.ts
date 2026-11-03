@@ -3,19 +3,13 @@ import type { Coordinator } from "./manager.js";
 /**
  * Prometheus text exposition (version 0.0.4) for the coordinator.
  *
- * Two halves, deliberately separate:
+ * `renderMetrics(snapshot)` is pure: same snapshot in, same bytes out, sorted so
+ * a diff of two scrapes only shows real changes. `buildMetricsSnapshot` reads
+ * live state through public coordinator methods and imports `Coordinator` as a
+ * type only, so there is no import cycle with the manager.
  *
- *  - `renderMetrics(snapshot)` is pure and deterministic: same snapshot in, same
- *    bytes out. Metric families are sorted by name and label sets by label
- *    value, so a diff of two scrapes only shows real changes.
- *  - `buildMetricsSnapshot(coord, startedAt)` reads live coordinator state. It
- *    only uses public coordinator methods and imports `Coordinator` as a type,
- *    so this module can never create an import cycle with the manager.
- *
- * The one rule that shapes the data model: an unknown value is *omitted*, never
- * reported as `0`. A dashboard that plots a zero it never measured is worse than
- * a dashboard with a gap. `costUsdTotal` is therefore optional, and its absence
- * is the signal that at least one session's cost was never reported.
+ * An unknown value is omitted, never reported as 0: a gap is honest, a measured
+ * zero is not. That is why `costUsdTotal` is optional.
  */
 
 /** Content type for a Prometheus scrape response (`text/plain` 0.0.4 exposition). */
@@ -177,15 +171,13 @@ export function renderMetrics(snapshot: MetricsSnapshot): string {
     },
     {
       name: `${METRICS_PREFIX}verifications_total`,
-      // A counter must not decrease; this used to be "sessions that currently
-      // hold a verification record", and any later pi_verify/pi_commit reset it.
+      // Counters never decrease.
       help: "Successful verifications since the coordinator started.",
       type: "counter",
       samples: [{ value: counter(snapshot?.verificationsTotal) }],
     },
     {
       name: `${METRICS_PREFIX}merges_total`,
-      // Same monotonicity fix as verifications_total: a re-verify used to lower it.
       help: "Successful branch integrations since the coordinator started.",
       type: "counter",
       samples: [{ value: counter(snapshot?.mergesTotal) }],

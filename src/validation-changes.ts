@@ -76,16 +76,10 @@ async function requireCommit(repo: string, ref: string): Promise<void> {
 /**
  * Exact Git evidence of pre-existing validation files the worker changed.
  *
- * The diff runs with `--no-renames`, so a rename reports the old path as a
- * deletion and the new path as an addition. Membership in the base tree keeps
- * only the pre-existing side, which excludes files the worker introduced no
- * matter what they are named. Every modification counts, including append-only
- * edits, because the review gate needs the path, not a line-level heuristic.
- *
- * Custom `validationPaths` are normalized with `acceptancePath`, so traversal,
- * absolute and Git-metadata paths fail before any Git call. Returned paths are
- * decoded from NUL-delimited output and sorted, so spaces, tabs, newlines and
- * Unicode survive exactly.
+ * `--no-renames` plus a membership test against the base tree keeps only the
+ * pre-existing side, so files the worker introduced are excluded by path rather
+ * than by a line heuristic. Paths are normalized with `acceptancePath` and
+ * decoded from NUL-delimited output, so odd names survive exactly.
  */
 export async function existingValidationChanges(
   repo: string,

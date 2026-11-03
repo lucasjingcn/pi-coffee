@@ -4,12 +4,10 @@
  * installed on this machine, and print how to connect the clients that must be
  * configured by hand.
  *
- * A new user should not have to install a particular client (historically Codex)
- * before pi-coffee will install at all. This script is the single registration
- * path used by `npm run install:local`; it never fails because one client is
- * missing. Codex and the pi CLI are edited in place (idempotently). DSH, Claude
- * Code and Cursor keep user-owned configuration, so for those it only prints the
- * exact command or snippet instead of writing it.
+ * This is the single registration path for `npm run install:local`: no client is
+ * required, and a missing one never fails the install. Codex and the pi CLI are
+ * edited in place (idempotently); DSH, Claude Code and Cursor own their
+ * configuration, so for those it prints the command or snippet instead.
  *
  * Usage:
  *   node scripts/register-clients.mjs            # detect, register, print a summary

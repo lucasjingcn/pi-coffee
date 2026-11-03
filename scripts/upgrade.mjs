@@ -114,8 +114,8 @@ async function healthy() {
 async function fail(message) {
   console.error(`error: ${message}`);
   // Never leave the daemon draining on a failed upgrade: cancel is idempotent.
-  // `request` resolves for any HTTP status, so the reply has to be inspected —
-  // a 401/409 used to be reported as "not draining any more" while it still was.
+  // `request` resolves for any HTTP status, so the reply must be inspected rather
+  // than trusted.
   const cancelled = await request("/internal/drain", { action: "cancel" }).catch(() => undefined);
   if (cancelled?.ok && cancelled.body?.draining === false) {
     console.error(`the daemon at ${base} is not draining any more; no worker was stopped`);

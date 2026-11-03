@@ -512,9 +512,8 @@ export function buildServer(coord: Coordinator, codeVersion?: CodeVersionRecord)
         deleteBranch: delete_branch,
         preserveWorktree: preserve_worktree,
       };
-      // The outcome path stops the worker itself: pass the caller's worktree
-      // options through it instead of dropping them (preserve_worktree used to be
-      // ignored, so autoClean deleted a worktree the caller asked to keep).
+      // setOutcome stops the worker itself, so the caller's worktree options have
+      // to travel with it.
       if (outcome) await coord.setOutcome(session_id, outcome, note, stopOpts);
       else await coord.stop(session_id, stopOpts);
       return json({ ok: true, session_id, outcome: outcome ?? coord.snapshot(session_id).outcome ?? "unrecorded" });

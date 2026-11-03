@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 /**
- * stdio -> HTTP bridge for pi-coffee.
- *
- * Codex starts this as a stdio MCP server. It forwards every JSON-RPC message to
- * the pi-coffee HTTP daemon, retrying on failure. Because the daemon's /mcp endpoint
- * is stateless, a daemon restart never breaks the Codex session: the next request
- * simply reconnects.
+ * stdio -> HTTP bridge: Codex starts this as a stdio MCP server and every
+ * JSON-RPC message is forwarded to the daemon, retrying on failure. The /mcp
+ * endpoint is stateless, so a daemon restart never breaks the session.
  *
  * Env:
  *   PI_COFFEE_URL    full MCP URL (default http://127.0.0.1:8787/mcp)

@@ -411,10 +411,9 @@ export class AcpClient extends EventEmitter implements WorkerTransport {
 
   private terminate(error?: Error, exited = false): void {
     if (exited) this.exited = true;
-    // An error that arrives while the agent is still running (a broken stdin
-    // pipe, a spawn failure) used to emit `exit` immediately: the daemon then
-    // released locks and deleted a worktree that the agent might still be
-    // writing. Kill it first and only report the exit once it is really gone.
+    // An error while the agent is still running (broken stdin pipe, spawn failure)
+    // must not report exit before the process is gone: the daemon would release
+    // locks and delete a worktree the agent may still be writing.
     if (error && !this.exited && this.proc) {
       const proc = this.proc;
       try { proc.kill("SIGKILL"); } catch { /* already gone */ }

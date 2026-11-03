@@ -1,15 +1,11 @@
 /**
- * Best-effort extraction of the literal file paths a bash command will write to
- * (redirections, `tee`, and `sed -i`).
+ * Best-effort extraction of the literal file paths a bash command writes to
+ * (redirections, `tee`, `sed -i`).
  *
- * This is deliberately NOT a shell interpreter. It is a small quote-, comment-
- * and heredoc-aware lexical scanner: it understands just enough shell syntax to
- * avoid treating characters inside quoted programs, comments and heredoc bodies
- * as shell operators, and to identify the operands of a few write-capable
- * commands.
- *
- * Dynamic targets (variables, command substitution, globs, process
- * substitution, fd duplication) are intentionally left unsupported.
+ * Not a shell interpreter: a small quote-, comment- and heredoc-aware scanner
+ * that knows enough syntax not to mistake quoted text, comments or heredoc
+ * bodies for operators. Dynamic targets (variables, substitution, globs, fd
+ * duplication) are unsupported on purpose.
  */
 
 type Token = { kind: "word" | "op" | "io"; value: string };

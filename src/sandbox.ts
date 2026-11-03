@@ -1,28 +1,16 @@
 /**
- * Per-session execution sandboxes.
+ * Per-session Docker sandboxes for verification commands and worker processes.
+ * The daemon itself keeps running on the host.
  *
- * Phase A (this milestone) runs verification/validator commands in a fresh
- * Docker container that mounts the candidate worktree plus the git metadata the
- * candidate points at. The daemon itself keeps running on the host. Phase B runs
- * the worker process the same way.
+ * Two things break silently inside a container. A worktree's `.git` is a file
+ * pointing at `<common dir>/worktrees/<name>`, so the mounts reproduce the host
+ * layout at identical absolute paths instead of passing GIT_DIR around. And a
+ * container running as root writes root-owned files into the bind mount, which
+ * makes the daemon's own `git worktree remove` fail with EACCES, so POSIX hosts
+ * run as the invoking uid/gid (see `sandboxUserArgs`).
  *
- * Two properties are load-bearing and easy to lose:
- *
- * - A git worktree's `.git` is a *file* holding an absolute path to its metadata
- *   (`<common dir>/worktrees/<name>`), so mounting the worktree alone makes every
- *   git command inside the container exit 128 (`not a git repository`). The
- *   mounts below reproduce the host layout at the same absolute paths, which
- *   keeps `git rev-parse`, `git diff`, hooks and `git -C subdir` behaving exactly
- *   as they do on the host instead of relying on GIT_DIR overrides.
- * - Containers otherwise run as the image's default user (usually root). On a
- *   Linux host that writes root-owned files into the bind mount, so the daemon's
- *   own cleanup (`git worktree remove`, `rm -rf` of a candidate) fails with
- *   EACCES. POSIX hosts therefore run as the invoking uid/gid by default; see
- *   `sandboxUserArgs`.
- *
- * The docker CLI is invoked through an injected shell runner so tests can use a
- * deterministic fake binary and so the daemon keeps a single process-control
- * path (timeouts kill the process group, then remove the container).
+ * Docker is driven through an injected shell runner: tests use a fake binary and
+ * the daemon keeps one process-control path (timeout, then container removal).
  */
 
 import { randomBytes } from "node:crypto";
@@ -114,25 +102,14 @@ function realpathOrUndefined(path: string): string | undefined {
 }
 
 /**
- * Git metadata a container needs so `git` works on a bind-mounted checkout.
+ * Git metadata a container needs so `git` works on a bind-mounted worktree.
  *
- * A directory that is itself a git worktree keeps `.git` as a *file* holding an
- * absolute path to `<common dir>/worktrees/<name>`; mounting only the worktree
- * leaves every git command dead (`fatal: not a git repository`, exit 128), which
- * silently kills any acceptance command that shells out to git. Mounting alone is
- * not enough: the paths must match what git recorded inside `.git` and
- * `commondir`, so the host directory is bind-mounted at its own recorded absolute
- * path rather than at a tidy container-local name.
+ * A worktree keeps `.git` as a file pointing at `<common dir>/worktrees/<name>`,
+ * so the host directory is mounted at its recorded absolute path; otherwise every
+ * git command inside exits 128. A plain checkout needs no extra mounts.
  *
- * A plain checkout (`.git` is a directory inside the mounted tree) needs nothing
- * extra and returns no mounts.
- *
- * `allowedRepoRoot` is the repository the caller knows it is sandboxing. The
- * `.git` pointer and `commondir` are read from the mounted tree, which a
- * sandboxed process can rewrite, so without this check a worker could point the
- * next container at an arbitrary host path (for example the daemon user's HOME).
- * When it is set, metadata outside that root yields no mounts (git then fails
- * loudly inside the container instead of exposing the host).
+ * `allowedRepoRoot` guards the pointer: a sandboxed process can rewrite `.git`,
+ * and without that check the next container could mount an arbitrary host path.
  */
 export function resolveGitMounts(
   hostCwd: string,
@@ -231,16 +208,12 @@ export function resolveGitMounts(
 }
 
 /**
- * `docker run --user` arguments for sandbox containers.
+ * `docker run --user` arguments.
  *
- * On a POSIX host the container's default user is usually root, and root writes
- * into a bind mount land as root-owned files on the host: cleanup then fails with
- * EACCES (`git worktree remove`, `rm -rf` of a candidate) even though the command
- * itself succeeded. Linux keeps real uids in bind mounts, so there the container
- * runs as the invoking user. Docker Desktop (macOS/Windows) maps every write back
- * to the host user, where running as the image's default user is already correct
- * and an explicit `--user` would only add a uid that git rejects as a foreign
- * owner (`detected dubious ownership`).
+ * On Linux a root container writes root-owned files into the bind mount, so the
+ * daemon's own cleanup then fails with EACCES: it runs as the invoking uid.
+ * Docker Desktop maps writes back to the host user already, where an explicit
+ * --user only triggers git's "dubious ownership" refusal.
  */
 export function sandboxUserArgs(
   spec: string,

@@ -263,20 +263,12 @@ async function remoteDefaultBranch(repo: string): Promise<string | null> {
 }
 
 /**
- * Delete a worker branch once its work is proven integrated into the repo's
- * current HEAD.
+ * Delete a worker branch that is proven integrated into HEAD.
  *
- * Safety rails (all required):
- *  - the full ref must resolve; invalid/empty metadata is refused, never guessed;
- *  - the branch must not be checked out in any worktree and must not be the
- *    current or default branch;
- *  - the branch tip must be an ancestor of HEAD (`merge-base --is-ancestor`), so
- *    squashed or rebased work is retained for manual inspection instead of being
- *    mistaken for integrated work;
- *  - deletion uses non-force `git branch -d`, so git's own merged/checked-out
- *    checks still apply on top.
- *
- * Any git failure or safety refusal returns `deleted:false` with the reason:
+ * Refuses unless the ref resolves, the branch is checked out nowhere and is not
+ * the default, and its tip is an ancestor of HEAD (`merge-base --is-ancestor`),
+ * so squashed or rebased work stays around for inspection. Deletion itself is
+ * non-force `git branch -d`. Any refusal returns `deleted:false` with the reason:
  * callers must never report a deletion that did not happen.
  */
 export async function deleteMergedBranch(repo: string, branch: string): Promise<BranchDeleteResult> {

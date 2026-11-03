@@ -4,20 +4,14 @@ import { dirname } from "node:path";
 /**
  * Diagnostic logging shared by the daemon, its state store and the stdio proxy.
  *
- * Every line goes to stderr — the destination the supervisor already points at
- * (`~/.pi-coffee/logs/daemon.err.log` under launchd/systemd, the container's
- * stderr, or the terminal in foreground mode) — with an ISO-8601 timestamp so
- * the log can be read without guessing when something happened.
+ * Everything goes to stderr with an ISO-8601 timestamp: that is where the
+ * supervisor already points (`~/.pi-coffee/logs/daemon.err.log`, the container's
+ * stderr, or the terminal). Tags (`pi-coffee`, `state`, `pi-coffee-proxy`) are
+ * stable so existing greps keep working.
  *
- * Tags stay stable (`pi-coffee`, `state`, `pi-coffee-proxy`) so existing greps
- * keep working; only the timestamp prefix is new.
- *
- * Setting `PI_COFFEE_LOG_FORMAT=json` switches the very same calls to one JSON
- * object per line (`ts`, `level`, `event`, `message`, `details`) for log
- * shippers. The default text format is byte-for-byte what it always was, so
- * existing greps and supervisors keep working. Structured records redact
- * credential-shaped values (token, key, secret, bearer header, SHA-256 digest):
- * machine-readable output must never carry a capability.
+ * `PI_COFFEE_LOG_FORMAT=json` turns the same calls into one JSON object per line
+ * for log shippers. Structured records redact credential-shaped values: machine
+ * readable output must never carry a capability.
  */
 
 /** Env var that selects the log format. Anything but `json` keeps the text format. */

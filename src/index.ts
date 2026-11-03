@@ -65,8 +65,8 @@ function readBody(req: IncomingMessage): Promise<unknown> {
       if (settled) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        // Draining instead of destroying lets the 413 response reach the client;
-        // destroying the socket used to turn the promised 400 into ECONNRESET.
+        // Drain rather than destroy the socket so the 413 actually reaches the
+        // client instead of turning into ECONNRESET.
         fail(new PayloadTooLargeError(`request body exceeds ${MAX_BODY_BYTES / (1024 * 1024)} MiB`));
         req.resume();
         return;
@@ -118,8 +118,7 @@ function compactOutput(text: string): string {
 function visibleSession(meta: ReturnType<typeof coord.snapshot>) {
   const { controlKeyHash: _controlKeyHash, scopeKeyHash: _scopeKeyHash, ...visible } = meta;
   if (visible.verification) {
-    // The dashboard deliberately withholds raw command output; the internal API
-    // used to return it whole (potentially megabytes per session).
+    // Raw command output stays out of API responses: megabytes per session.
     const { result } = visible.verification;
     visible.verification = {
       ...visible.verification,
@@ -195,10 +194,9 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
   const mutating = new Set(["/internal/hello", "/internal/claim", "/internal/authorize-write",
     "/internal/release", "/internal/read", "/internal/send", "/internal/board/post",
     "/internal/drain", "/internal/shutdown"]);
-  // Operator-only endpoints. With no token configured every caller is equally
-  // anonymous, so a loopback caller is the operator: the protected-session rule
-  // used to lock `npm run upgrade` and the HTTP shutdown out of their own daemon
-  // for good, because no credential can ever satisfy it in that deployment.
+  // Operator endpoints. With no token configured every caller is anonymous, so a
+  // loopback caller is the operator; otherwise `npm run upgrade` and shutdown can
+  // never satisfy the protected-session rule.
   const operatorEndpoint = url.pathname === "/internal/drain" || url.pathname === "/internal/shutdown";
   const loopbackOperator = !tokenConfigured && !workerSid && isLoopbackAddress(req.socket.remoteAddress);
   if (!workerSid && !master && !(operatorEndpoint && loopbackOperator)
@@ -206,10 +204,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
     return sendJson(res, 401, { error: "unauthorized" });
   }
 
-  // Mutating endpoints may only be reached with POST/PATCH. The switch below has
-  // no method branch, so a GET used to execute side effects (including
-  // /internal/shutdown), which any local process or page could trigger.
-  // Exception: the drain `status` action is a read, and operators poll it with GET.
+  // Mutating endpoints require POST/PATCH: the dispatch below has no method branch,
+  // so a GET would run side effects. The drain `status` action is a read.
   const readOnlyDrain = url.pathname === "/internal/drain"
     && (url.searchParams.get("action") ?? "status") === "status";
   const methodAllowed = req.method === "POST" || req.method === "PATCH" || readOnlyDrain;
@@ -363,9 +359,8 @@ async function handleInternal(req: IncomingMessage, res: ServerResponse, url: UR
         // full lock table would expose other chats' paths and repositories.
         return sendJson(res, 200, { locks: coord.locksVisibleTo(workerSid) });
 
-      // Append-only chain, no production reader used to exist: `AuditLog.verify()`
-      // was reachable from the test suite only, so a tampered log stayed invisible
-      // to every deployed daemon. Recompute on demand here (and once at startup).
+      // Recomputed on demand (and once at startup): a chain nobody verifies proves
+      // nothing about a running daemon.
       case "/internal/audit/verify":
         // The chain names every session's actions, so it is an operator surface.
         if (workerSid) throw new Error("worker token cannot read the audit chain");

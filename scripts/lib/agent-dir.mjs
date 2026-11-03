@@ -2,10 +2,9 @@
 /**
  * Where pi keeps its agent directory (`auth.json`, `mcp.json`).
  *
- * pi resolves it with `getAgentDir()`, which prefers `PI_CODING_AGENT_DIR`. Hard
- * coding `~/.pi/agent` in the installer's checks produced two opposite bugs: the
- * doctor reported a false FAIL for a relocated store, and `setup` refused to keep
- * a login that pi itself would have used (aborting the install under `set -e`).
+ * pi resolves it with `getAgentDir()`, which prefers `PI_CODING_AGENT_DIR`. Every
+ * installer check must go through here: a hard-coded `~/.pi/agent` reports a false
+ * FAIL for a relocated store and rejects a login pi itself would accept.
  */
 import { homedir } from "node:os";
 import { join } from "node:path";

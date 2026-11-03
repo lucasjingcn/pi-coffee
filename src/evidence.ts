@@ -1,12 +1,10 @@
 /**
- * Durable verification evidence bundles.
+ * Durable verification evidence bundles: candidate and worker SHAs, validator
+ * results, combined output, diff, and a manifest of sizes and hashes.
  *
- * A bundle captures what a verification run actually did: the candidate and
- * worker/target SHAs, every validator result, the combined output, the diff and
- * an explicit file manifest with sizes and sha256 hashes. Bundles are written
- * atomically (temp directory + rename) and the manifest is written last, so a
- * crash can leave a `.tmp-*` directory but never a bundle with a manifest that
- * describes files that were not persisted.
+ * A bundle is written atomically (temp directory, then rename) with the manifest
+ * last, so a crash leaves a `.tmp-*` directory at worst, never a manifest that
+ * describes files which were not persisted.
  */
 
 import { randomUUID } from "node:crypto";

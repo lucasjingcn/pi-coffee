@@ -1,23 +1,19 @@
 /**
- * Read-only web console for the coordinator.
+ * Read-only web console, mounted by the daemon's request router.
  *
- * The daemon mounts `createDashboardHandler` in its request router (the Lead
- * wires it; this module never touches src/index.ts). The console only observes
- * state: there is no spawn, stop, commit, merge or message action, so a leaked
- * URL cannot change the orchestration. Routes, all GET:
+ * Observation only: no spawn, stop, commit, merge or message action, so a leaked
+ * URL cannot change the orchestration. All routes are GET:
  *
- *   GET /dashboard                         server-rendered HTML shell + auto refresh
- *   GET /dashboard/api/health              minimal liveness JSON
- *   GET /dashboard/api/sessions            one summary row per session
- *   GET /dashboard/api/sessions/:id        fuller record for one session
- *   GET /dashboard/api/sessions/:id/diff   delegated to Coordinator.diff
- *   GET /dashboard/api/sessions/:id/tail   delegated to Coordinator.tail
+ *   /dashboard                         HTML shell + auto refresh
+ *   /dashboard/api/health              liveness
+ *   /dashboard/api/sessions            one row per session
+ *   /dashboard/api/sessions/:id        one session
+ *   /dashboard/api/sessions/:id/diff   Coordinator.diff
+ *   /dashboard/api/sessions/:id/tail   Coordinator.tail
  *
- * Auth: when a token is configured every route requires `x-pi-coord-token` or
- * `Authorization: Bearer <token>`; anything else is a 401 before any state is
- * read. Responses are built from an explicit allowlist of session fields, so
- * control-key/scope-key hashes, worker process identities and the token itself
- * never reach HTML or JSON.
+ * With a token configured every route requires `x-pi-coord-token` or a bearer
+ * token. Responses come from an explicit field allowlist, so key hashes, worker
+ * process identities and the token never reach HTML or JSON.
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";

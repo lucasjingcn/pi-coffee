@@ -81,9 +81,9 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
   copyFileSync(join(root, 'scripts', 'lib', 'env.mjs'), join(prefix, 'env.mjs'));
   writeFileSync(launcher, launcherSource);
 
-  // Everything below writes user-visible state (the `pi` command and a shell rc
-  // line). Record the previous entry so a failed verification can put it back:
-  // a broken entry used to survive and shadow the user's own pi command.
+  // Everything below writes user-visible state (the `pi` command, a shell rc line).
+  // Keep the previous entry so a failed verification can put it back instead of
+  // leaving a broken command that shadows the user's own pi.
   const previousEntry = existsSync(entry) ? readFileSync(entry) : null;
   const restoreEntry = () => {
     try {

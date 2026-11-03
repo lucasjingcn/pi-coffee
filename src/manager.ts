@@ -2727,9 +2727,8 @@ export class Coordinator {
         throw new Error(`pull request head ${viewed.headRefOid ?? "unknown"} does not match verified worker ${proof.workerSha}; push and re-verify first`);
       }
       await this.auditStrict("orchestrator", "merge_queue", id, { number: rt.meta.pr.number, base, phase: "starting" });
-      // The method is repository policy (merge queue rules), not a guess: `gh pr
-      // merge` used to hardcode --squash, which the merge queue rejects in a
-      // repo that only allows merge commits.
+      // Merge method is repository policy (merge-queue rules): a repo that only
+      // allows merge commits rejects --squash.
       await this.gh.queueMerge(rt.meta.repo, rt.meta.pr.number, this.config.prMergeMethod);
       this.scheduleSave();
       await this.auditBestEffort("orchestrator", "merge_queue_complete", id, { number: rt.meta.pr.number, base });
@@ -3193,9 +3192,8 @@ export class Coordinator {
       this.archive(rt.meta);
       this.scheduleSave();
     } else {
-      // The caller's stop options must survive the finish: `pi_stop` with an
-      // outcome used to drop `preserve_worktree`/`delete_branch` here, and the
-      // default autoClean then removed the worktree anyway.
+      // Stop options must survive the finish, or autoClean removes a worktree the
+      // caller asked to preserve.
       await this.stop(id, stopOpts);
     }
   }

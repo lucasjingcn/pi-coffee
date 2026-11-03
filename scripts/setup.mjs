@@ -144,11 +144,9 @@ async function main() {
     thinking = await ask("Thinking level (off|minimal|low|medium|high|xhigh|max)", thinking);
   }
 
-  // An existing pi login (`pi`'s own /login, or auth.json) is a valid credential source: workers
-  // inherit it, so a blank API-key answer is not an error for an interactive install.
-  // The directory has to be resolved like pi does (PI_CODING_AGENT_DIR first): a
-  // relocated store used to be ignored here while the doctor accepted it, and this
-  // exit(2) then aborted the whole installer under `set -e`.
+  // An existing pi login (`pi`'s own /login, or auth.json) is a valid credential
+  // source: workers inherit it, so a blank API-key answer is fine interactively.
+  // The directory resolves like pi does, honouring PI_CODING_AGENT_DIR.
   let usingPiLogin = false;
   if (!apiKey) {
     const authPath = authJsonPath(resolveAgentDir());
