@@ -161,3 +161,37 @@ test('--background validates the agent directory the service will actually see',
   assert.match(result.stdout, /FAIL\s+credentials for pi-audit-bg-provider/, result.stdout + result.stderr);
   assert.equal(result.code, 1, result.stdout + result.stderr);
 }));
+
+test('a custom provider declared in models.json counts as a credential', async () => fixture(async (dir) => {
+  const agentDir = join(dir, 'agent-models');
+  await mkdir(agentDir, {recursive: true});
+  // Custom providers (local gateways, relays) live here with their own key and
+  // never appear in auth.json; checking only auth.json reported a false FAIL.
+  await writeFile(join(agentDir, 'models.json'), JSON.stringify({
+    providers: { 'pi-audit-gateway': { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'fixture-key', models: [] } },
+  }));
+  const file = join(dir, 'env');
+  const home = join(dir, 'home');
+  writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-gateway', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir, PI_COFFEE_ENV_FILE: file};
+  const result = await run('scripts/doctor.mjs', env);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /ok\s+credentials for pi-audit-gateway/, result.stdout);
+  assert.match(result.stdout, /models\.json/, 'the detail names the source it accepted');
+}));
+
+test('a models.json provider keyed by a shell-only env var fails the background check', async () => fixture(async (dir) => {
+  const agentDir = join(dir, 'agent-models-bg');
+  await mkdir(agentDir, {recursive: true});
+  await writeFile(join(agentDir, 'models.json'), JSON.stringify({
+    providers: { 'pi-audit-gateway-bg': { apiKeyEnv: 'PI_AUDIT_BG_GATEWAY_KEY', models: [] } },
+  }));
+  const file = join(dir, 'env');
+  const home = join(dir, 'home');
+  writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-gateway-bg', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir,
+    PI_COFFEE_ENV_FILE: file, PI_AUDIT_BG_GATEWAY_KEY: 'shell-only'};
+  const result = await run('scripts/doctor.mjs', env, ['--background']);
+  assert.match(result.stdout, /FAIL\s+credentials for pi-audit-gateway-bg/, result.stdout + result.stderr);
+  assert.equal(result.code, 1);
+}));

@@ -108,11 +108,17 @@ const hasEnvKey = Boolean(process.env[keyVar]) && (!background || Boolean(values
 // another provider's login is not a credential for this one (that false PASS let
 // the install finish and the first model call fail).
 const hasAuth = hasProviderCredential(authPath, provider);
+const hasModels = hasModelsProviderCredential(agentDir, provider);
 check(
   `credentials for ${provider}`,
-  hasEnvKey || hasAuth,
-  hasEnvKey ? `${keyVar} is set` : hasAuth ? `pi auth.json has a ${provider} entry at ${authPath}` : `no ${keyVar} and no ${provider} entry in ${authPath}`,
-  background ? "store credentials in the private env file with `npm run setup`, or configure pi auth.json" : "run `npm run setup` to store an API key",
+  hasEnvKey || hasAuth || hasModels,
+  hasEnvKey ? `${keyVar} is set`
+    : hasAuth ? `pi auth.json has a ${provider} entry at ${authPath}`
+    : hasModels ? `${provider} is configured with a key in ${join(agentDir, "models.json")}`
+    : `no ${keyVar}, no ${provider} entry in ${authPath}, and no ${provider} provider in models.json`,
+  background
+    ? "store credentials in the private env file with `npm run setup`, or configure pi auth.json / models.json"
+    : "run `npm run setup` to store an API key",
 );
 
 // --- data directory ---
@@ -153,6 +159,30 @@ function hasProviderCredential(path, provider) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   const entry = parsed[provider];
   return entry !== undefined && entry !== null && entry !== "";
+}
+
+/**
+ * True when the provider is declared in pi's `models.json` with a usable key.
+ *
+ * A custom provider (a local gateway, a relay) lives there — `providers.<id>.apiKey`,
+ * optionally an env-var reference — and never appears in auth.json. Checking only
+ * auth.json reported a false FAIL for exactly that setup.
+ */
+function hasModelsProviderCredential(agentDir, provider) {
+  const parsed = readJson(join(agentDir, "models.json"));
+  const providers = parsed && typeof parsed === "object" ? parsed.providers ?? parsed : undefined;
+  if (!providers || typeof providers !== "object") return false;
+  const entry = providers[provider];
+  if (!entry || typeof entry !== "object") return false;
+  const inline = entry.apiKey ?? entry.api_key ?? entry.key;
+  if (typeof inline === "string" && inline.trim() !== "") return true;
+  const envName = entry.apiKeyEnv ?? entry.api_key_env;
+  if (typeof envName === "string" && envName.trim() !== "") {
+    const name = envName.trim();
+    // A background service only sees what the env file (or unit) provides.
+    return background ? Boolean(values[name]) : Boolean(process.env[name]);
+  }
+  return false;
 }
 
 /** Read a config file without ever throwing: an unreadable file is "not registered". */
