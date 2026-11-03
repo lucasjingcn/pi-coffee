@@ -135,13 +135,11 @@ export interface SessionMeta {
   thinking?: string;
   pendingQuestions: UiRequest[];
   error?: string;
-  /** Assistant turns seen for this session. */
   turns?: number;
   /** When turns/tokens were last read from the worker; absent/null means never. */
   statsAt?: number;
   /** Number of instructions Codex has sent to this session (initial + corrections). */
   instructionsSent?: number;
-  /** Final disposition of this workstream. */
   outcome?: Outcome;
   outcomeNote?: string;
   /**
@@ -159,19 +157,15 @@ export interface SessionMeta {
   reviewAcceptance?: { acceptedAt: number; workerSha: string; note: string };
   /** Structured orchestrator review bound to one exact verification candidate. */
   candidateReview?: CandidateReview;
-  /** Structured delegation spec used to spawn this workstream. */
   spec?: DelegationSpec;
   /** Effective execution backend recorded at spawn (docker when the daemon sandbox is on). */
   sandbox?: { kind: "worktree" | "docker"; image?: string; imageDigest?: string; network?: "bridge" | "none" };
-  /** Effective worker runner recorded at spawn. */
   runner?: { kind: "pi" | "acp"; command?: string[] };
   /** Pull request created by pi_pr (idempotently reused by later calls). */
   pr?: { number: number; url: string; state?: string };
-  /** Session ids this workstream was declared dependent on at spawn. */
   blockedBy?: string[];
   /** Characters Codex sent to this worker through the daemon (lower bound on orchestrator output). */
   orchestratorChars?: number;
-  /** Set once the worker-side coordinator extension checked in. */
   extension?: boolean;
   extensionAt?: number;
   handoff?: WorkerHandoff;
@@ -194,7 +188,6 @@ interface Runtime {
   meta: SessionMeta;
   client: WorkerTransport;
   lastNotifiedQuestionIds: Set<string>;
-  /** Whether this session still holds its Codex-owned acceptance lock reservation (released once). */
   acceptanceReserved?: boolean;
   /** Throttle clock for mid-run stats refreshes triggered by message_end. */
   lastStatsRefreshAt?: number;
@@ -218,7 +211,6 @@ interface SpawnOptions {
   acceptanceCommand?: string;
   /** Structured task spec (goal/scope/contracts/...). Rendered into the worker prompt. */
   spec?: DelegationSpec;
-  /** Session ids that must be integrated before this spawn is accepted. */
   blocked_by?: string[];
   controlKeyHash?: string;
   scopeKeyHash?: string;
@@ -227,7 +219,6 @@ interface SpawnOptions {
 }
 
 interface ResumeOptions {
-  /** Optional first instruction after resuming; the original contract is not re-sent. */
   prompt?: string;
   /** Override the recorded/last-known model; defaults to the session's own model, then the daemon default. */
   provider?: string;
