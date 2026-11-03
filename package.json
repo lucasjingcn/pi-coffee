@@ -27,6 +27,7 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "inspect": "node scripts/inspect.mjs",
+    "status": "node scripts/status.mjs",
     "test": "npm run build && node --test --test-concurrency=2 --test-timeout=120000 --test-force-exit tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:extensions": "tsc -p tsconfig.ext.json",
@@ -59,7 +60,6 @@
     "install.sh",
     "run.sh",
     "smoke.sh",
-    "status.sh",
     ".env.example",
     "CHANGELOG.md"
   ],

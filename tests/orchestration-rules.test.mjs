@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -11,7 +12,7 @@ test("runtime and installation use one authoritative policy", () => {
   assert.equal(SKILL_MD, source);
   const bodyStart = source.indexOf("\n---\n") + "\n---\n".length;
   assert.equal(PLAYBOOK, source.slice(bodyStart).trim());
-  assert.match(execFileSync(process.execPath, [new URL("../scripts/sync-playbook.mjs", import.meta.url).pathname, "--check"], { encoding: "utf8" }), /policy consistent/);
+  assert.match(execFileSync(process.execPath, [fileURLToPath(new URL("../scripts/sync-playbook.mjs", import.meta.url)), "--check"], { encoding: "utf8" }), /policy consistent/);
 });
 
 test("small fixes stay direct and three-task size gate stays project-specific", () => {
