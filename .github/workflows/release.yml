@@ -22,6 +22,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+          # Without registry-url setup-node writes no .npmrc, and
+          # NODE_AUTH_TOKEN alone is never sent: `npm publish` failed with
+          # ENEEDAUTH while the job looked configured.
+          registry-url: "https://registry.npmjs.org"
       - run: npm ci
       - name: Verify the tag matches the package version
         shell: bash
@@ -30,22 +34,6 @@ jobs:
       - run: npm run verify
       - name: Pack npm tarball
         run: npm pack
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "NPM_TOKEN is not configured; skipping the npm publish step."
-            exit 0
-          fi
-          version=$(node -p "require('./package.json').version")
-          # Re-running a failed release must not fail on "version already
-          # published"; the artifact of an earlier attempt is fine to keep.
-          if npm view "pi-coffee@$version" version >/dev/null 2>&1; then
-            echo "pi-coffee@$version is already published; skipping"
-            exit 0
-          fi
-          npm publish --access public --provenance
       # The image is built BEFORE the release is created: if the build fails, a
       # re-run can simply start over (a release that already exists makes
       # `gh release create` fail and would permanently leave the tag without an
@@ -82,3 +70,23 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" ./pi-coffee-*.tgz "${flags[@]}"
           fi
+      # Publishes last: the image and the GitHub release already exist by now, so a
+      # registry problem cannot hide them — but when a token IS configured a failed
+      # publish fails the job instead of leaving a green run that shipped no package.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not configured; skipping the npm publish step."
+            exit 0
+          fi
+          version=$(node -p "require('./package.json').version")
+          # Re-running a partially failed release must not fail on an already
+          # published version.
+          if npm view "pi-coffee@$version" version >/dev/null 2>&1; then
+            echo "pi-coffee@$version is already published; skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance

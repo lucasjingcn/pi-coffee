@@ -94,11 +94,25 @@ fi
 command -v git >/dev/null 2>&1 || { echo "error: git is required" >&2; exit 1; }
 
 # --- build -----------------------------------------------------------------
-echo "==> npm install"
-npm install --no-audit --no-fund
+# A published tarball (the one-line installer's release asset) ships the compiled
+# `dist/` and deliberately excludes `src/` and `tsconfig.json`, so "build the
+# sources" only applies to a checkout. Running `tsc` here without a tsconfig made
+# every release-asset install abort with "error TS5058".
+if [ -f "$DIR/tsconfig.json" ] && [ -d "$DIR/src" ]; then
+  echo "==> npm install"
+  npm install --no-audit --no-fund
 
-echo "==> build"
-npm run build
+  echo "==> build"
+  npm run build
+else
+  if [ ! -f "$DIR/dist/index.js" ]; then
+    echo "error: this copy has no sources to build and no prebuilt dist/index.js." >&2
+    echo "  Re-download the package, or clone the repository and run npm run install:local." >&2
+    exit 1
+  fi
+  echo "==> npm install (runtime dependencies only; this copy ships a prebuilt dist)"
+  npm install --omit=dev --no-audit --no-fund
+fi
 
 # --- agent skills ----------------------------------------------------------
 # Codex reads its own directory; pi and other Agent Skills clients read the shared
@@ -134,16 +148,25 @@ node "$DIR/scripts/register-clients.mjs" || REGISTER_STATUS=$?
 # --- provider credentials --------------------------------------------------
 # pi reads API keys from the environment, so storing a key and a model id here
 # removes the need to run `/login` inside pi.
+# setup exits 2 when it was asked for a credential and none was given (and pi has
+# no login to reuse). The install itself is still valid — the doctor gate below
+# turns that into the single "run npm run setup" follow-up instead of aborting a
+# half-finished machine, which is what `set -e` used to do here.
+SETUP_STATUS=0
 if [ "$SKIP_SETUP" = "1" ]; then
   echo "==> provider setup skipped (--skip-setup / PI_COFFEE_SKIP_SETUP=1)"
 elif [ "${#SETUP_ARGS[@]}" -gt 0 ]; then
   echo "==> provider setup"
-  node "$DIR/scripts/setup.mjs" ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+  node "$DIR/scripts/setup.mjs" ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"} || SETUP_STATUS=$?
 elif [ -t 0 ]; then
   echo "==> provider setup"
-  node "$DIR/scripts/setup.mjs"
+  node "$DIR/scripts/setup.mjs" || SETUP_STATUS=$?
 else
   echo "==> provider setup skipped (no terminal). Later: npm run setup, or pass --provider/--api-key"
+fi
+if [ "$SETUP_STATUS" -ne 0 ] && [ "$SETUP_STATUS" -ne 2 ]; then
+  echo "error: provider setup failed (exit $SETUP_STATUS)." >&2
+  exit "$SETUP_STATUS"
 fi
 
 # --- verify ----------------------------------------------------------------

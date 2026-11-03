@@ -158,3 +158,19 @@ test("--json is machine readable and carries the fallback snippet", { skip: skip
   assert.equal(parsed.snippet.mcpServers.pi.command, process.execPath);
   assert.deepEqual(parsed.snippet.mcpServers.pi.args, [proxyPath]);
 });
+
+test("a failed first registration leaves no half-written config and says so", { skip: skipOnWindows }, (t) => {
+  const { home, bin, cleanup } = fixture("restore-none");
+  t.after(cleanup);
+  installFakeCodex(bin, { failAdd: true });
+  installFakePi(home);
+  // ~/.codex exists but has no config.toml: the fake writes a half-finished file,
+  // which used to survive while the summary claimed a restore had happened.
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  const result = run(environment({ home, bin }));
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /codex\s+FAILED/);
+  const config = join(home, ".codex", "config.toml");
+  assert.equal(existsSync(config), false, "the partial file is removed, restoring the previous state");
+  assert.match(result.stderr, /previous configuration was restored/);
+});

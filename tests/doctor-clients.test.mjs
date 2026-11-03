@@ -77,3 +77,23 @@ test("reports clients it can see and their exact follow-up", () => fixture(async
   assert.match(result.stdout, /pi\s+registered/);
   assert.match(result.stdout, /dsh\s+detected, not registered -> node .*setup-dsh\.mjs --write/);
 }));
+
+test("counts a DSH profile that already registers the server", () => fixture(async (home, env) => {
+  // `setup-dsh.mjs --write` writes the managed block; the doctor used to report
+  // "detected, not registered" no matter what, so its hint could never be cleared.
+  mkdirSync(join(home, ".dsh", "profiles", "desktop"), { recursive: true });
+  writeFileSync(join(home, ".dsh", "profiles", "desktop", "cordis.patch.yml"),
+    "- id: mcp-pi-coffee\n  serverName: pi-coffee\n  url: http://127.0.0.1:8787/mcp\n");
+  const result = await runDoctor(env);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /dsh\s+registered/, result.stdout);
+  assert.doesNotMatch(result.stdout, /dsh\s+detected, not registered/, result.stdout);
+}));
+
+test("the agent directory honours PI_CODING_AGENT_DIR like pi does", async () => {
+  const { resolveAgentDir } = await import("../scripts/lib/agent-dir.mjs");
+  assert.equal(resolveAgentDir({ PI_CODING_AGENT_DIR: "/tmp/relocated" }, "/home/u"), "/tmp/relocated");
+  assert.equal(resolveAgentDir({}, "/home/u"), join("/home/u", ".pi", "agent"));
+  // A blank export must not win over the default (an exported "" is "unset").
+  assert.equal(resolveAgentDir({ PI_CODING_AGENT_DIR: "  " }, "/home/u"), join("/home/u", ".pi", "agent"));
+});

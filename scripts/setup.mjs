@@ -15,10 +15,10 @@
  *   DEEPSEEK_API_KEY=sk-... PI_COFFEE_MODEL=deepseek-flash npm run setup -- --non-interactive
  */
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { apiKeyVarFor, envFilePath, loadEnvFile, writeEnvFile } from "./lib/env.mjs";
+import { authJsonPath, resolveAgentDir } from "./lib/agent-dir.mjs";
 import { resolvePiBin } from "./lib/pi.mjs";
 
 function parseArgs(argv) {
@@ -146,9 +146,12 @@ async function main() {
 
   // An existing pi login (`pi`'s own /login, or auth.json) is a valid credential source: workers
   // inherit it, so a blank API-key answer is not an error for an interactive install.
+  // The directory has to be resolved like pi does (PI_CODING_AGENT_DIR first): a
+  // relocated store used to be ignored here while the doctor accepted it, and this
+  // exit(2) then aborted the whole installer under `set -e`.
   let usingPiLogin = false;
   if (!apiKey) {
-    const authPath = join(homedir(), ".pi", "agent", "auth.json");
+    const authPath = authJsonPath(resolveAgentDir());
     if (interactive && existsSync(authPath)) {
       usingPiLogin = true;
       console.log(`\nNo API key entered; keeping pi's existing login at ${authPath}.`);

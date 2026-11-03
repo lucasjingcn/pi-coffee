@@ -84,6 +84,29 @@ case "$ARCHIVE" in
   *) cp "$ARCHIVE" "$WORK/archive" ;;
 esac
 
+# A curl | bash installer executes whatever it downloaded. There is no published
+# checksum, so verification is opt-in: pin the archive with
+# PI_COFFEE_BOOTSTRAP_SHA256 when installing in a controlled environment.
+if [ -n "${PI_COFFEE_BOOTSTRAP_SHA256:-}" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$WORK/archive" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$WORK/archive" | awk '{print $1}')"
+  else
+    echo "error: PI_COFFEE_BOOTSTRAP_SHA256 was set but neither sha256sum nor shasum is available" >&2
+    exit 1
+  fi
+  if [ "$actual" != "$PI_COFFEE_BOOTSTRAP_SHA256" ]; then
+    echo "error: archive checksum mismatch" >&2
+    echo "  expected $PI_COFFEE_BOOTSTRAP_SHA256" >&2
+    echo "  actual   $actual" >&2
+    exit 1
+  fi
+  echo "==> checksum verified"
+else
+  echo "note: no checksum pinned (set PI_COFFEE_BOOTSTRAP_SHA256 to verify the download)"
+fi
+
 tar -xzf "$WORK/archive" -C "$WORK"
 TOP="$(cd "$WORK" && ls -1 | grep -v '^archive$' | head -1)"
 SRC="$WORK/$TOP"
@@ -103,12 +126,31 @@ fi
 # --- keep a stable copy ----------------------------------------------------
 # Versioned directories leave a running daemon's checkout untouched while a new
 # version is unpacked next to it; install.sh refuses to restart one that is busy.
-if [ ! -d "$DEST" ]; then
+copy_to_dest() {
   mkdir -p "$DEST"
   (cd "$SRC" && tar -cf - .) | (cd "$DEST" && tar -xf -)
-  echo "==> unpacked $(printf '%s' "${VERSION:-main}") -> $DEST"
-else
+}
+
+reusable=0
+if [ -n "$VERSION" ] && [ -f "$DEST/install.sh" ] && [ -f "$DEST/package.json" ]; then
+  reusable=1
+fi
+
+if [ "$reusable" = "1" ]; then
   echo "==> reusing $DEST"
+elif [ -d "$DEST" ]; then
+  # Either the unversioned `main` snapshot (which must follow main on every run
+  # instead of being reused forever) or a half-unpacked copy from a failed run.
+  case "$DEST" in
+    "$APP_DIR"/*) ;;
+    *) echo "error: refusing to replace $DEST (outside $APP_DIR)" >&2; exit 1 ;;
+  esac
+  echo "==> refreshing $DEST"
+  rm -rf "$DEST"
+  copy_to_dest
+else
+  copy_to_dest
+  echo "==> unpacked $(printf '%s' "${VERSION:-main}") -> $DEST"
 fi
 
 # `curl | bash` leaves stdin as the pipe, so an interactive provider setup would be skipped.

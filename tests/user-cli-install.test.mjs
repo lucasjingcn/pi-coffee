@@ -69,7 +69,11 @@ test('all installation entry points register the MCP server with pi',()=>{
  assert.match(registrar,/const backup =/, 'Codex config is backed up before re-registering');
  assert.match(registrar,/function registerPi/, 'the helper registers pi');
  assert.doesNotMatch(registrar,/piArgv, "mcp", "remove"/, 'pi mcp add replaces, so no destructive remove');
- assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$piCmd mcp add pi/);
+ // Windows now uses the same registration helper as Unix: the inline Codex/pi
+ // duplication drifted (it registered only two clients, with its own rollback).
+ const windows=readFileSync('deploy/windows/install.ps1','utf8');
+ assert.match(windows,/scripts\\register-clients\.mjs/,'install.ps1 uses the shared registration helper');
+ assert.doesNotMatch(windows,/\$piCmd mcp add pi/,'the duplicated inline registration is gone');
 });
 
 test('fresh installation requests the repository pinned pi package in the independent prefix',()=>fixture(home=>{
@@ -122,4 +126,15 @@ test('installer rejects a runtime below the pi engine requirement',()=>fixture(h
  const oldNode=join(home,'old-node');
  writeFileSync(oldNode,'#!/bin/sh\necho 22.17.1\n',{mode:0o755});
  assert.throws(()=>installCli({home,platform:'linux',nodePath:oldNode,configurePath:false}),/requires Node >=22\.19\.0/);
+}));
+
+test('a failed verification leaves no broken pi command and no PATH edits',()=>fixture(home=>{
+ const cliPath=join(home,'.local/share/pi-cli/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
+ // The installed package reports a different version than the pin, so the final
+ // verification fails. It must not leave a shadowing entry or a PATH line behind.
+ writeFileSync(cliPath,`if(process.argv.includes('--version'))console.log('0.0.0-broken');\n`);
+ writeFileSync(join(home,'.zshrc'),'# existing user config\n');
+ assert.throws(()=>installCli({home,platform:'linux',shell:'/bin/zsh'}),/Unexpected installed pi version/);
+ assert.equal(existsSync(join(home,'.local/bin/pi')),false,'no broken entry is left behind');
+ assert.equal(readFileSync(join(home,'.zshrc'),'utf8'),'# existing user config\n','the shell rc is untouched');
 }));

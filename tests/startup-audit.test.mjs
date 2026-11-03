@@ -121,7 +121,9 @@ test('doctor honours PI_CODING_AGENT_DIR instead of hardcoding ~/.pi/agent', asy
   // relocated store made the doctor report a false FAIL and exit 1.
   const agentDir = join(dir, 'relocated-agent');
   await mkdir(agentDir, {recursive: true});
-  await writeFile(join(agentDir, 'auth.json'), '{"openai":{"type":"api_key","key":"fixture"}}\n');
+  // auth.json is `{ providerId: credential }`: the entry has to be for THIS provider,
+  // otherwise the doctor reported a false PASS for a key it does not have.
+  await writeFile(join(agentDir, 'auth.json'), '{"pi-audit-relocated-provider":{"type":"api_key","key":"fixture"}}\n');
   const file = join(dir, 'env');
   const home = join(dir, 'home');
   writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-relocated-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
@@ -129,4 +131,33 @@ test('doctor honours PI_CODING_AGENT_DIR instead of hardcoding ~/.pi/agent', asy
   const result = await run('scripts/doctor.mjs', env);
   assert.match(result.stdout, /ok\s+credentials for pi-audit-relocated-provider/, result.stdout + result.stderr);
   assert.equal(result.code, 0, result.stdout + result.stderr);
+}));
+
+test('doctor does not accept another provider in auth.json as a credential', async () => fixture(async (dir) => {
+  const agentDir = join(dir, 'agent-other');
+  await mkdir(agentDir, {recursive: true});
+  await writeFile(join(agentDir, 'auth.json'), '{"anthropic":{"type":"api_key","key":"fixture"}}\n');
+  const file = join(dir, 'env');
+  const home = join(dir, 'home');
+  writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-no-such-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir, PI_COFFEE_ENV_FILE: file};
+  const result = await run('scripts/doctor.mjs', env);
+  // A file that exists but holds another provider's login is not this provider's key.
+  assert.match(result.stdout, /FAIL\s+credentials for pi-audit-no-such-provider/, result.stdout + result.stderr);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+}));
+
+test('--background validates the agent directory the service will actually see', async () => fixture(async (dir) => {
+  const shellOnly = join(dir, 'shell-only-agent');
+  await mkdir(shellOnly, {recursive: true});
+  await writeFile(join(shellOnly, 'auth.json'), '{"pi-audit-bg-provider":{"type":"api_key","key":"fixture"}}\n');
+  const file = join(dir, 'env');
+  const home = join(dir, 'home');
+  // The env file does NOT carry PI_CODING_AGENT_DIR, and launchd/systemd only
+  // forward what the unit sets — so a shell-only value must not satisfy the check.
+  writeEnvFile({PI_COFFEE_PROVIDER: 'pi-audit-bg-provider', PI_COFFEE_DATA_DIR: join(dir, 'data')}, file);
+  const env = {...cleanEnv(), HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: shellOnly, PI_COFFEE_ENV_FILE: file};
+  const result = await run('scripts/doctor.mjs', env, ['--background']);
+  assert.match(result.stdout, /FAIL\s+credentials for pi-audit-bg-provider/, result.stdout + result.stderr);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
 }));

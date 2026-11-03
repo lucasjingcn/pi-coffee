@@ -76,3 +76,47 @@ test("a missing archive fails with the path it tried", { skip: skipOnWindows }, 
     assert.match(result.stderr, /nope\.tgz/);
   });
 });
+
+test("a second run reuses the versioned copy instead of unpacking again", { skip: skipOnWindows }, (t) => {
+  fixture(({ app, env }) => {
+    const first = run(["--provider", "deepseek"], env);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const second = run(["--provider", "deepseek"], env);
+    assert.equal(second.status, 0, second.stdout + second.stderr);
+    assert.match(second.stdout, /reusing .*pi-coffee-9\.9\.9/);
+  });
+});
+
+test("an unversioned snapshot is refreshed instead of being reused forever", { skip: skipOnWindows }, (t) => {
+  fixture(({ dir, app, env }) => {
+    // No package.json version -> the fallback "main" snapshot directory. Re-running
+    // used to reuse it silently, so a curl|bash install never picked up new code.
+    const source = join(dir, "src2", "pi-coffee-main");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "install.sh"), '#!/usr/bin/env bash\necho "old installer"\n', { mode: 0o755 });
+    const archive = join(dir, "main-v1.tgz");
+    execFileSync("tar", ["-czf", archive, "-C", join(dir, "src2"), "pi-coffee-main"]);
+
+    const first = run([], { ...env, PI_COFFEE_BOOTSTRAP_ARCHIVE: archive });
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    assert.match(first.stdout, /old installer/);
+
+    writeFileSync(join(source, "install.sh"), '#!/usr/bin/env bash\necho "new installer"\n', { mode: 0o755 });
+    const archive2 = join(dir, "main-v2.tgz");
+    execFileSync("tar", ["-czf", archive2, "-C", join(dir, "src2"), "pi-coffee-main"]);
+    const second = run([], { ...env, PI_COFFEE_BOOTSTRAP_ARCHIVE: archive2 });
+    assert.equal(second.status, 0, second.stdout + second.stderr);
+    assert.match(second.stdout, /refreshing .*pi-coffee-main/);
+    assert.match(second.stdout, /new installer/, "the re-run must run the new copy");
+    assert.ok(existsSync(join(app, "pi-coffee-main", "install.sh")));
+  });
+});
+
+test("a pinned checksum is verified before anything is unpacked", { skip: skipOnWindows }, (t) => {
+  fixture(({ app, env }) => {
+    const bad = run([], { ...env, PI_COFFEE_BOOTSTRAP_SHA256: "0".repeat(64) });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /checksum mismatch/);
+    assert.ok(!existsSync(app), "nothing is written when the download does not verify");
+  });
+});

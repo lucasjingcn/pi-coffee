@@ -60,47 +60,33 @@ if ($codex -or (Test-Path $codexHome)) {
 if ($LASTEXITCODE -ne 0) { throw 'User pi CLI installation failed.' }
 
 # --- MCP registration ------------------------------------------------------
-$proxy = Join-Path $root 'scripts\proxy.mjs'
-$registerFailed = $false
+# One registration path for every platform. scripts/register-clients.mjs detects
+# Codex and the pi CLI (writing both idempotently and restoring the Codex config
+# when an add fails) and reports how to connect DSH, Claude Code and Cursor.
+# Duplicating that here drifted: this installer used to register only Codex and
+# pi, with its own weaker rollback, so Windows users never saw the other clients.
+Write-Host '==> register MCP server with detected clients'
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-
-if (-not $codex) {
-  Write-Host "==> Codex not found on PATH; skipping its registration (run node scripts/register-clients.mjs after installing it)"
-} else {
-  Write-Host '==> register MCP server with Codex'
-  $codexConfig = Join-Path $codexHome 'config.toml'
-  $codexBackup = if (Test-Path $codexConfig) { Get-Content -Raw $codexConfig } else { $null }
-  try { & $codex mcp remove pi 2>$null | Out-Null }
-  catch { }
-  & $codex mcp add pi -- $node $proxy
-  if ($LASTEXITCODE -ne 0) {
-    if ($null -ne $codexBackup) { Set-Content -Path $codexConfig -Value $codexBackup -NoNewline }
-    Write-Warning 'Codex MCP registration failed; its previous configuration was restored.'
-    $registerFailed = $true
-  }
-}
-
-# The installer ships pi, so register the same MCP server there too.
-Write-Host '==> register MCP server with pi'
-$piCmd = Join-Path $env:USERPROFILE '.local\bin\pi.cmd'
-$ErrorActionPreference = 'Continue'
-& $piCmd mcp add pi --description 'pi-coffee: spawn, review, verify, and merge isolated pi coding workers' -- $node $proxy
-if ($LASTEXITCODE -ne 0) {
-  Write-Warning 'pi MCP registration failed.'
-  $registerFailed = $true
-}
+& $node (Join-Path $root 'scripts\register-clients.mjs')
+$registerExit = $LASTEXITCODE
 $ErrorActionPreference = $previousErrorAction
+$registerFailed = $registerExit -ne 0
+if ($registerFailed) {
+  Write-Warning 'One MCP client registration failed; its previous configuration was restored.'
+}
 
 # --- provider credentials --------------------------------------------------
 if ($skipSetup) {
   Write-Host '==> provider setup skipped (--skip-setup / PI_COFFEE_SKIP_SETUP=1)'
 } elseif ($setupArgs.Count -gt 0) {
   & $node (Join-Path $root 'scripts\setup.mjs') @setupArgs
-  if ($LASTEXITCODE -ne 0) { throw 'Provider setup failed.' }
+  # Exit 2 = "asked for a credential, none given". The install is still usable;
+  # the doctor gate below turns it into the single "run npm run setup" follow-up.
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) { throw 'Provider setup failed.' }
 } elseif (-not [Console]::IsInputRedirected) {
   & $node (Join-Path $root 'scripts\setup.mjs')
-  if ($LASTEXITCODE -ne 0) { throw 'Provider setup failed.' }
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) { throw 'Provider setup failed.' }
 } else {
   Write-Host '==> provider setup skipped (no terminal). Later: npm run setup, or pass --provider/--api-key'
 }
@@ -131,10 +117,14 @@ if ($LASTEXITCODE -ne 0) {
   throw 'Background daemon did not become healthy. Diagnose with npm run doctor.'
 }
 
+# Report the port the daemon actually serves, not just the default.
+$daemonPort = (& $node --input-type=module -e 'import {loadDaemonEnv} from "./scripts/lib/env.mjs"; loadDaemonEnv(); process.stdout.write(process.env.PI_COFFEE_PORT || "8787");' 2>$null | Out-String).Trim()
+if (-not $daemonPort) { $daemonPort = '8787' }
+
 $summary = @"
 pi-coffee is installed and running.
 
-  endpoint    http://127.0.0.1:8787/mcp   (PI_COFFEE_PORT in the env file)
+  endpoint    http://127.0.0.1:$daemonPort/mcp
   data        $env:USERPROFILE\.pi-coffee
   restart     Stop-ScheduledTask -TaskName pi-coffee; Start-ScheduledTask -TaskName pi-coffee
 

@@ -24,8 +24,10 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-// npx installs into a cache directory that may be pruned: never point a daemon at it.
+// npx installs into a cache directory that may be pruned: never point a daemon,
+// a registration or a pinned credential at it. Read-only commands stay usable.
 const ephemeral = root.split(/[\\/]/).includes("_npx");
+const EPHEMERAL_DENIED = new Set(["install", "setup", "register-clients", "start", "upgrade"]);
 
 const USAGE = `pi-coffee ${pkg.version} — MCP orchestration for isolated pi coding workers
 
@@ -79,13 +81,17 @@ if (!command || command === "--help" || command === "-h" || command === "help") 
   console.log(pkg.version);
   process.exitCode = 0;
 } else if (command === "demo") {
-  // The offline smoke needs a build; keep `pi-coffee demo` a single command.
-  const build = run(["npm", "run", "build"]);
-  process.exitCode = build === 0 ? run(script("smoke.mjs"), { env: { SMOKE_LIVE: "0" } }) : build;
+  // demo.mjs builds a checkout when needed and runs the offline smoke from the
+  // prebuilt dist otherwise, so this stays one command in a published package too.
+  process.exitCode = run(script("demo.mjs"));
 } else if (commands[command]) {
-  if (command === "install" && ephemeral) {
-    console.error("pi-coffee: this package is running from a temporary npx cache.");
-    console.error("Use the one-line installer so the daemon points at a stable directory:");
+  if (ephemeral && EPHEMERAL_DENIED.has(command)) {
+    // These commands write durable state: a daemon checkout, an MCP registration
+    // pointing at scripts/proxy.mjs, or a pinned pi path. All of them would break
+    // as soon as npm prunes the npx cache.
+    console.error(`pi-coffee: "${command}" cannot run from a temporary npx cache (${root}).`);
+    console.error("It would point durable configuration at a directory npm may delete.");
+    console.error("Use the one-line installer so the installation lives in a stable directory:");
     console.error("  curl -fsSL https://raw.githubusercontent.com/lucasjingcn/pi-coffee/main/scripts/bootstrap.sh | bash");
     process.exitCode = 1;
   } else {

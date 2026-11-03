@@ -39,6 +39,58 @@ All notable changes to pi-coffee are recorded here. The format follows
   `npm run demo` check, a copy-paste first-worker prompt and a read-only console screenshot
   (`docs/images/dashboard.png`).
 
+### Fixed (read-only audit of the install/CLI commits)
+
+The one-line installer could not install from a published release, and several
+preflight checks answered the wrong question:
+
+- A release tarball has no `src/` and no `tsconfig.json` (the package ships a
+  prebuilt `dist/`), yet `install.sh` always ran `npm run build`, so every
+  `curl | bash` install from a release asset aborted with
+  `error TS5058: The specified path does not exist: 'tsconfig.json'`. It now builds
+  only a checkout and installs runtime dependencies for a published copy; the same
+  exception covers `npm run demo` / `pi-coffee demo`, which used to fail with
+  `tsc: command not found`.
+- The release workflow set `NODE_AUTH_TOKEN` without `registry-url`, so npm never
+  received it (`ENEEDAUTH`) and the publish step failed; `npm publish` now runs
+  last — after the image and the GitHub release exist — so a registry problem can
+  neither hide the artifacts nor pass silently.
+- `npx pi-coffee register-clients` wrote a permanent MCP registration pointing at
+  `scripts/proxy.mjs` inside the prunable npx cache; every command that writes
+  durable state (`install`, `setup`, `register-clients`, `start`, `upgrade`) now
+  refuses to run from there and points at the one-line installer instead.
+- The Windows installer duplicated the registration logic and registered only
+  Codex and pi; it now calls the same `register-clients.mjs` as Unix (so DSH,
+  Claude Code and Cursor are reported too) and prints the port the daemon serves
+  instead of a hardcoded 8787.
+- A failed Codex registration left a half-written `config.toml` behind (when the
+  file did not exist before) while the summary claimed a restore; the file is now
+  removed, and the message distinguishes "restored", "left unchanged" and "could
+  not restore".
+- `doctor` reported a credential PASS whenever `auth.json` existed, even if it
+  held only another provider's login; it now requires an entry for the provider.
+  Under `--background` it also validates the agent directory the service will see
+  (the env file), not the shell's `PI_CODING_AGENT_DIR`.
+- `doctor`'s pi row used `~/.pi/agent/mcp.json` and its DSH row was `registered:
+  false` forever; both now follow `PI_CODING_AGENT_DIR` and detect a managed
+  `cordis.patch.yml`. An unreadable Codex config is reported as "not registered"
+  instead of crashing the preflight (which aborted the install).
+- `setup` still hardcoded `~/.pi/agent/auth.json`, so a relocated pi login made it
+  exit 2 and, under `set -e`, aborted the install right after the client
+  registration; a missing credential is now the doctor's single follow-up instead.
+  Agent-directory resolution is shared (`scripts/lib/agent-dir.mjs`).
+- `install-cli` wrote the `pi` entry and the PATH line before verifying the
+  runtime, so a failed check left a broken `pi` command shadowing the user's own
+  and a permanent rc edit; it verifies first, restores the previous entry, and only
+  then touches PATH (with the real bin directory instead of a literal
+  `$HOME/.local/bin`).
+- `bootstrap.sh` reused the unversioned `main` snapshot forever, so a re-run never
+  picked up new code; that copy is refreshed now, an existing versioned copy is
+  reused only when it looks complete, and `PI_COFFEE_BOOTSTRAP_SHA256` verifies the
+  download (documented: unpinned by default).
+- `tests/cli.test.mjs` built paths with `URL.pathname`, which fails for a checkout
+  in a directory with a space and on Windows; it uses `fileURLToPath` now.
+
 ### Fixed (read-only audit of the last 30 commits)
 
 Security and data safety:

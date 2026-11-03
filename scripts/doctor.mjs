@@ -9,11 +9,12 @@
  *   npm run doctor
  */
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { apiKeyVarFor, envFilePath, loadDaemonEnv } from "./lib/env.mjs";
+import { authJsonPath, resolveAgentDir } from "./lib/agent-dir.mjs";
 import { resolvePiBin, piVersion } from "./lib/pi.mjs";
 import { resolveBashBin } from "./lib/bash.mjs";
 
@@ -25,6 +26,18 @@ function run(cmd, args) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Run the first candidate that answers. On Windows the CLIs are `.cmd` shims,
+ * which cannot be spawned without a shell, so `codex` alone probes nothing.
+ */
+function runAny(candidates, args) {
+  for (const candidate of candidates) {
+    const output = run(candidate, args);
+    if (output !== undefined) return output;
+  }
+  return undefined;
 }
 
 const checks = [];
@@ -81,18 +94,24 @@ check(
 // pi accepts either an env var (which we pass through) or its own auth.json.
 const provider = process.env.PI_COFFEE_PROVIDER || "deepseek";
 const keyVar = apiKeyVarFor(provider);
-// pi resolves its agent directory from PI_CODING_AGENT_DIR first (getAgentDir());
-// hardcoding ~/.pi/agent made an install that relocates the directory report a
-// false FAIL and exit 1 even though pi itself could authenticate.
-const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const authPath = join(agentDir, "auth.json");
+// pi resolves its agent directory from PI_CODING_AGENT_DIR first (getAgentDir()).
+// Under --background that variable must come from the env file: a launchd agent or
+// systemd unit only forwards what the service definition sets, so validating the
+// shell's value checks a path the daemon will never see.
+const agentDir = background
+  ? resolveAgentDir({ PI_CODING_AGENT_DIR: values.PI_CODING_AGENT_DIR })
+  : resolveAgentDir();
+const authPath = authJsonPath(agentDir);
 // Background installers cannot inherit transient API keys from this shell.
 const hasEnvKey = Boolean(process.env[keyVar]) && (!background || Boolean(values[keyVar]));
-const hasAuth = existsSync(authPath);
+// auth.json is `{ providerId: credential }`: a file that exists but holds only
+// another provider's login is not a credential for this one (that false PASS let
+// the install finish and the first model call fail).
+const hasAuth = hasProviderCredential(authPath, provider);
 check(
   `credentials for ${provider}`,
   hasEnvKey || hasAuth,
-  hasEnvKey ? `${keyVar} is set` : hasAuth ? `pi auth.json found at ${authPath}` : `no ${keyVar} and no ${authPath}`,
+  hasEnvKey ? `${keyVar} is set` : hasAuth ? `pi auth.json has a ${provider} entry at ${authPath}` : `no ${keyVar} and no ${provider} entry in ${authPath}`,
   background ? "store credentials in the private env file with `npm run setup`, or configure pi auth.json" : "run `npm run setup` to store an API key",
 );
 
@@ -127,30 +146,69 @@ function readJson(path) {
     return undefined;
   }
 }
+
+/** True when pi's auth.json holds a credential for this provider. */
+function hasProviderCredential(path, provider) {
+  const parsed = readJson(path);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const entry = parsed[provider];
+  return entry !== undefined && entry !== null && entry !== "";
+}
+
+/** Read a config file without ever throwing: an unreadable file is "not registered". */
+function readText(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when a DSH profile patch registers this server (managed block or hand-written row). */
+function dshRegistered(dshHome) {
+  const profiles = join(dshHome, "profiles");
+  let names;
+  try {
+    names = readdirSync(profiles);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    const text = readText(join(profiles, name, "cordis.patch.yml"));
+    if (text && /(serverName|id):\s*['"]?(pi-coffee|mcp-pi-coffee)['"]?/.test(text)) return true;
+  }
+  return false;
+}
+
 function mcpClients() {
   const rows = [];
   const codexConfig = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
-  if (existsSync(codexConfig) || run("codex", ["--version"]) !== undefined) {
+  const codexBin = runAny(process.platform === "win32" ? ["codex", "codex.cmd"] : ["codex"], ["--version"]);
+  if (existsSync(codexConfig) || codexBin !== undefined) {
+    // A config we cannot read is reported as "not registered", never as a crash:
+    // this section is informational and must not fail an installation.
     rows.push({
       name: "codex",
-      registered: existsSync(codexConfig) && /\[mcp_servers\.pi\]/.test(readFileSync(codexConfig, "utf8")),
+      registered: /\[mcp_servers\.pi\]/.test(readText(codexConfig) ?? ""),
       hint: "node scripts/register-clients.mjs",
     });
   }
-  const piConfig = join(homedir(), ".pi", "agent", "mcp.json");
-  if (existsSync(join(homedir(), ".pi")) || existsSync(join(homedir(), ".local", "bin", "pi"))) {
+  // pi keeps its MCP configuration in the agent directory (getAgentDir()).
+  const piConfig = join(agentDir, "mcp.json");
+  const piEntry = join(homedir(), ".local", "bin", process.platform === "win32" ? "pi.cmd" : "pi");
+  if (existsSync(agentDir) || existsSync(piEntry) || existsSync(join(homedir(), ".pi"))) {
     rows.push({
       name: "pi",
       registered: Boolean(readJson(piConfig)?.mcpServers?.pi),
       hint: "node scripts/register-clients.mjs",
     });
   }
-  // DSH never writes itself from the installer: `/internal/health` users run the explicit command.
+  // DSH keeps its own profile patch layer; the installer only prints the command.
   const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
   if (existsSync(dshHome)) {
     rows.push({
       name: "dsh",
-      registered: false,
+      registered: dshRegistered(dshHome),
       hint: `node ${join(repoRoot, "scripts", "setup-dsh.mjs")} --write`,
       detected: dshHome,
     });

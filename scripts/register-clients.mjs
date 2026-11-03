@@ -20,7 +20,7 @@
  * failed (the original client config is restored), 2 = invalid command line.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,16 +114,42 @@ function failureText(result) {
   return (result.stderr || result.stdout || "").trim();
 }
 
+/**
+ * Put the Codex config back exactly as it was.
+ *
+ * With no previous file a failed `codex mcp add` can leave a half-written TOML
+ * (observed: `mcp_servers={pi={`), so the file has to be removed rather than left
+ * behind. Reports whether the restore actually happened — the summary must not
+ * claim a restore that did not take place.
+ */
+function restoreCodexConfig(configPath, existedBefore, backup) {
+  try {
+    if (existedBefore && backup !== null) {
+      writeFileSync(configPath, backup);
+      return true;
+    }
+    if (!existedBefore && existsSync(configPath)) rmSync(configPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Register with Codex, restoring its config file if the add fails. */
 function registerCodex(codexBin) {
   const configPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
-  const backup = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
+  const existedBefore = existsSync(configPath);
+  const backup = existedBefore ? readFileSync(configPath, "utf8") : null;
   // `codex mcp add` refuses a duplicate name, so the old entry is removed first.
   runArgv([codexBin, "mcp", "remove", SERVER]);
   const added = runArgv([codexBin, "mcp", "add", SERVER, "--", NODE, PROXY]);
   if (added.status !== 0) {
-    if (backup !== null) writeFileSync(configPath, backup);
-    throw new Error(failureText(added) || `codex mcp add ${SERVER} exited ${added.status}`);
+    const detail = failureText(added) || `codex mcp add ${SERVER} exited ${added.status}`;
+    const restored = restoreCodexConfig(configPath, existedBefore, backup);
+    const error = new Error(detail);
+    error.restored = restored;
+    error.configPath = configPath;
+    throw error;
   }
   return ["codex", `codex mcp add ${SERVER}`];
 }
@@ -132,7 +158,13 @@ function registerCodex(codexBin) {
 function registerPi(piArgv) {
   const argv = [...piArgv, "mcp", "add", SERVER, "--description", DESCRIPTION, "--", NODE, PROXY];
   const added = runArgv(argv);
-  if (added.status !== 0) throw new Error(failureText(added) || `pi mcp add ${SERVER} exited ${added.status}`);
+  if (added.status !== 0) {
+    // `pi mcp add` is add-or-replace and keeps the previous entry on failure, so
+    // there is nothing to restore — and claiming a restore would be wrong.
+    const error = new Error(failureText(added) || `pi mcp add ${SERVER} exited ${added.status}`);
+    error.restored = "unchanged";
+    throw error;
+  }
   return ["pi", `${commandLine(piArgv)} mcp add ${SERVER}`];
 }
 
@@ -187,7 +219,12 @@ function main() {
       const [client, command] = registerCodex(codexBin);
       result.registered.push({ client, command });
     } catch (error) {
-      result.failures.push({ client: "codex", error: error instanceof Error ? error.message : String(error) });
+      const restored = error instanceof Error && "restored" in error ? error.restored : false;
+      result.failures.push({
+        client: "codex",
+        error: error instanceof Error ? error.message : String(error),
+        restored: restored === true ? "restored" : "not-restored",
+      });
     }
   }
 
@@ -197,7 +234,10 @@ function main() {
       const [client, command] = registerPi(piArgv);
       result.registered.push({ client, command });
     } catch (error) {
-      result.failures.push({ client: "pi", error: error instanceof Error ? error.message : String(error) });
+      const state = error instanceof Error && "restored" in error && error.restored === "unchanged"
+        ? "unchanged"
+        : "not-restored";
+      result.failures.push({ client: "pi", error: error instanceof Error ? error.message : String(error), restored: state });
     }
   }
 
@@ -228,7 +268,17 @@ function main() {
   }
 
   if (result.failures.length > 0) {
-    console.error("\nOne registration failed; that client's previous configuration was restored.");
+    // Say exactly what state each client is in; the old text promised a restore even
+    // when the client had no backup (pi) or when the restore could not be written.
+    for (const failure of result.failures) {
+      if (failure.restored === "restored") {
+        console.error(`\n${failure.client}: registration failed; its previous configuration was restored.`);
+      } else if (failure.restored === "unchanged") {
+        console.error(`\n${failure.client}: registration failed; its configuration was left unchanged.`);
+      } else {
+        console.error(`\n${failure.client}: registration failed AND its previous configuration could not be restored — inspect it before using this client.`);
+      }
+    }
     return 1;
   }
   return 0;

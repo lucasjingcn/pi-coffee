@@ -13,6 +13,12 @@ its installer (Node.js ≥ 22.19 is still required; git is only needed by the wo
 curl -fsSL https://raw.githubusercontent.com/lucasjingcn/pi-coffee/main/scripts/bootstrap.sh | bash
 ```
 
+The bootstrap keeps a versioned copy under `~/.pi-coffee/app/pi-coffee-<version>` so a running
+daemon's checkout is never rewritten mid-upgrade; when it falls back to the `main` archive (no
+release published yet) the copy is refreshed on every run. The download is not checksummed by
+default — pin it with `PI_COFFEE_BOOTSTRAP_SHA256=<sha256>` when you install in a controlled
+environment, or `PI_COFFEE_BOOTSTRAP_ARCHIVE=<path-or-url>` to use a mirror.
+
 From a checkout it is the same installer:
 
 ```bash
@@ -25,7 +31,9 @@ npm run install:local
 
 - refuses to touch a running coordinator, and checks Node.js ≥ 22.19 and git up front with an
   actionable message;
-- runs `npm install` and `npm run build`;
+- installs what the copy needs: a checkout runs `npm install` and `npm run build`, while a published
+  release tarball (no `src/`, no `tsconfig.json`) installs the runtime dependencies only and uses the
+  `dist/` it ships;
 - installs the `pi-orchestrator` skill for the Agent Skills clients it finds (`~/.agents/skills`);
 - registers the **stdio proxy** as the MCP server `pi` with every MCP client it detects — Codex when
   `codex` is on `PATH`, and the installed pi CLI. The proxy forwards to the HTTP daemon and reconnects

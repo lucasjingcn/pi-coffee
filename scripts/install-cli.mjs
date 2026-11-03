@@ -81,31 +81,59 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
   }
   copyFileSync(join(root, 'scripts', 'lib', 'env.mjs'), join(prefix, 'env.mjs'));
   writeFileSync(launcher, launcherSource);
+
+  // Everything below writes user-visible state (the `pi` command and a shell rc
+  // line). Record the previous entry so a failed verification can put it back:
+  // a broken entry used to survive and shadow the user's own pi command.
+  const previousEntry = existsSync(entry) ? readFileSync(entry) : null;
+  const restoreEntry = () => {
+    try {
+      if (previousEntry === null) rmSync(entry, {force: true});
+      else writeFileSync(entry, previousEntry);
+    } catch { /* best effort: the thrown error is the actionable one */ }
+  };
+
   if (platform === 'win32') {
     writeFileSync(entry, `@echo off\r\n@rem ${marker}\r\n@${cmdQuote(runtime)} ${cmdQuote(launcher)} %*\r\n`, {mode: 0o755});
-    if (configurePath) {
-      const literal = `'${binDir.replace(/'/g, "''")}'`;
-      const script = `$bin=${literal}; $p=[Environment]::GetEnvironmentVariable('Path','User'); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path',($bin+';'+$p),'User') }`;
-      execFileSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {stdio: 'inherit'});
-    }
   } else {
     writeFileSync(entry, `#!/bin/sh\n${marker}\nnode=$(command -v node 2>/dev/null || true)\nif [ -n "$node" ] && "$node" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' >/dev/null 2>&1; then\n  exec "$node" ${shellQuote(launcher)} "$@"\nfi\nexec ${shellQuote(runtime)} ${shellQuote(launcher)} "$@"\n`, {mode: 0o755});
     chmodSync(entry, 0o755);
-    if (configurePath) {
-      const line = 'export PATH="$HOME/.local/bin:$PATH"';
-      const names = basename(shell) === 'zsh' ? ['.zshrc', '.zprofile']
-        : basename(shell) === 'bash' ? ['.bashrc', existsSync(join(home, '.bash_profile')) ? '.bash_profile' : '.profile']
-        : ['.profile'];
-      for (const name of names) {
-        const file = join(home, name);
-        const old = existsSync(file) ? readFileSync(file, 'utf8') : '';
-        if (!old.split('\n').includes(line)) writeFileSync(file, `${old}${old.endsWith('\n') || !old ? '' : '\n'}\n${marker}\n${line}\n`);
-      }
+  }
+
+  // Verify from outside the checkout, without shell initialization or a model call,
+  // BEFORE touching PATH: a failed check must leave the shell configuration alone.
+  let result;
+  try {
+    result = platform === 'win32'
+      ? execFileSync(runtime, [launcher, '--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim()
+      : execFileSync(entry, ['--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim();
+  } catch (error) {
+    restoreEntry();
+    throw error;
+  }
+  if (result !== version) {
+    restoreEntry();
+    throw new Error(`Unexpected installed pi version: ${result}`);
+  }
+
+  if (configurePath && platform === 'win32') {
+    const literal = `'${binDir.replace(/'/g, "''")}'`;
+    const script = `$bin=${literal}; $p=[Environment]::GetEnvironmentVariable('Path','User'); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path',($bin+';'+$p),'User') }`;
+    execFileSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {stdio: 'inherit'});
+  } else if (configurePath) {
+    // The rc line must point at the directory the command was actually written to;
+    // a literal $HOME/.local/bin was wrong for a non-default home.
+    const quoted = binDir === join(homedir(), '.local', 'bin') ? '"$HOME/.local/bin"' : shellQuote(binDir);
+    const line = `export PATH=${quoted}:$PATH`;
+    const names = basename(shell) === 'zsh' ? ['.zshrc', '.zprofile']
+      : basename(shell) === 'bash' ? ['.bashrc', existsSync(join(home, '.bash_profile')) ? '.bash_profile' : '.profile']
+      : ['.profile'];
+    for (const name of names) {
+      const file = join(home, name);
+      const old = existsSync(file) ? readFileSync(file, 'utf8') : '';
+      if (!old.split('\n').includes(line)) writeFileSync(file, `${old}${old.endsWith('\n') || !old ? '' : '\n'}\n${marker}\n${line}\n`);
     }
   }
-  // Verify from outside the checkout, without shell initialization or a model call.
-  const result = platform === 'win32' ? execFileSync(runtime, [launcher, '--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim() : execFileSync(entry, ['--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim();
-  if (result !== version) throw new Error(`Unexpected installed pi version: ${result}`);
   return {entry, binDir, version, privateRuntime};
 }
 
