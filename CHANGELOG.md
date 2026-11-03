@@ -39,6 +39,89 @@ All notable changes to pi-coffee are recorded here. The format follows
   `npm run demo` check, a copy-paste first-worker prompt and a read-only console screenshot
   (`docs/images/dashboard.png`).
 
+### Fixed (read-only audit of the last 30 commits)
+
+Security and data safety:
+
+- `/internal/*` refused only GET: a cross-site page could still `POST` a `text/plain`
+  "simple request" (or an auto-submitted form) to drain or shut the daemon down.
+  Mutating requests now require `content-type: application/json` (415) and reject a
+  foreign `Origin`/`Sec-Fetch-Site` (403); workers, scripts and `curl` send neither
+  header and keep working.
+- A docker worker could write `<repo>/.git/config` and redirect `core.hooksPath` (or
+  define `filter.*.clean` with a `.gitattributes`) so the *host* daemon executed its
+  code during `pi_commit`/`pi_merge`/`git worktree add`. Those calls now pass
+  `-c core.hooksPath=/dev/null` for sandboxed sessions, and `<repo>/config` is mounted
+  back read-only inside the container.
+- `resolveGitMounts` trusted the `.git` pointer written by the sandboxed process, so a
+  worker could make the next container bind-mount an arbitrary host path (its HOME).
+  The resolved metadata must now stay inside the repository being sandboxed.
+- Secret detection missed the shapes people actually paste: a truncated
+  `-----BEGIN … PRIVATE KEY-----` block, passwords/DSNs containing `!@#$%`, and
+  `scheme://user:password@host`. All three are covered now (new `credential-url` class).
+- `/internal/locks` and `/internal/audit/verify` now respect the worker-token scope;
+  a scope violation or unknown session answers 403/404 instead of 500.
+
+Correctness:
+
+- `pi_stop` with an `outcome` dropped `preserve_worktree`/`delete_branch`, and the
+  default auto cleanup then deleted a clean worktree the caller asked to keep.
+- A complete RPC frame larger than 8 MiB (a long `get_entries` reply) was reported as a
+  desynchronized stream and killed the worker; the cap now applies to the *unterminated*
+  residue only (64 MiB), and fragment buffering is linear instead of quadratic.
+- The stdio proxy exited with `process.exit(0)` on stdin EOF and truncated a large reply
+  mid-JSON; it now waits for stdout to flush.
+- ACP `stop()` cleared its SIGKILL timer as soon as the root exited, so tool children in
+  the agent's process group survived a "confirmed" shutdown and their locks were
+  released; survivors are now sampled, killed and verified like the pi runner.
+- The audit chain's `verify()` bypassed the append queue, so verifying while appending
+  reported a healthy log as BROKEN; and a hash-consistent tail appended past the head
+  sidecar was accepted. Reads share the queue, and an unanchored tail is reported
+  (only this log's own failed sidecar write is tolerated).
+- `isCandidateClean` parsed non-`-z` porcelain output, so artifact files with spaces or
+  quotes could never match and verification failed for the wrong reason.
+- The dashboard returned `200 {"ok":true}` for a failed merge, dropping conflicts/output.
+- Finishing an earlier session after a later merge was impossible (the recorded merge
+  commit had to equal the target HEAD); it only has to be an ancestor now.
+- Merge-queue sessions could never record success: `pi_merge mode=merge-queue` writes no
+  local integration record, so finish now adopts the merged PR from GitHub (still
+  fail-closed: the PR must be MERGED with a merge commit that is in the target history).
+- A worker that merged or rebased the target branch was charged with everyone else's
+  commits (`changes outside declared scope`); change attribution now starts at
+  `merge-base(HEAD, target)`.
+- The dashboard's Send gate was read-then-act (a double click delivered twice); the
+  two-strikes slot is reserved inside `Coordinator.send` before the first await.
+- `pi_evidence verify` now compares the manifest hash recorded by the verification, so it
+  agrees with the merge gate instead of reporting a replaced bundle as `ok`.
+- Code freshness hashed only `dist/manager.js`: editing another module and rebuilding
+  kept `stale: false`. The fingerprint covers the whole `dist`.
+- `verifications_total`/`merges_total` were state-derived but declared as counters (a
+  re-verify lowered them), and `active_workers` ignored in-flight spawn slots.
+- A timed-out ACP turn let the next queued turn fire a second `session/prompt`; the
+  runner is now poisoned instead. A stdin pipe error also kills the agent before
+  reporting `exit`.
+
+Operations:
+
+- `npm run upgrade` on macOS could not change the code: launchd's `KeepAlive` restarted
+  the *old* build after the graceful shutdown and the installer then refused with
+  "pi-coffee is running". The upgrade now boots the LaunchAgent out and points at
+  `npm run install:local`; the Windows path prints `Start-ScheduledTask` and the drain
+  cancel result is verified instead of being assumed.
+- The release workflow built the container image *after* creating the GitHub release, so
+  a failed build could not be retried (duplicate release); the image is built first, the
+  release is idempotent, a pre-release tag no longer moves `:latest`/GitHub "Latest", and
+  `verify.yml` builds the runtime image without pushing.
+- The merge-queue method is configurable (`PI_COFFEE_PR_MERGE_METHOD`) instead of a
+  hardcoded `--squash`; `gh` failures keep the real cause (`ENOENT`, timeout) instead of
+  `exit null`, with a note that the effect may already have been applied.
+- `~/.pi-coffee/env` accepts `export KEY=VALUE` (it used to create a key named
+  `export KEY` and silently ignore the setting), `doctor` respects `PI_CODING_AGENT_DIR`,
+  and `setup-dsh --write` exits 1 when a hand-written `pi-coffee` row is in the way
+  instead of claiming success.
+- The console bounds its payloads: file lists are capped at 50 entries and the diff route
+  truncates at 2 MiB with a marker.
+
 ### Fixed
 
 - The suite is green on Linux and macOS CI again. Three environment-dependent
@@ -131,8 +214,10 @@ All notable changes to pi-coffee are recorded here. The format follows
   hook that dirties the target is surfaced in the merge result.
 - Literal `cp`/`mv`/`install`/`ln`/`rsync`/`touch`/`mkdir` destinations, `dd of=`
   and literal `sh -c` scripts are recognized write targets.
-- An 8 MiB unterminated pi stdout line fails the RPC client closed instead of
-  buffering without bound; the stdio proxy answers requests in arrival order.
+- An unterminated pi stdout line fails the RPC client closed instead of
+  buffering without bound (64 MiB; a newer entry below also stops a *complete*
+  large frame from being mistaken for a desynchronized stream); the stdio proxy
+  answers requests in arrival order.
 - Docker pins the bundled pi version and separates the host port from the fixed
   container port; `npm run start` lets the process environment override the
   settings file; the installer backs up and restores the Codex config when MCP

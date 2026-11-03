@@ -38,20 +38,47 @@ jobs:
             echo "NPM_TOKEN is not configured; skipping the npm publish step."
             exit 0
           fi
+          version=$(node -p "require('./package.json').version")
+          # Re-running a failed release must not fail on "version already
+          # published"; the artifact of an earlier attempt is fine to keep.
+          if npm view "pi-coffee@$version" version >/dev/null 2>&1; then
+            echo "pi-coffee@$version is already published; skipping"
+            exit 0
+          fi
           npm publish --access public --provenance
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" ./pi-coffee-*.tgz \
-            --title "pi-coffee $GITHUB_REF_NAME" \
-            --generate-notes
+      # The image is built BEFORE the release is created: if the build fails, a
+      # re-run can simply start over (a release that already exists makes
+      # `gh release create` fail and would permanently leave the tag without an
+      # image).
       - name: Build and push container image
         env:
           REGISTRY: ghcr.io
         run: |
+          set -euo pipefail
           image="$REGISTRY/${GITHUB_REPOSITORY,,}"
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          docker build -t "$image:$GITHUB_REF_NAME" -t "$image:latest" .
-          docker push "$image:$GITHUB_REF_NAME"
-          docker push "$image:latest"
+          # A pre-release tag must never move :latest off the stable image.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            tags=(-t "$image:$GITHUB_REF_NAME")
+            pushes=("$image:$GITHUB_REF_NAME")
+          else
+            tags=(-t "$image:$GITHUB_REF_NAME" -t "$image:latest")
+            pushes=("$image:$GITHUB_REF_NAME" "$image:latest")
+          fi
+          docker build "${tags[@]}" .
+          for ref in "${pushes[@]}"; do docker push "$ref"; done
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          flags=(--title "pi-coffee $GITHUB_REF_NAME" --generate-notes)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            # A release candidate must not be marked "Latest" on GitHub either.
+            flags+=(--prerelease --latest=false)
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ./pi-coffee-*.tgz --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ./pi-coffee-*.tgz "${flags[@]}"
+          fi

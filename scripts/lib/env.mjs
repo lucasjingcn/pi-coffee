@@ -88,9 +88,18 @@ export function parseEnvFile(text) {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
+    // The file is described as shell-sourced, so `export KEY=VALUE` (what people
+    // copy out of a .env or their shell history) has to work. Without this the
+    // key was parsed as "export PI_COFFEE_PORT" and the real variable stayed
+    // unset, silently pointing clients at the default port instead of the daemon.
+    const statement = line.replace(/^export\s+/, "");
+    const eq = statement.indexOf("=");
     if (eq === -1) continue;
-    out[line.slice(0, eq).trim()] = unquote(stripInlineComment(line.slice(eq + 1)).trim());
+    const key = statement.slice(0, eq).trim();
+    // A key with whitespace or a leading dash would never reach the daemon's
+    // environment; skip it instead of writing a nonsense variable.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    out[key] = unquote(stripInlineComment(statement.slice(eq + 1)).trim());
   }
   return out;
 }

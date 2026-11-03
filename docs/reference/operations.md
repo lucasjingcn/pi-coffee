@@ -194,6 +194,13 @@ default; expose it on `0.0.0.0` only together with a token. The container runs a
 the `/data` volume and the bind-mounted workspace; for an untrusted repository pass `--user <uid>:<gid>`
 and make `/data` writable for that uid (or use separate OS/container isolation).
 
+Workers of a sandboxed daemon (`PI_COFFEE_SANDBOX=docker`) get the repository's git metadata mounted
+so `git add`/`git commit` work inside the container, but `<repo>/config` and `<repo>/.git/hooks` are
+mounted **read-only**: a writable config lets a container redirect `core.hooksPath` or define a
+`filter.*.clean` that the host daemon would then execute during `pi_commit`/`pi_merge`. Consequently
+`git config --local …` inside a worker container fails by design — set repository settings on the
+host, and use `pi_commit` for commits the daemon should record.
+
 Without Compose:
 
 ```bash
@@ -298,16 +305,31 @@ browser and kept in that tab's `sessionStorage`; no token is embedded in HTML.
 
 ## Upgrade, drain and uninstall
 
-Drain first so running workers are not dropped, then stop the daemon with the command for your
-platform, update the checkout, and rerun the same installer:
+Drain first so running workers are not dropped, then update the checkout and rerun the same
+installer (it starts the new build):
 
 ```bash
-npm run upgrade -- --timeout=300
-# run the supervisor restart command printed by the script after updating
+npm run upgrade -- --timeout=300   # drains, then stops the daemon
 git pull
 npm install
-npm run install:local
+npm run install:local              # re-installs and starts the new build
 ```
+
+What "stop" means depends on the supervisor, and the script reports which case it applied:
+
+- **launchd (macOS)**: the agent is unloaded (`launchctl bootout`), because `KeepAlive` would
+  otherwise restart the *old* build seconds after the graceful exit and the installer would then
+  refuse with "pi-coffee is running". `npm run install:local` bootstraps the agent again with the
+  new build.
+- **systemd (Linux)**: `Restart=on-failure`, so the graceful stop stays stopped; `install:local`
+  enables and starts the unit again.
+- **scheduled task (Windows)**: the task is not a supervisor for a graceful exit; `install:local`
+  starts it again (or `Start-ScheduledTask -TaskName pi-coffee`).
+- **foreground (`node scripts/start.mjs`)**: nothing restarts it for you.
+
+The script cancels its drain on every failure. If a run was interrupted, check with
+`pi_drain action=status` and release it with `pi_drain action=cancel`, or new spawns and resumes
+keep being rejected.
 
 Docker:
 

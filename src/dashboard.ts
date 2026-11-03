@@ -381,6 +381,8 @@ const CLIENT_SCRIPT = `
   }
 
   function refresh() {
+    // A hidden tab does not need a 5 s poll: skip it and pick up on visibility.
+    if (document.hidden) { setStatus("paused while the tab is hidden"); return; }
     getJson("/dashboard/api/sessions").then(function (body) {
       render(body.sessions || []);
       setStatus("updated " + new Date().toLocaleTimeString() + " - " + (body.sessions || []).length + " session(s)");
@@ -398,6 +400,7 @@ const CLIENT_SCRIPT = `
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) refresh(); });
 })();
 `;
 

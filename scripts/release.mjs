@@ -43,6 +43,9 @@ if (typeof pkg.version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.te
   fail("package.json version is not semver");
 }
 const tag = `v${pkg.version}`;
+// A pre-release version is allowed, but the workflow must not move `:latest`
+// (or GitHub's "Latest") off the stable image; it derives that from the tag.
+const prerelease = pkg.version.includes("-");
 
 function git(...gitArgs) {
   return execFileSync("git", ["-C", root, ...gitArgs], { encoding: "utf8" }).trim();
@@ -58,6 +61,7 @@ if (existing) fail(`tag ${tag} already exists`);
 
 if (args.has("--check")) {
   console.log(`package.json ${pkg.version} -> tag ${tag}`);
+  if (prerelease) console.log("pre-release: the workflow keeps :latest and GitHub Latest on the stable release");
   process.exit(0);
 }
 

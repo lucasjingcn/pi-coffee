@@ -81,7 +81,11 @@ check(
 // pi accepts either an env var (which we pass through) or its own auth.json.
 const provider = process.env.PI_COFFEE_PROVIDER || "deepseek";
 const keyVar = apiKeyVarFor(provider);
-const authPath = join(homedir(), ".pi", "agent", "auth.json");
+// pi resolves its agent directory from PI_CODING_AGENT_DIR first (getAgentDir());
+// hardcoding ~/.pi/agent made an install that relocates the directory report a
+// false FAIL and exit 1 even though pi itself could authenticate.
+const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const authPath = join(agentDir, "auth.json");
 // Background installers cannot inherit transient API keys from this shell.
 const hasEnvKey = Boolean(process.env[keyVar]) && (!background || Boolean(values[keyVar]));
 const hasAuth = existsSync(authPath);

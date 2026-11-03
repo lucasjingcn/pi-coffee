@@ -395,11 +395,15 @@ function run(options) {
 
   const result = extension === ".json" ? writeJsonConfig(path, options) : writeYamlConfig(path, options);
   if (result.mode === "unmanaged") {
+    // Exit 1: the file still registers pi-coffee by hand, so the settings this
+    // run was asked to write are NOT in place (typically an old port or URL that
+    // makes DSH fail to connect). Reporting success made every exit-code check
+    // treat a stale registration as ready.
     console.error(
-      `setup-dsh: ${path} already registers ${SERVER_NAME} outside this script's managed block; left unchanged.\n` +
-        "Remove or edit that row by hand to change its settings.",
+      `setup-dsh: ${path} already registers ${SERVER_NAME} outside this script's managed block; nothing was written.\n` +
+        "Remove or edit that row by hand (it may point at an old port or URL), then rerun with --write.",
     );
-    return 0;
+    return 1;
   }
   const verb = result.mode === "created" ? "added" : result.mode === "updated" ? "updated" : "unchanged";
   console.log(`${verb} ${SERVER_NAME} MCP entry in ${path}`);

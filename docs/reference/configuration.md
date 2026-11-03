@@ -103,6 +103,7 @@ checks persisted credentials before startup is installed.
 | `PI_COFFEE_GH_BIN` | `gh` | GitHub CLI path for `pi_pr`. |
 | `PI_COFFEE_GH_REMOTE` | `origin` | Remote pushed by `pi_pr`. |
 | `PI_COFFEE_PR_LABEL` | `pi-coffee` | Label applied to created PRs. |
+| `PI_COFFEE_PR_MERGE_METHOD` | `squash` | Merge method requested from the GitHub merge queue: `squash`, `merge` or `rebase` (must match the repository merge-queue rules). |
 | `PI_COFFEE_GH_TOKEN` | *(empty)* | Token passed to `gh` as `GH_TOKEN` (never argv). |
 | `PI_COFFEE_GH_ALLOW_ENV_TOKEN` | `0` | Allow an ambient `GH_TOKEN` to reach `gh` when no explicit token is set. |
 | `PI_COFFEE_DASHBOARD_ACTIONS` | `0` | Opt-in write actions in the dashboard (send/finish/merge/stop); requires `PI_COFFEE_TOKEN`. |

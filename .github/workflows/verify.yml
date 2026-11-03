@@ -33,6 +33,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+      # The runtime image is only built by the release workflow, where a failure
+      # leaves a published tag without an image. Build it here (no push) so a
+      # broken Dockerfile fails on the pull request instead.
+      - name: Build the runtime image (no push)
+        if: matrix.os == 'ubuntu-latest'
+        run: docker build --target runtime -t pi-coffee:ci .
   windows-startup:
     runs-on: windows-latest
     timeout-minutes: 20

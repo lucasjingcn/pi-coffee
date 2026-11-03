@@ -186,6 +186,7 @@ Everything is set through `PI_COFFEE_*` environment variables, read from the pri
 | `PI_COFFEE_TOKEN` | *(none)* | Shared secret for `/mcp` and `/internal/*`. |
 | `PI_COFFEE_SANDBOX` | `worktree` | Execution backend: `worktree` or `docker`. |
 | `PI_COFFEE_ALLOW_PUSH` | `0` | Explicit opt-in for `pi_pr` and merge-queue pushes. |
+| `PI_COFFEE_PR_MERGE_METHOD` | `squash` | Merge method for the GitHub merge queue: `squash`, `merge` or `rebase`. |
 | `PI_COFFEE_WORKER_PLUGINS` | *(empty)* | Glob allowlist of global plugins a worker may inherit. |
 
 All 50+ variables, their validation rules and the env-file precedence are in
