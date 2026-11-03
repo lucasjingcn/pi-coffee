@@ -44,7 +44,7 @@ export interface IntegrationRecord {
   integratedAt: number;
 }
 
-export interface VerifiableSession {
+interface VerifiableSession {
   /** Session id; required for durable evidence bundles. */
   id?: string;
   repo: string;
@@ -128,7 +128,7 @@ export async function assertTarget(repo: string, branch: string): Promise<string
   return resolveRef(repo, `refs/heads/${branch}`);
 }
 
-export interface IntegrationGateOptions {
+interface IntegrationGateOptions {
   /** Daemon data directory; evidence bundles are written when set. */
   dataDir?: string;
   secretPolicy?: SecretPolicy;
@@ -148,7 +148,7 @@ export interface IntegrationGateOptions {
   now?: () => number;
 }
 
-export interface ValidatorResult {
+interface ValidatorResult {
   id: string;
   required: boolean;
   command: string;
@@ -162,13 +162,13 @@ interface ValidatorRun extends ValidatorResult {
   stderr: string;
 }
 
-export interface ResolvedValidator extends ValidatorSpec {
+interface ResolvedValidator extends ValidatorSpec {
   required: boolean;
   artifacts: string[];
 }
 
 /** Effective chain: explicit spec.validators, else the single acceptance command. */
-export function resolveValidators(meta: VerifiableSession): ResolvedValidator[] {
+function resolveValidators(meta: VerifiableSession): ResolvedValidator[] {
   const specs = meta.spec?.validators ?? [];
   if (specs.length > 0) {
     return specs.map((validator) => ({
@@ -180,7 +180,7 @@ export function resolveValidators(meta: VerifiableSession): ResolvedValidator[] 
   return [{ id: "acceptance", command: meta.acceptance?.command ?? "", required: true, artifacts: [] }];
 }
 
-export function aggregateCommand(validators: ResolvedValidator[]): string {
+function aggregateCommand(validators: ResolvedValidator[]): string {
   return validators.map((validator) => validator.command).join("\n---\n");
 }
 

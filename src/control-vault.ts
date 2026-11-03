@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-export interface ControlCredentials { controlKey: string; scopeKey: string }
+interface ControlCredentials { controlKey: string; scopeKey: string }
 const fail = (): never => { throw new Error("Worker control credentials are unavailable or unsafe"); };
 function validateId(id: string): void {
   if (!/^s[1-9]\d*$/.test(id)) fail();

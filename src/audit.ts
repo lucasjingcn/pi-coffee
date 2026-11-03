@@ -9,10 +9,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export interface AuditEntry {
+interface AuditEntry {
   seq: number;
   ts: number;
   actor: string;
@@ -24,13 +24,13 @@ export interface AuditEntry {
   hash: string;
 }
 
-export interface AuditHead {
+interface AuditHead {
   file: string;
   seq: number;
   hash: string;
 }
 
-export interface AuditVerifyResult {
+interface AuditVerifyResult {
   ok: boolean;
   entries: number;
   files: string[];
@@ -39,7 +39,7 @@ export interface AuditVerifyResult {
   head?: AuditHead;
 }
 
-export interface AuditLogOptions {
+interface AuditLogOptions {
   dir: string;
   /** Roll to a new file once the current one reaches this size. */
   maxBytes?: number;
@@ -404,11 +404,3 @@ export class AuditLog {
 }
 
 /** Touch a file so future compactions can distinguish an empty log from a missing one. */
-export async function ensureAuditDir(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  try {
-    await open(join(dir, ".keep"), "a", 0o600);
-  } catch {
-    // Best effort: the directory still exists.
-  }
-}

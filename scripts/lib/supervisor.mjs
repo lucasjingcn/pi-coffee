@@ -16,11 +16,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const LAUNCHD_LABEL = "com.picoffee.daemon";
-export const WINDOWS_TASK_NAME = "pi-coffee";
+const LAUNCHD_LABEL = "com.picoffee.daemon";
+const WINDOWS_TASK_NAME = "pi-coffee";
 
 /** LaunchAgent plist the macOS installer writes. */
-export function launchdPlistPath(home = homedir()) {
+function launchdPlistPath(home = homedir()) {
   return join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 }
 

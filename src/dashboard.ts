@@ -39,7 +39,7 @@ const HTML_ESCAPES: Record<string, string> = {
   "'": "&#39;",
 };
 
-export interface DashboardDeps {
+interface DashboardDeps {
   coord: Coordinator;
   /** When set, every dashboard request must present this token. */
   token?: string;

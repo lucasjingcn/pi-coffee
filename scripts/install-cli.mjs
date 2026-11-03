@@ -13,7 +13,7 @@ const marker = '# Managed by pi-coffee user CLI installer';
 const shellQuote = value => `'${value.replace(/'/g, "'\\''")}'`;
 const cmdQuote = value => `"${value.replace(/%/g, '%%')}"`;
 
-export const launcherSource = `import {fileURLToPath} from 'node:url';
+const launcherSource = `import {fileURLToPath} from 'node:url';
 import {envFilePath,loadEnvFile} from './env.mjs';
 loadEnvFile(envFilePath());
 const cli = new URL('./node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js', import.meta.url);

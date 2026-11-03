@@ -22,7 +22,7 @@ import type { Coordinator } from "./manager.js";
 export const METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
 
 /** Metric name prefix; every family this module exposes starts with it. */
-export const METRICS_PREFIX = "pi_coffee_";
+const METRICS_PREFIX = "pi_coffee_";
 
 /**
  * Everything the renderer needs, as plain data. Callers may construct this by
@@ -36,7 +36,7 @@ export const METRICS_PREFIX = "pi_coffee_";
  * still rendered, because "we measured zero" and "we never measured" are
  * different facts.
  */
-export interface MetricsSnapshot {
+interface MetricsSnapshot {
   /** Seconds since the coordinator started. */
   uptimeSeconds: number;
   /** Workers currently occupying a concurrency slot. */

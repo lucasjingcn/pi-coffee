@@ -1,5 +1,5 @@
 /** Cost evidence is accounting data, not a claim about savings or output quality. */
-export interface CostSession {
+interface CostSession {
   id: string;
   lastActivity?: number;
   cost?: number;
@@ -59,7 +59,7 @@ function latestById(sessions: readonly CostSession[]): Map<string, CostSession> 
   return result;
 }
 
-export interface CostEvidenceInput {
+interface CostEvidenceInput {
   active: readonly CostSession[];
   history: readonly CostSession[];
   orchestrator_records?: readonly OrchestratorCostRecord[];

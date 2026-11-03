@@ -5,7 +5,6 @@
 
 import type { EventEmitter } from "node:events";
 import type { PiSessionState, PiSessionStats, RpcResponse, UiResponse } from "./types.js";
-import type { WorkerRunnerSpec } from "./types.js";
 
 export interface WorkerTransport extends EventEmitter {
   readonly isStreaming: boolean;
@@ -25,4 +24,3 @@ export interface WorkerTransport extends EventEmitter {
   getStderr(): string;
 }
 
-export type RunnerSpec = WorkerRunnerSpec;

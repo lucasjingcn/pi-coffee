@@ -60,7 +60,7 @@ export function validateReviewSpec(spec?: Pick<DelegationSpec, "requirements" | 
 const VALIDATOR_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** Validate the optional ordered verification chain. */
-export function validateValidators(validators: unknown): void {
+function validateValidators(validators: unknown): void {
   if (validators === undefined) return;
   if (!Array.isArray(validators)) throw new Error("validators must be an array");
   if (validators.length > 16) throw new Error("validators may contain at most 16 entries");

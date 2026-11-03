@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /** Providers pi understands, mapped to their primary API-key environment variable. */
-export const PROVIDER_KEY_VARS = {
+const PROVIDER_KEY_VARS = {
   anthropic: "ANTHROPIC_API_KEY",
   antling: "ANT_LING_API_KEY",
   openai: "OPENAI_API_KEY",

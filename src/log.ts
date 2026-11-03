@@ -24,7 +24,7 @@ import { dirname } from "node:path";
 export const LOG_FORMAT_ENV = "PI_COFFEE_LOG_FORMAT";
 
 /** Level carried by structured records; text output has no level field. */
-export type LogLevel = "debug" | "info" | "warn" | "error";
+type LogLevel = "debug" | "info" | "warn" | "error";
 
 /** Placeholder that replaces any value that looked like a credential. */
 export const REDACTED = "[redacted]";
@@ -65,7 +65,7 @@ export function isJsonLoggingEnabled(): boolean {
  * rather than trying to detect "a secret" in general. Redaction is idempotent:
  * text that already reads `token=[redacted]` is left alone.
  */
-export function redactText(value: string): string {
+function redactText(value: string): string {
   // Bearer first: an inline `authorization: Bearer …` pair would otherwise consume
   // only the scheme word and leave the credential behind.
   return value
@@ -138,7 +138,7 @@ function textOf(value: unknown): string {
 }
 
 /** One structured record, before the timestamp is stamped on. */
-export interface StructuredLogEntry {
+interface StructuredLogEntry {
   level?: LogLevel;
   /** Stable event/tag name: the text format's bracketed tag. */
   event: string;
@@ -211,7 +211,7 @@ export type WorkerEventKind = "spawn" | "finish" | "reclaim";
 /** Hard cap for one workers.jsonl line, so a stuck query can always parse the tail. */
 export const WORKER_EVENT_MAX_BYTES = 4_096;
 
-export interface WorkerEventRecord {
+interface WorkerEventRecord {
   ts: string;
   id: string;
   event: WorkerEventKind;
@@ -226,7 +226,7 @@ export interface WorkerEventRecord {
  * caller that only needs "what happened to this session" still gets an answer
  * instead of an oversized line.
  */
-export function encodeWorkerEvent(event: WorkerEventRecord): string {
+function encodeWorkerEvent(event: WorkerEventRecord): string {
   const line = JSON.stringify(event);
   if (Buffer.byteLength(line, "utf8") <= WORKER_EVENT_MAX_BYTES) return line;
   return JSON.stringify({ ts: event.ts, id: event.id, event: event.event, truncated: true });

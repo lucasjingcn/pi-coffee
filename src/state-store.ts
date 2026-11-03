@@ -7,7 +7,7 @@ import { validateReviewSpec, validateCandidateReview, type CandidateReviewInput 
 import { logLine } from "./log.js";
 
 /** Validated, in-memory view of the persisted coordinator state. */
-export interface StateSnapshot {
+interface StateSnapshot {
   /** 1 = pre-0.3 state without a version field; 2 = 0.3+ (validated, forward-only). */
   schemaVersion: number;
   counter: number;
@@ -17,7 +17,7 @@ export interface StateSnapshot {
   orchestratorCosts: OrchestratorCostRecord[];
 }
 
-export interface LoadResult {
+interface LoadResult {
   state: StateSnapshot;
   /** True when the primary was missing/corrupt and the state came from the backup. */
   recoveredFromBackup: boolean;

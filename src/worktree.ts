@@ -79,12 +79,17 @@ function execGit(cwd: string, args: string[], timeout: number): Promise<GitResul
   });
 }
 
-/** Build a failure error shaped like the old execFile error for downstream callers. */
-function gitFailure(cwd: string, args: string[], result: GitResult, why: string): Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean } {
+/** Git failures carry the child's exit status and output for the caller to inspect. */
+interface GitError extends Error {
+  code?: number;
+  stdout?: string;
+  stderr?: string;
+  killed?: boolean;
+}
+
+function gitFailure(args: string[], result: GitResult, why: string): GitError {
   const detail = (result.stderr || result.stdout || "").trim();
-  const err: Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean } = new Error(
-    detail || `git ${args.join(" ")} failed (${why})`,
-  ) as Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean };
+  const err = new Error(detail || `git ${args.join(" ")} failed (${why})`) as GitError;
   if (result.code !== null) err.code = result.code;
   err.stdout = result.stdout;
   err.stderr = result.stderr;
@@ -95,16 +100,16 @@ function gitFailure(cwd: string, args: string[], result: GitResult, why: string)
 /** Run git and return trimmed stdout. Throws on failure. */
 export async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const result = await execGit(cwd, args, timeout);
-  if (result.timedOut) throw gitFailure(cwd, args, result, `timed out after ${timeout}ms`);
-  if (result.code !== 0) throw gitFailure(cwd, args, result, `exit code ${result.code}`);
+  if (result.timedOut) throw gitFailure(args, result, `timed out after ${timeout}ms`);
+  if (result.code !== 0) throw gitFailure(args, result, `exit code ${result.code}`);
   return result.stdout.trim();
 }
 
 /** Like `git`, but returns stdout verbatim so leading columns and patch whitespace survive. */
 export async function gitRaw(cwd: string, args: string[], timeout = 120_000): Promise<string> {
   const result = await execGit(cwd, args, timeout);
-  if (result.timedOut) throw gitFailure(cwd, args, result, `timed out after ${timeout}ms`);
-  if (result.code !== 0) throw gitFailure(cwd, args, result, `exit code ${result.code}`);
+  if (result.timedOut) throw gitFailure(args, result, `timed out after ${timeout}ms`);
+  if (result.code !== 0) throw gitFailure(args, result, `exit code ${result.code}`);
   return result.stdout;
 }
 
@@ -137,22 +142,11 @@ function nulPaths(out: string): string[] {
 // Repository queries
 // ---------------------------------------------------------------------------
 
-export async function isGitRepo(dir: string): Promise<boolean> {
-  try {
-    await git(dir, ["rev-parse", "--is-inside-work-tree"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export async function repoRoot(dir: string): Promise<string> {
   return git(dir, ["rev-parse", "--show-toplevel"]);
 }
 
-export async function currentHead(dir: string): Promise<string> {
-  return git(dir, ["rev-parse", "--short", "HEAD"]);
-}
 
 /** Resolve a ref (branch/tag/HEAD) to a concrete commit SHA at call time. */
 export async function resolveRef(repo: string, ref: string): Promise<string> {
@@ -232,7 +226,7 @@ export async function pruneWorktrees(repo: string): Promise<void> {
 // Branch cleanup
 // ---------------------------------------------------------------------------
 
-export interface BranchDeleteResult {
+interface BranchDeleteResult {
   branch: string;
   deleted: boolean;
   reason: string;

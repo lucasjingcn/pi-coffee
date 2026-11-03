@@ -29,7 +29,7 @@ import { randomBytes } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-export type SandboxKind = "worktree" | "docker";
+type SandboxKind = "worktree" | "docker";
 
 export interface SandboxRecord {
   kind: SandboxKind;
@@ -38,7 +38,7 @@ export interface SandboxRecord {
   network?: "bridge" | "none";
 }
 
-export interface SandboxConfig {
+interface SandboxConfig {
   kind: SandboxKind;
   image: string;
   network: "bridge" | "none";
@@ -48,16 +48,16 @@ export interface SandboxConfig {
   user: string;
 }
 
-export interface SandboxExecResult {
+interface SandboxExecResult {
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
 }
 
-export type ShellRunner = (command: string, cwd: string, timeoutMs: number) => Promise<SandboxExecResult>;
+type ShellRunner = (command: string, cwd: string, timeoutMs: number) => Promise<SandboxExecResult>;
 
-export interface SandboxProbe {
+interface SandboxProbe {
   ok: boolean;
   version?: string;
   imageDigest?: string;
@@ -69,7 +69,7 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export interface GitMount {
+interface GitMount {
   /** Absolute host directory to bind-mount. */
   host: string;
   /** Absolute path the container must see it at: the one git itself recorded. */
@@ -263,7 +263,7 @@ export function sandboxUserArgs(
 }
 
 /** HOME an overridden container user can actually write (`/root` belongs to root). */
-export const SANDBOX_HOME = "/tmp";
+const SANDBOX_HOME = "/tmp";
 
 export class DockerSandbox {
   readonly config: SandboxConfig;
@@ -408,7 +408,7 @@ export function workerContainerName(sessionId: string): string {
   return `pi-coffee-worker-${safe}`;
 }
 
-export interface WorkerContainerOptions {
+interface WorkerContainerOptions {
   sessionId: string;
   worktree: string;
   sessionDir: string;

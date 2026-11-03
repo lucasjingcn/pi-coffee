@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 export const CODE_STALE_HINT = "restart daemon to load current code";
 
 /** Result of comparing the daemon's recorded dist fingerprint with the disk value now. */
-export interface CodeVersionStatus {
+interface CodeVersionStatus {
   stale: boolean;
   /** mtimeMs copied into memory when the daemon started; null when dist was absent. */
   runningDistMtimeMs: number | null;

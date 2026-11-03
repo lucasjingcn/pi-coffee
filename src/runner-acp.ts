@@ -16,7 +16,7 @@ import { descendantPids, terminateSurvivingDescendants } from "./process-tree.js
 import type { WorkerTransport } from "./runner.js";
 import { PI_COFFEE_VERSION } from "./version.js";
 
-export interface AcpClientOptions {
+interface AcpClientOptions {
   command: string[];
   cwd: string;
   /** Raw JSON-RPC transcript (one frame per line) for tail/diagnostics. */

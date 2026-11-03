@@ -13,7 +13,7 @@ export const WORKER_STARTUP_POLICY = "private-agent-config-v1";
  * external extension entries, and MCP server names. Empty denies all;
  * `["*"]` enables the legacy behavior of inheriting everything.
  */
-export type WorkerPluginAllowlist = readonly string[];
+type WorkerPluginAllowlist = readonly string[];
 
 /** Shell-style glob match: `*` spans anything, `?` matches one character. */
 function globMatch(pattern: string, value: string): boolean {

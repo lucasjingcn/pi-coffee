@@ -20,7 +20,7 @@ export type SecretKind =
   | "credential-url"
   | "bearer-token";
 
-export interface SecretFinding {
+interface SecretFinding {
   kind: SecretKind;
   start: number;
   end: number;
@@ -110,7 +110,7 @@ export function containsSecret(text: string): boolean {
   return findSecrets(text).length > 0;
 }
 
-export interface RedactionResult {
+interface RedactionResult {
   text: string;
   redactions: number;
   kinds: SecretKind[];
@@ -165,6 +165,3 @@ export function applySecretPolicy(
   return redactSecrets(text);
 }
 
-export function isSecretPolicy(value: unknown): value is SecretPolicy {
-  return value === "reject" || value === "redact";
-}

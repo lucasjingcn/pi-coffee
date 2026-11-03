@@ -104,7 +104,7 @@ export type SessionStatus = "starting" | "idle" | "working" | "error" | "stoppin
 export type Outcome = "success_first" | "success_second" | "taken_over" | "abandoned";
 
 export const HANDOFF_KINDS = ["provider_wait", "provider_timeout", "provider_error", "worker_exited", "shutdown_failed", "recovery_failed", "awaiting_acceptance", "owner_timeout"] as const;
-export interface WorkerHandoff {
+interface WorkerHandoff {
   id: string;
   kind: typeof HANDOFF_KINDS[number];
   at: number;
@@ -202,7 +202,7 @@ interface Runtime {
   repoIdentity: string;
 }
 
-export interface SpawnOptions {
+interface SpawnOptions {
   task?: string;
   repo?: string;
   name?: string;
@@ -226,7 +226,7 @@ export interface SpawnOptions {
   scopeKey?: string;
 }
 
-export interface ResumeOptions {
+interface ResumeOptions {
   /** Optional first instruction after resuming; the original contract is not re-sent. */
   prompt?: string;
   /** Override the recorded/last-known model; defaults to the session's own model, then the daemon default. */
@@ -235,13 +235,13 @@ export interface ResumeOptions {
   thinking?: string;
 }
 
-export interface WaitResult {
+interface WaitResult {
   sessions: SessionMeta[];
   timedOut: boolean;
 }
 
 /** Drain mode blocks new spawns/resumes while a restart is being prepared. */
-export interface DrainState {
+interface DrainState {
   draining: boolean;
   /** When the current drain started; null when not draining. */
   startedAt: number | null;
@@ -254,7 +254,7 @@ export interface DrainState {
 }
 
 /** Result of the startup auto-recovery pass over sessions active at an unclean shutdown. */
-export interface RecoveryReport {
+interface RecoveryReport {
   recovered: { id: string; status: SessionStatus }[];
   skipped: { id: string; reason: string }[];
   failed: { id: string; reason: string }[];

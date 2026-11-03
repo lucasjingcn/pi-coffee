@@ -11,7 +11,7 @@ import { descendantPids, survivingDescendants } from "./process-tree.js";
  */
 const MAX_RPC_LINE_BYTES = 64 * 1024 * 1024;
 
-export interface PiRpcClientOptions {
+interface PiRpcClientOptions {
   cwd: string;
   piBin?: string;
   provider?: string;

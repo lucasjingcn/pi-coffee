@@ -43,7 +43,7 @@ export interface PiEvent {
   [key: string]: any;
 }
 
-export type UiMethod = "select" | "confirm" | "input" | "editor" | "notify" | string;
+type UiMethod = "select" | "confirm" | "input" | "editor" | "notify" | string;
 
 /** A pi extension asking a human to answer. The daemon forwards these to Codex. */
 export interface UiRequest {
@@ -67,10 +67,9 @@ export interface UiResponse {
   cancelled?: boolean;
 }
 
-export type SendMode = "prompt" | "steer" | "followup";
 
 /** Classification Codex must give a delegated task; design/security must not be delegated. */
-export type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design" | "security";
+type TaskType = "mechanical" | "feature" | "refactor" | "debug" | "design" | "security";
 
 /** Assigned work, not a measure of actual code contribution. */
 export const WORKSTREAM_PURPOSES = ["implementation", "review", "investigation"] as const;

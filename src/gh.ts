@@ -8,7 +8,7 @@
 
 import { execFile } from "node:child_process";
 
-export interface GhRunResult {
+interface GhRunResult {
   code: number | null;
   stdout: string;
   stderr: string;
@@ -20,7 +20,7 @@ export interface GhRunResult {
   error?: string;
 }
 
-export type GhRunner = (args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<GhRunResult>;
+type GhRunner = (args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<GhRunResult>;
 
 export function createGhRunner(bin: string): GhRunner {
   return (args, { cwd, env }) =>
@@ -33,13 +33,13 @@ export function createGhRunner(bin: string): GhRunner {
     });
 }
 
-export interface PullRequest {
+interface PullRequest {
   number: number;
   url: string;
   state?: string;
 }
 
-export interface CreatePrInput {
+interface CreatePrInput {
   base: string;
   head: string;
   title: string;

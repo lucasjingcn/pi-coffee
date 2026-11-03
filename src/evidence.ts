@@ -16,7 +16,7 @@ import { redactSecrets, SecretDetectedError, type SecretKind, type SecretPolicy 
 
 export const EVIDENCE_SCHEMA_VERSION = 1 as const;
 
-export interface EvidenceSandboxRecord {
+interface EvidenceSandboxRecord {
   kind: string;
   image?: string;
   imageDigest?: string;
@@ -46,13 +46,13 @@ export interface EvidenceArtifact {
   truncated?: boolean;
 }
 
-export interface EvidenceFile {
+interface EvidenceFile {
   path: string;
   bytes: number;
   sha256: string;
 }
 
-export interface EvidenceManifest {
+interface EvidenceManifest {
   version: typeof EVIDENCE_SCHEMA_VERSION;
   sessionId: string;
   verificationId: string;
@@ -83,7 +83,7 @@ export interface EvidenceRef {
   truncated: string[];
 }
 
-export interface EvidenceBundleInput {
+interface EvidenceBundleInput {
   sessionId: string;
   verificationId: string;
   repo: string;
@@ -124,7 +124,7 @@ function assertId(value: string, field: string): string {
   return value;
 }
 
-export function evidenceRelativeDir(sessionId: string, verificationId: string): string {
+function evidenceRelativeDir(sessionId: string, verificationId: string): string {
   assertId(sessionId, "sessionId");
   assertId(verificationId, "verificationId");
   return join("evidence", sessionId, verificationId);
@@ -311,7 +311,7 @@ export async function readEvidenceManifest(dir: string): Promise<EvidenceManifes
   return raw;
 }
 
-export interface EvidenceVerifyResult {
+interface EvidenceVerifyResult {
   ok: boolean;
   manifest: EvidenceManifest;
   mismatches: { path: string; expected?: string; actual?: string; reason: string }[];
@@ -359,7 +359,7 @@ export async function listEvidenceBundles(dataDir: string, sessionId: string): P
   return bundles.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export interface ArtifactLimits {
+interface ArtifactLimits {
   maxFiles: number;
   maxFileBytes: number;
   maxTotalBytes: number;
@@ -483,7 +483,7 @@ export async function assertEvidenceIntact(dataDir: string, ref: EvidenceRef): P
   }
 }
 
-export interface EvidencePruneOptions {
+interface EvidencePruneOptions {
   ttlDays: number;
   keepPerSession: number;
   now?: number;
@@ -491,7 +491,7 @@ export interface EvidencePruneOptions {
   sessionIds?: string[];
 }
 
-export interface EvidencePruneResult {
+interface EvidencePruneResult {
   removed: number;
   bytes: number;
   temp_removed: number;
