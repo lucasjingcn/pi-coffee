@@ -8,25 +8,17 @@
  *
  *   npm run doctor
  */
-import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { apiKeyVarFor, envFilePath, loadDaemonEnv } from "./lib/env.mjs";
+import { readJson, tryCommand } from "./lib/cli.mjs";
 import { authJsonPath, resolveAgentDir } from "./lib/agent-dir.mjs";
 import { resolvePiBin, piVersion } from "./lib/pi.mjs";
 import { resolveBashBin } from "./lib/bash.mjs";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
-
-function run(cmd, args) {
-  try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 }).trim();
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Run the first candidate that answers. On Windows the CLIs are `.cmd` shims,
@@ -34,7 +26,7 @@ function run(cmd, args) {
  */
 function runAny(candidates, args) {
   for (const candidate of candidates) {
-    const output = run(candidate, args);
+    const output = tryCommand(candidate, args);
     if (output !== undefined) return output;
   }
   return undefined;
@@ -60,7 +52,7 @@ check(
 );
 
 // --- git ---
-const gitVersion = run("git", ["--version"]);
+const gitVersion = tryCommand("git", ["--version"]);
 check("git", Boolean(gitVersion), gitVersion ?? "not found", "install git");
 if (process.platform === "win32") {
   const bashBin = resolveBashBin();
@@ -71,7 +63,7 @@ if (process.platform === "win32") {
 // The daemon proves worker process ownership with `ps` (group id + start time).
 // Minimal images such as node:22-bookworm-slim do not ship it.
 if (process.platform !== "win32") {
-  const psProbe = run("ps", ["-p", String(process.pid), "-o", "lstart=", "-o", "pgid="]);
+  const psProbe = tryCommand("ps", ["-p", String(process.pid), "-o", "lstart=", "-o", "pgid="]);
   check(
     "ps (worker ownership probe)",
     Boolean(psProbe),
@@ -145,14 +137,6 @@ console.log(loaded ? `\n(settings loaded from ${envFile})` : `\n(no settings fil
 // --- MCP clients (informational) ---
 // A missing registration does not break the daemon, so it never changes the exit code; it is
 // the step people forget after installing the daemon or adding a new client.
-function readJson(path) {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
 /** True when pi's auth.json holds a credential for this provider. */
 function hasProviderCredential(path, provider) {
   const parsed = readJson(path);

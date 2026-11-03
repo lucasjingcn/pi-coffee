@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { EventEmitter } from "node:events";
 import type { PiEvent, PiSessionState, PiSessionStats, RpcResponse, UiRequest, UiResponse } from "./types.js";
 import { descendantPids, survivingDescendants } from "./process-tree.js";
+import { sleep } from "./lib/util.js";
 
 /**
  * Longest *unterminated* JSONL frame accepted from pi before the stream is
@@ -731,8 +732,4 @@ export class PiRpcClient extends EventEmitter {
   respondUi(response: UiResponse): void {
     this.write(response);
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

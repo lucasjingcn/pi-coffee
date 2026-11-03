@@ -8,8 +8,8 @@
  * best-effort durability; a failed append fails the guarded action.
  */
 
-import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { sha256 } from "./lib/crypto.js";
 import { join } from "node:path";
 
 interface AuditEntry {
@@ -67,10 +67,6 @@ export function canonicalJson(value: unknown): string {
     return out;
   };
   return JSON.stringify(normalize(value));
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 export function auditPayloadSha256(actor: string, action: string, target: string, detail?: Record<string, unknown>): string {

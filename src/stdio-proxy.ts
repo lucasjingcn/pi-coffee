@@ -13,6 +13,7 @@
  *   PI_COFFEE_TOKEN  optional bearer/x-pi-coord-token
  */
 import { logLine } from "./log.js";
+import { sleep } from "./lib/util.js";
 
 const URL = process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.env.PI_COFFEE_PORT || 8787}/mcp`;
 const TOKEN = process.env.PI_COFFEE_TOKEN || "";
@@ -21,7 +22,6 @@ function log(...args: unknown[]): void {
   logLine("pi-coffee-proxy", ...args);
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function headers(): Record<string, string> {
   const h: Record<string, string> = {

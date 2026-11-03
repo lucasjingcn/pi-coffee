@@ -1,4 +1,3 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadConfig } from "./config.js";
@@ -10,6 +9,8 @@ import type { LockMode } from "./locks.js";
 import { z } from "zod";
 import { WORKER_STARTUP_POLICY } from "./worker-agent-dir.js";
 import { logLine } from "./log.js";
+import { constantTimeEquals } from "./lib/crypto.js";
+import { sendJson } from "./lib/http.js";
 import { createDashboardHandler } from "./dashboard.js";
 import { METRICS_CONTENT_TYPE, buildMetricsSnapshot, renderMetrics } from "./metrics.js";
 
@@ -89,27 +90,14 @@ function readBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(text);
-}
-
-/** Constant-time secret comparison; hashing first equalizes unequal lengths. */
-function secretEquals(presented: string, expected: string): boolean {
-  const left = createHash("sha256").update(presented).digest();
-  const right = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(left, right);
-}
-
 /** Accept either the custom header or a standard bearer token. */
 function authorized(req: IncomingMessage): boolean {
   if (!config.token) return true;
   const header = req.headers["x-pi-coord-token"];
-  if (typeof header === "string" && secretEquals(header, config.token)) return true;
+  if (typeof header === "string" && constantTimeEquals(header, config.token)) return true;
 
   const auth = req.headers["authorization"];
-  if (typeof auth === "string" && secretEquals(auth, `Bearer ${config.token}`)) return true;
+  if (typeof auth === "string" && constantTimeEquals(auth, `Bearer ${config.token}`)) return true;
   return false;
 }
 

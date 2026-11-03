@@ -22,6 +22,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/cli.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PORT = process.env.SMOKE_PORT || String(8890 + Math.floor(Math.random() * 100));
@@ -36,7 +37,6 @@ let failures = 0;
 let daemon = null;
 let daemonExitErr = null;
 let daemonStderr = "";
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function check(name, cond, detail) {
   if (cond) {

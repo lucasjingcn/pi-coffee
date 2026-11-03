@@ -19,11 +19,11 @@
  * Exit codes: 0 = every client that was found is registered, 1 = a registration
  * failed (the original client config is restored), 2 = invalid command line.
  */
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cmdQuote, runArgv } from "./lib/cli.mjs";
 
 const NODE = process.execPath;
 const PROXY = fileURLToPath(new URL("./proxy.mjs", import.meta.url));
@@ -69,21 +69,7 @@ function commandLine(argv) {
   return argv.map(displayArg).join(" ");
 }
 
-/** Quote an argument for cmd.exe. */
-function cmdQuote(value) {
-  return /[\s"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** Run an argv vector, using cmd.exe for .cmd/.bat shims on Windows. */
-function runArgv(argv) {
-  const [bin, ...args] = argv;
-  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
-    const line = argv.map(cmdQuote).join(" ");
-    return spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", line], { encoding: "utf8" });
-  }
-  return spawnSync(bin, args, { encoding: "utf8" });
-}
-
+/** Absolute path of `name` on PATH, trying the platform's executable extensions. */
 function findOnPath(name) {
   const extensions = process.platform === "win32"
     ? (process.env.PATHEXT ? process.env.PATHEXT.split(";") : [".COM", ".EXE", ".BAT", ".CMD"])

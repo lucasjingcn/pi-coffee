@@ -19,11 +19,13 @@
  * control-key/scope-key hashes, worker process identities and the token itself
  * never reach HTML or JSON.
  */
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { IntegrationRecord, Verification } from "./integration.js";
 import type { Coordinator, Outcome, SessionMeta } from "./manager.js";
 import type { DelegationSpec } from "./types.js";
+import { constantTimeEquals } from "./lib/crypto.js";
+import { sendJson } from "./lib/http.js";
 
 /** Tail entries a dashboard page may request in one call (matches the MCP cap). */
 const MAX_TAIL_ENTRIES = 200;
@@ -109,13 +111,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Constant-time credential comparison; length differences only leak length. */
-function secretEquals(presented: string, expected: string): boolean {
-  const a = Buffer.from(presented, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 /** Accept either the custom header or a standard bearer token. */
 function presentedToken(req: IncomingMessage): string | undefined {
   const header = req.headers["x-pi-coord-token"];
@@ -128,19 +123,7 @@ function presentedToken(req: IncomingMessage): string | undefined {
 function authorized(req: IncomingMessage, token: string | undefined): boolean {
   if (!token) return true;
   const presented = presentedToken(req);
-  return presented !== undefined && secretEquals(presented, token);
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(text),
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-    ...extra,
-  });
-  res.end(text);
+  return presented !== undefined && constantTimeEquals(presented, token);
 }
 
 /** True when the coordinator does not know this session id. */

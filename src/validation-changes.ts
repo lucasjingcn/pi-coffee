@@ -1,5 +1,5 @@
 import { acceptancePath } from "./acceptance.js";
-import { gitRaw } from "./worktree.js";
+import { gitRaw, nulPaths } from "./worktree.js";
 
 /**
  * Directory components that mark a path as validation code. Every component
@@ -61,11 +61,6 @@ function isValidationPath(path: string, customPaths: readonly string[]): boolean
   const name = segments.pop() ?? "";
   if (segments.some((segment) => VALIDATION_DIRECTORIES.has(segment.toLowerCase()))) return true;
   return isValidationName(name);
-}
-
-/** Decode NUL-delimited git output without unquoting, trimming or re-encoding paths. */
-function nulPaths(output: string): string[] {
-  return output.split("\0").filter((path) => path.length > 0);
 }
 
 /** Refuse to diff against anything that cannot be resolved to a commit. */

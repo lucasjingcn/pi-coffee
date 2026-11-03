@@ -5,13 +5,12 @@ import {chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, wr
 import {homedir, tmpdir} from 'node:os';
 import {basename, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {cmdQuote, shellQuote} from './lib/cli.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const packageName = '@earendil-works/pi-coding-agent';
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).devDependencies[packageName];
 const marker = '# Managed by pi-coffee user CLI installer';
-const shellQuote = value => `'${value.replace(/'/g, "'\\''")}'`;
-const cmdQuote = value => `"${value.replace(/%/g, '%%')}"`;
 
 const launcherSource = `import {fileURLToPath} from 'node:url';
 import {envFilePath,loadEnvFile} from './env.mjs';

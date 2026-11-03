@@ -134,7 +134,7 @@ async function gitOutcome(cwd: string, args: string[], timeout = 120_000): Promi
 }
 
 /** Decode NUL-delimited git output into exact (unquoted, untrimmed) paths. */
-function nulPaths(out: string): string[] {
+export function nulPaths(out: string): string[] {
   return out.split("\0").filter((p) => p.length > 0);
 }
 

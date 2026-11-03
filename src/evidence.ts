@@ -9,10 +9,11 @@
  * describes files that were not persisted.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { redactSecrets, SecretDetectedError, type SecretKind, type SecretPolicy } from "./secrets.js";
+import { sha256 } from "./lib/crypto.js";
 
 export const EVIDENCE_SCHEMA_VERSION = 1 as const;
 
@@ -112,10 +113,6 @@ interface EvidenceBundleInput {
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DEFAULT_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-
-function sha256(input: string | Buffer): string {
-  return createHash("sha256").update(input).digest("hex");
-}
 
 function assertId(value: string, field: string): string {
   if (typeof value !== "string" || !ID_RE.test(value)) {

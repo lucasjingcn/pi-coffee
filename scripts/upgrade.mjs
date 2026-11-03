@@ -20,6 +20,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { loadDaemonEnv } from "./lib/env.mjs";
+import { sleep } from "./lib/cli.mjs";
 import {
   LAUNCHD_NEXT_STEP,
   detectSupervisor,
@@ -53,7 +54,6 @@ const base = new URL(process.env.PI_COFFEE_URL || `http://127.0.0.1:${process.en
 const headers = { "content-type": "application/json" };
 if (process.env.PI_COFFEE_TOKEN) headers["x-pi-coord-token"] = process.env.PI_COFFEE_TOKEN;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function request(path, body) {
   const response = await fetch(`${base}${path}`, {
