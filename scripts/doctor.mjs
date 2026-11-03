@@ -9,12 +9,15 @@
  *   npm run doctor
  */
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { apiKeyVarFor, envFilePath, loadDaemonEnv } from "./lib/env.mjs";
 import { resolvePiBin, piVersion } from "./lib/pi.mjs";
 import { resolveBashBin } from "./lib/bash.mjs";
+
+const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 
 function run(cmd, args) {
   try {
@@ -109,6 +112,67 @@ for (const c of checks) {
   if (!c.ok && c.hint) console.log(`       ${" ".repeat(width)}  -> ${c.hint}`);
 }
 console.log(loaded ? `\n(settings loaded from ${envFile})` : `\n(no settings file at ${envFile}; using the process environment)`);
+
+// --- MCP clients (informational) ---
+// A missing registration does not break the daemon, so it never changes the exit code; it is
+// the step people forget after installing the daemon or adding a new client.
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+function mcpClients() {
+  const rows = [];
+  const codexConfig = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+  if (existsSync(codexConfig) || run("codex", ["--version"]) !== undefined) {
+    rows.push({
+      name: "codex",
+      registered: existsSync(codexConfig) && /\[mcp_servers\.pi\]/.test(readFileSync(codexConfig, "utf8")),
+      hint: "node scripts/register-clients.mjs",
+    });
+  }
+  const piConfig = join(homedir(), ".pi", "agent", "mcp.json");
+  if (existsSync(join(homedir(), ".pi")) || existsSync(join(homedir(), ".local", "bin", "pi"))) {
+    rows.push({
+      name: "pi",
+      registered: Boolean(readJson(piConfig)?.mcpServers?.pi),
+      hint: "node scripts/register-clients.mjs",
+    });
+  }
+  // DSH never writes itself from the installer: `/internal/health` users run the explicit command.
+  const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
+  if (existsSync(dshHome)) {
+    rows.push({
+      name: "dsh",
+      registered: false,
+      hint: `node ${join(repoRoot, "scripts", "setup-dsh.mjs")} --write`,
+      detected: dshHome,
+    });
+  }
+  const claudeConfig = join(homedir(), ".claude.json");
+  const claudeJson = readJson(claudeConfig);
+  if (existsSync(claudeConfig)) {
+    rows.push({ name: "claude", registered: Boolean(claudeJson?.mcpServers?.pi), hint: "node scripts/register-clients.mjs" });
+  }
+  const cursorConfig = join(homedir(), ".cursor", "mcp.json");
+  if (existsSync(join(homedir(), ".cursor"))) {
+    rows.push({ name: "cursor", registered: Boolean(readJson(cursorConfig)?.mcpServers?.pi), hint: "node scripts/register-clients.mjs" });
+  }
+  return rows;
+}
+const clientRows = mcpClients();
+console.log("\nMCP clients");
+if (clientRows.length === 0) {
+  console.log("  none detected. Connect an MCP client (Codex, DSH, Claude, Cursor, ...), then run");
+  console.log("  `node scripts/register-clients.mjs` and restart it.");
+} else {
+  for (const row of clientRows) {
+    const state = row.registered ? "registered" : row.detected ? `detected, not registered -> ${row.hint}` : `not registered -> ${row.hint}`;
+    console.log(`  ${row.name.padEnd(8)} ${state}`);
+  }
+}
 
 const failed = checks.filter((c) => !c.ok).length;
 console.log(failed === 0 ? "\nAll checks passed." : `\n${failed} check(s) failed.`);

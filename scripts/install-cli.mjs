@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Install a pinned, user-facing pi independently of the daemon checkout. */
 import {execFileSync} from 'node:child_process';
-import {chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {homedir, tmpdir} from 'node:os';
 import {basename, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -59,13 +59,26 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
   }
   mkdirSync(binDir, {recursive: true});
   mkdirSync(prefix, {recursive: true});
-  // Keep the runtime independent of disposable installer/cache paths.
+  // Keep the runtime independent of disposable installer/cache paths. Some Node builds
+  // (Homebrew's, linked against libnode.dylib) cannot be copied on their own: the copy fails
+  // to start with a dyld error. The Unix launcher already prefers a supported node on PATH,
+  // so on Unix a missing private runtime is a documented warning, not a failed install;
+  // Windows launches the private runtime directly and keeps the hard failure.
   const runtimeDir = join(prefix, 'runtime');
   const runtime = join(runtimeDir, platform === 'win32' ? 'node.exe' : 'node');
   mkdirSync(runtimeDir, {recursive: true});
   if (nodePath !== runtime) copyFileSync(nodePath, runtime);
   if (platform !== 'win32') chmodSync(runtime, 0o755);
-  if (execFileSync(runtime, ['-p', 'process.versions.node'], {encoding: 'utf8'}).trim() !== nodeVersion) throw new Error('Private Node runtime verification failed');
+  let privateRuntime = true;
+  try {
+    privateRuntime = execFileSync(runtime, ['-p', 'process.versions.node'], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']}).trim() === nodeVersion;
+  } catch {
+    privateRuntime = false;
+  }
+  if (!privateRuntime) {
+    rmSync(runtime, {force: true});
+    if (platform === 'win32') throw new Error('Private Node runtime verification failed');
+  }
   copyFileSync(join(root, 'scripts', 'lib', 'env.mjs'), join(prefix, 'env.mjs'));
   writeFileSync(launcher, launcherSource);
   if (platform === 'win32') {
@@ -93,11 +106,14 @@ export function installCli({home = homedir(), platform = process.platform, nodeP
   // Verify from outside the checkout, without shell initialization or a model call.
   const result = platform === 'win32' ? execFileSync(runtime, [launcher, '--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim() : execFileSync(entry, ['--version'], {cwd: tmpdir(), encoding: 'utf8', timeout: 15000}).trim();
   if (result !== version) throw new Error(`Unexpected installed pi version: ${result}`);
-  return {entry, binDir, version};
+  return {entry, binDir, version, privateRuntime};
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const result = installCli();
   console.log(`Installed pi ${result.version}: ${result.entry}`);
+  if (!result.privateRuntime) {
+    console.log('note: this Node build cannot be copied (dynamic libnode); the pi command uses the Node on PATH.');
+  }
   console.log('Open a new terminal, then run pi from any project directory.');
 }

@@ -5,9 +5,11 @@ import { platform } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// Setup options pass through: `npm run install:local -- --provider deepseek --api-key sk-...`.
+const forwarded = process.argv.slice(2);
 const target = platform() === "win32"
-  ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", fileURLToPath(new URL("../deploy/windows/install.ps1", import.meta.url))]]
-  : ["bash", [fileURLToPath(new URL("../install.sh", import.meta.url))]];
+  ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", fileURLToPath(new URL("../deploy/windows/install.ps1", import.meta.url)), ...forwarded]]
+  : ["bash", [fileURLToPath(new URL("../install.sh", import.meta.url)), ...forwarded]];
 const result = spawnSync(target[0], target[1], { cwd: root, stdio: "inherit" });
 if (result.error) throw result.error;
 process.exitCode = result.status ?? 1;

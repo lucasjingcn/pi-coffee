@@ -14,6 +14,30 @@ All notable changes to pi-coffee are recorded here. The format follows
   with the first broken seq. `AuditLog.verify()` previously had no production
   caller, so an edited, reordered or truncated entry was detectable only from the
   test suite.
+- `npm run demo` (`scripts/demo.mjs`) runs the deterministic offline smoke test, so
+  a fresh install can be proven end to end (daemon, worktrees, acceptance files,
+  locks, verify/merge gates, persistence) without a model call or a provider key.
+- `scripts/register-clients.mjs` (`npm run register:clients`) is the single MCP
+  registration path: it registers the stdio proxy as `pi` with Codex and the pi
+  CLI when they are installed, reports DSH/Claude Code/Cursor with the exact
+  command or snippet instead of writing their configuration, and restores the
+  Codex config when an add fails.
+- One-line install without a git checkout: `scripts/bootstrap.sh` fetches the newest release into
+  `~/.pi-coffee/app` and runs the same installer (`curl -fsSL
+  https://raw.githubusercontent.com/lucasjingcn/pi-coffee/main/scripts/bootstrap.sh | bash`). It
+  prefers the release tarball, falls back to the `main` archive, reattaches the terminal so the
+  provider prompts still work under `curl | bash`, and accepts `PI_COFFEE_BOOTSTRAP_ARCHIVE` for
+  mirrors and tests.
+- The package is publishable: `pi-coffee` is a real CLI (`install`, `setup`, `doctor`,
+  `register-clients`, `start`, `status`, `demo`, `version`) instead of a private daemon binary, with
+  a `files` whitelist (305 kB tarball) and `prepack` build. The release workflow publishes to npm
+  with provenance when `NPM_TOKEN` is configured and skips cleanly when it is not.
+- `npm run doctor` reports which MCP clients are registered (Codex, pi, DSH, Claude Code, Cursor)
+  and the exact command for each missing one. The section is informational and never changes the
+  exit code, because an unregistered client does not make the daemon unhealthy.
+- Both READMEs now open with the one-line installer, the scripted-install flags, the credential-free
+  `npm run demo` check, a copy-paste first-worker prompt and a read-only console screenshot
+  (`docs/images/dashboard.png`).
 
 ### Fixed
 
@@ -186,6 +210,36 @@ All notable changes to pi-coffee are recorded here. The format follows
 - `npm run upgrade` cancels the drain when the shutdown is refused, and a
   truncated drain-status reply no longer crash-loops the poller; the health probe
   prints the endpoint it actually probed.
+- `npm run install:local` no longer aborts on a machine without Codex, and no
+  longer leaves a half-installed tree when no provider credential is configured:
+  a missing client is skipped, a missing credential is a warning, and both are
+  named with the exact follow-up command in the final summary.
+- The user-facing `pi` installer no longer fails with a `dyld: Library not loaded`
+  error when the Node on PATH cannot be copied into its private prefix (Homebrew's
+  `node` links `libnode.dylib`). On Unix the unusable copy is removed and the
+  launcher uses the supported Node on PATH, as it already preferred at runtime;
+  Windows keeps the hard failure because it launches the private runtime directly.
+
+### Changed
+
+- `npm run install:local` is client-agnostic and scriptable: it registers the MCP
+  server with every client it detects (a missing Codex is skipped, not fatal),
+  accepts setup options non-interactively (`--provider`, `--api-key`, `--model`,
+  `--thinking`, `--skip-setup` forwarded through `npm run install:local -- …`), and
+  ends with a Next-steps summary that names the endpoint, logs, restart command and
+  the credential follow-up when one is needed.
+
+- The documentation is restructured around a short README (960 → ~235 lines, same
+  for the Chinese version). Tool, configuration, coordination and operations
+  detail moved to `docs/reference/` and `docs/development.md` instead of being
+  appended to the front page. The docs moved out of the README were already in
+  it, so no claim was dropped; duplicated rows, a list item broken by a later
+  insertion, a section stranded below the license, and cross-project policy text
+  left over from the orchestration rules are gone.
+- `tests/docs-consistency.test.mjs` now enforces the new layout: all tools in the
+  reference and both READMEs, all `PI_COFFEE_*` names in
+  `docs/reference/configuration.md`, a README line cap, and every relative
+  Markdown link resolving to a real file.
 
 ## [0.3.1] - 2026-11-01
 

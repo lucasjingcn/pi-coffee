@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,realpathSync,copyFileSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,realpathSync,copyFileSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {installCli} from '../scripts/install-cli.mjs';
@@ -60,10 +60,15 @@ test('all installation entry points include user CLI setup',()=>{
  assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$npm run install:cli/);
 });
 test('all installation entry points register the MCP server with pi',()=>{
- assert.match(readFileSync('install.sh','utf8'),/\$PI_BIN" mcp add pi/);
+ // Unix registers through the shared helper so a missing Codex cannot abort the install.
  const installer=readFileSync('install.sh','utf8');
- assert.match(installer,/codex_backup=/, "Codex config is backed up before re-registering");
- assert.doesNotMatch(installer,/\$PI_BIN" mcp remove/, "pi mcp add replaces, so no destructive remove");
+ assert.match(installer,/scripts\/register-clients\.mjs/, 'install.sh uses the shared registration helper');
+ assert.doesNotMatch(installer,/Codex CLI is required/, 'a missing client must not abort the install');
+ const registrar=readFileSync('scripts/register-clients.mjs','utf8');
+ assert.match(registrar,/mcp", "add", SERVER/, 'the helper registers the MCP server');
+ assert.match(registrar,/const backup =/, 'Codex config is backed up before re-registering');
+ assert.match(registrar,/function registerPi/, 'the helper registers pi');
+ assert.doesNotMatch(registrar,/piArgv, "mcp", "remove"/, 'pi mcp add replaces, so no destructive remove');
  assert.match(readFileSync('deploy/windows/install.ps1','utf8'),/\$piCmd mcp add pi/);
 });
 
@@ -98,6 +103,19 @@ test('user command survives removal of the install-time Node path with no PATH r
  rmSync(transient);
  assert.equal(execFileSync(entry,['--version'],{cwd:tmpdir(),env:{...process.env,PATH:'/usr/bin:/bin'},encoding:'utf8'}).trim(),version);
  assert.ok(!readFileSync(entry,'utf8').includes(transient));
+}));
+
+test('a Node build that cannot be copied still yields a working pi command',()=>fixture(home=>{
+ // Homebrew-style Node links libnode.dylib, so the copied runtime cannot start. On Unix the
+ // launcher prefers a supported Node on PATH; the install must not fail.
+ const marker=join(tmpdir(),`pi-copy-${process.pid}-${Date.now()}`);
+ const fragile=join(home,'fragile-node');
+ writeFileSync(fragile,`#!/bin/sh\nif [ ! -f ${marker} ]; then : > ${marker}; echo 22.19.0; exit 0; fi\nexit 1\n`,{mode:0o755});
+ const {entry,privateRuntime}=installCli({home,platform:'linux',nodePath:fragile,configurePath:false});
+ assert.equal(privateRuntime,false);
+ assert.ok(!existsSync(join(home,'.local/share/pi-cli/runtime/node')),'the unusable private runtime is removed');
+ const env={...process.env,HOME:home,PI_COFFEE_ENV_FILE:join(home,'env')};
+ assert.equal(execFileSync(entry,['--version'],{cwd:tmpdir(),env,encoding:'utf8'}).trim(),version);
 }));
 
 test('installer rejects a runtime below the pi engine requirement',()=>fixture(home=>{

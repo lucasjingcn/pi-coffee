@@ -14,6 +14,9 @@
  *   npm run setup -- --provider deepseek --model deepseek-flash --api-key sk-...
  *   DEEPSEEK_API_KEY=sk-... PI_COFFEE_MODEL=deepseek-flash npm run setup -- --non-interactive
  */
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { apiKeyVarFor, envFilePath, loadEnvFile, writeEnvFile } from "./lib/env.mjs";
 import { resolvePiBin } from "./lib/pi.mjs";
@@ -141,13 +144,22 @@ async function main() {
     thinking = await ask("Thinking level (off|minimal|low|medium|high|xhigh|max)", thinking);
   }
 
+  // An existing pi login (`pi`'s own /login, or auth.json) is a valid credential source: workers
+  // inherit it, so a blank API-key answer is not an error for an interactive install.
+  let usingPiLogin = false;
   if (!apiKey) {
-    console.error(`\nNo API key provided. Pass --api-key, set ${keyVar}, or run without --non-interactive.`);
-    process.exit(2);
+    const authPath = join(homedir(), ".pi", "agent", "auth.json");
+    if (interactive && existsSync(authPath)) {
+      usingPiLogin = true;
+      console.log(`\nNo API key entered; keeping pi's existing login at ${authPath}.`);
+    } else {
+      console.error(`\nNo API key provided. Pass --api-key, set ${keyVar}, or run without --non-interactive.`);
+      process.exit(2);
+    }
   }
 
   const entries = { ...existing };
-  entries[keyVar] = apiKey;
+  if (!usingPiLogin) entries[keyVar] = apiKey;
   entries.PI_COFFEE_PROVIDER = provider;
   entries.PI_COFFEE_MODEL = model;
   entries.PI_COFFEE_THINKING = thinking;
@@ -162,7 +174,7 @@ async function main() {
   console.log(`  provider:  ${provider}`);
   console.log(`  model:     ${model}`);
   console.log(`  thinking:  ${thinking}`);
-  console.log(`  API key:   ${keyVar} = ${mask(apiKey)}`);
+  console.log(`  API key:   ${usingPiLogin ? "using pi's existing login" : `${keyVar} = ${mask(apiKey)}`}`);
   if (entries.PI_COFFEE_PI_BIN) console.log(`  pi binary: ${entries.PI_COFFEE_PI_BIN}`);
   console.log("\nRestart the daemon to pick up the updated settings.");
 }
