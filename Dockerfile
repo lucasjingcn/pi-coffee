@@ -19,7 +19,7 @@ RUN apt-get update \
 
 # Bundle pi so users do not install it separately. Pin the version CI verifies
 # instead of floating to whatever the registry calls latest.
-ARG PI_VERSION=1.4.0
+ARG PI_VERSION=1.5.0
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
 WORKDIR /app

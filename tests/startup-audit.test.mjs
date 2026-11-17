@@ -78,6 +78,17 @@ test('container health authenticates at the configured port and fails unauthoriz
   assert.match(compose, /scripts\/container-health\.mjs/);
 }));
 
+test('the image bundles the pi version the extension is type-checked against', async () => {
+  const docker = await readFile('Dockerfile', 'utf8');
+  const pinned = docker.match(/^ARG PI_VERSION=(\S+)$/m);
+  assert.ok(pinned, 'Dockerfile pins PI_VERSION');
+  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+  // A dependency bump alone would leave the image on the previous pi while
+  // typecheck:extensions covers the new one, so both pins must move together.
+  assert.equal(pinned[1], pkg.devDependencies['@earendil-works/pi-coding-agent'],
+    'Dockerfile PI_VERSION must equal the @earendil-works/pi-coding-agent devDependency');
+});
+
 test('doctor uses daemon env precedence and background checks require persisted credentials', async () => fixture(async (dir) => {
   const file = join(dir, 'env');
   // A private HOME keeps a real ~/.pi/agent/auth.json from supplying credentials:

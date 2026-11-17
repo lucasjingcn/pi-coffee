@@ -377,6 +377,13 @@ Operations:
   reference and both READMEs, all `PI_COFFEE_*` names in
   `docs/reference/configuration.md`, a README line cap, and every relative
   Markdown link resolving to a real file.
+- Dependabot bumps `typebox` 1.4.3 → 1.4.4 and `@earendil-works/pi-coding-agent`
+  1.4.0 → 1.5.0. `Dockerfile`'s `PI_VERSION` moves with the devDependency, so the
+  runtime image ships the same pi that `typecheck:extensions` checks the
+  coordinator extension against.
+- `tests/startup-audit.test.mjs` fails when `Dockerfile`'s `PI_VERSION` and that
+  devDependency disagree, so a dependency bump can no longer leave the image on a
+  pi version CI never type-checked.
 
 ## [0.3.1] - 2026-11-01
 
